@@ -14,3 +14,10 @@ same file encrypted with qpdf (through pikepdf 10, `static_id=True`):
 | `enc_rc4_128_pw` | RC4 128 bit, R3 | `pw` |
 
 The owner password of all of them is `o`.
+
+## CCITT fax
+
+`fax_g3_1d.pdf`, `fax_g3_2d.pdf` and `fax_g4.pdf` (1728x300, K = 0, 4, -1) are the strips of
+Ghostscript `-sDEVICE=tiffg3 / tiffg32d / tiffg4` output wrapped by `scripts/tiff2pdf-ccitt.py`.
+`fax_ref.pbm` is Ghostscript's `pbmraw` render of the same PostScript page; the decoder must
+reproduce it exactly (all three, verified 0 of 518,400 pixels differ).

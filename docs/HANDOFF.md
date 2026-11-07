@@ -44,10 +44,9 @@ images added after). Source map is in `architecture.md`. Key rules learned the h
   (RC4 40/128, AES-128, AES-256 R5/R6) decrypt to text identical to the plain file.
 
 ### Known gaps in pdf-zig
-- **CCITT (`src/ccitt.zig`) is committed but unvalidated against real fax data**: only unit tests
-  with bit strings worked out by hand. Validate with a real G4 PDF (7 corpus files use CCITT) by
-  comparing `pdfimg` output with `pdftoppm`, and with ImageMagick-made files
-  (`convert x.png -monochrome -compress Group4 out.pdf`; PIL is not installed system-wide).
+- CCITT (`src/ccitt.zig`) is **validated** (2026-11-07): G3 1D, G3 2D and G4 pages made by Ghostscript
+  decode bit-exact (test "CCITT G3 1D, G3 2D and G4 ..."; fixtures in `test/fixtures/fax_*`).
+  Not covered: `/EncodedByteAlign`, damaged data, and real scanner output (no CCITT PDFs on this machine).
 - JBIG2 is not decoded. JPEG/JPX are left to the caller (`image.decode` returns `.codec`).
 - Mesh and function-based shadings, soft masks, vertical writing, predefined CJK CMaps: skipped.
 - Text clipping modes, `d1` colour suppression, Symbol/ZapfDingbats built-in encodings.
@@ -107,7 +106,7 @@ Build/run (worktree, ReleaseSafe, about 6 minutes cold because it builds every G
   use a `[x]` bracket trick.
 
 ## Suggested next steps (ask the maintainer to confirm the order)
-1. Validate CCITT on real data; if good, tag nothing yet, just commit.
+1. ~~Validate CCITT~~ (done, see Known gaps).
 2. Fix or drop the new failing dkde test; investigate the two old ones if wanted.
 3. Review the dkde branch with the maintainer, then decide: merge into their tree, delete zpdf.
 4. Push pdf-zig; tag a release (v0.1.0) only if asked; follow the md-zig/gtroff-zig release recipe

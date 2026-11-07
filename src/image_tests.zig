@@ -197,3 +197,38 @@ test "inline images stay valid after other pages are rendered (the scratch arena
         try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255, 0, 0, 255, 255 }, px.rgba);
     };
 }
+
+test "CCITT G3 1D, G3 2D and G4 match the bitmap Ghostscript rendered" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ref = @embedFile("fax_ref.pbm");
+    const w: usize = 1728;
+    const h: usize = 300;
+    const row = (w + 7) / 8;
+    const bits = ref[ref.len - row * h ..]; // raw PBM: 1 = black
+    for ([_][]const u8{ @embedFile("fax_g3_1d.pdf"), @embedFile("fax_g3_2d.pdf"), @embedFile("fax_g4.pdf") }) |bytes| {
+        var doc = try pdf.Document.open(a, bytes, .{});
+        const list = try pdf.pages.PageList.build(&doc);
+        var rend = pdf.Renderer.init(&doc, .{});
+        var dl = try rend.render(a, pdf.pages.page(&doc, list, 0).?);
+        var seen = false;
+        for (dl.commands) |c| if (c == .image) {
+            const res = try pdf.image.decode(&doc, a, c.image);
+            const p = res.pixels;
+            try testing.expectEqual(w, p.width);
+            try testing.expectEqual(h, p.height);
+            var bad: usize = 0;
+            for (0..h) |y| for (0..w) |x| {
+                const black = (bits[y * row + x / 8] >> @intCast(7 - x % 8)) & 1 == 1;
+                if ((p.rgba[(y * w + x) * 4] < 128) != black) bad += 1;
+            };
+            try testing.expectEqual(@as(usize, 0), bad);
+            seen = true;
+        };
+        try testing.expect(seen);
+        rend.deinit();
+        dl.deinit();
+        doc.deinit();
+    }
+}
