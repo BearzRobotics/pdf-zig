@@ -7,6 +7,7 @@ pub const object = @import("object.zig");
 pub const filters = @import("filters.zig");
 pub const document = @import("document.zig");
 pub const pages = @import("pages.zig");
+pub const content = @import("content.zig");
 
 pub const Document = document.Document;
 pub const Options = document.Options;
@@ -20,5 +21,6 @@ test {
     _ = @import("filters.zig");
     _ = @import("document.zig");
     _ = @import("pages.zig");
+    _ = @import("content.zig");
     _ = @import("doc_tests.zig");
 }
