@@ -20,6 +20,7 @@ pub const display = @import("display.zig");
 pub const interp = @import("interp.zig");
 pub const text = @import("text.zig");
 pub const image = @import("image.zig");
+pub const ccitt = @import("ccitt.zig");
 
 pub const Renderer = interp.Renderer;
 pub const DisplayList = display.DisplayList;
@@ -49,6 +50,7 @@ test {
     _ = @import("interp.zig");
     _ = @import("text.zig");
     _ = @import("image.zig");
+    _ = @import("ccitt.zig");
     _ = @import("image_tests.zig");
     _ = @import("interp_tests.zig");
     _ = @import("doc_tests.zig");

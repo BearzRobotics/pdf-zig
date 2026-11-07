@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
 const color = @import("color.zig");
 const display = @import("display.zig");
+const ccitt = @import("ccitt.zig");
 const doc_mod = @import("document.zig");
 const Document = doc_mod.Document;
 const Dict = object.Dict;
@@ -48,9 +49,22 @@ pub const Result = union(enum) {
 /// Decodes `img`. Allocations (the pixels and temporaries) come from `a`.
 pub fn decode(doc: *Document, a: Allocator, img: display.Image) Error!Result {
     if (@as(u64, img.width) * img.height > max_pixels) return error.TooBig;
-    const dec = try doc.decodeStreamIn(a, img.stream);
+    var dec = try doc.decodeStreamIn(a, img.stream);
+    if (dec.rest.len == 1 and (std.mem.eql(u8, dec.rest[0].name, "CCITTFaxDecode") or std.mem.eql(u8, dec.rest[0].name, "CCF"))) {
+        // Fax data is decoded here: it needs no codec library.
+        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, img), .rest = &.{} };
+    }
     if (dec.rest.len > 0) return .{ .codec = .{ .name = dec.rest[0].name, .data = dec.data, .parms = dec.rest[0].parms } };
-    const bpc: u8 = if (img.is_mask) 1 else blk: {
+    const is_fax = blk: {
+        const f = (doc.get(img.stream.dict, "Filter") orelse break :blk false);
+        const last = switch (f) {
+            .name => |n| n,
+            .array => |arr| if (arr.len > 0) (doc.resolve(arr[arr.len - 1]).asName() orelse "") else "",
+            else => "",
+        };
+        break :blk std.mem.eql(u8, last, "CCITTFaxDecode") or std.mem.eql(u8, last, "CCF");
+    };
+    const bpc: u8 = if (img.is_mask or is_fax) 1 else blk: {
         const b = doc.getInt(img.stream.dict, "BitsPerComponent") orelse doc.getInt(img.stream.dict, "BPC") orelse 8;
         break :blk switch (b) {
             1, 2, 4, 8, 16 => @intCast(b),
@@ -58,6 +72,38 @@ pub fn decode(doc: *Document, a: Allocator, img: display.Image) Error!Result {
         };
     };
     return .{ .pixels = try fromSamplesBpc(doc, a, img, dec.data, img.width, img.height, @intCast(img.space.components()), bpc) };
+}
+
+/// 1-bit samples from CCITTFaxDecode data and its `/DecodeParms` (7.4.6).
+fn faxSamples(doc: *Document, a: Allocator, data: []const u8, parms: Dict, img: display.Image) Error![]const u8 {
+    const boolOf = struct {
+        fn f(d: *Document, p: Dict, k: []const u8) bool {
+            const v = d.get(p, k) orelse return false;
+            return v == .boolean and v.boolean;
+        }
+    }.f;
+    const p: ccitt.Params = .{
+        .k = @intCast(std.math.clamp(doc.getInt(parms, "K") orelse 0, -1, 1 << 20)),
+        .columns = @intCast(std.math.clamp(doc.getInt(parms, "Columns") orelse 1728, 1, 1 << 20)),
+        .rows = img.height,
+        .black_is_1 = boolOf(doc, parms, "BlackIs1"),
+        .byte_align = boolOf(doc, parms, "EncodedByteAlign"),
+    };
+    const raw = ccitt.decode(a, data, p, max_pixels / 8) catch |e| return switch (e) {
+        error.TooLarge => error.TooBig,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    // The image's rows are `Width` pixels wide; the fax rows are `Columns` wide.
+    if (p.columns == img.width) return raw;
+    const src_stride = (@as(usize, p.columns) + 7) / 8;
+    const dst_stride = (@as(usize, img.width) + 7) / 8;
+    const out = try a.alloc(u8, dst_stride * img.height);
+    @memset(out, if (p.black_is_1) 0 else 0xFF);
+    for (0..img.height) |y| {
+        const n = @min(src_stride, dst_stride);
+        if ((y + 1) * src_stride <= raw.len) @memcpy(out[y * dst_stride ..][0..n], raw[y * src_stride ..][0..n]);
+    }
+    return out;
 }
 
 /// Pixels from 8-bit samples decoded by the caller's codec (`ncomp` samples per
