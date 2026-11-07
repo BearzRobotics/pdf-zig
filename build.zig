@@ -13,6 +13,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // A small program for trying the library out: `zig build` then `zig-out/bin/pdfinfo FILE`.
+    const pdfinfo = b.addExecutable(.{
+        .name = "pdfinfo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfinfo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfinfo);
+
     const test_step = b.step("test", "Run unit tests");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);
