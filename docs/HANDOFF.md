@@ -46,7 +46,9 @@ images added after). Source map is in `architecture.md`. Key rules learned the h
 ### Known gaps in pdf-zig
 - CCITT (`src/ccitt.zig`) is **validated** (2026-11-07): G3 1D, G3 2D and G4 pages made by Ghostscript
   decode bit-exact (test "CCITT G3 1D, G3 2D and G4 ..."; fixtures in `test/fixtures/fax_*`).
-  Not covered: `/EncodedByteAlign`, damaged data, and real scanner output (no CCITT PDFs on this machine).
+  Also checked against poppler's `pdfimages` on 14 real CCITT PDFs from the pdf.js and PDFBox test
+  corpora (scans, stencils, inline `/CCF`, `EndOfBlock false`): every image identical or exact
+  inverse (stencil polarity), no errors. Not covered: `/EncodedByteAlign`, damaged data.
 - JBIG2 is not decoded. JPEG/JPX are left to the caller (`image.decode` returns `.codec`).
 - Mesh and function-based shadings, soft masks, vertical writing, predefined CJK CMaps: skipped.
 - Text clipping modes, `d1` colour suppression, Symbol/ZapfDingbats built-in encodings.
@@ -68,12 +70,11 @@ Done (**committed on branch `pdf-zig-renderer`, never merged or pushed**):
 
 Results: `dkde-pdfcheck` over 80 PDFs, 4 pages each: 205 pages drawn, 1 failure (a file that
 is not a PDF), 8.3 s. Side by side with poppler the pages match closely; the old renderer
-substituted fonts and broke composite-font spacing. CCITT images are drawn as pale boxes
-(`image-ccitt` note, 7 files) until `pdf.image.decode` handles them (it should, once the
-decoder is validated).
+substituted fonts and broke composite-font spacing. CCITT images now draw (14 real files, no `image-ccitt` notes). Known difference: `/CalGray` with a
+non-white white point is drawn plain (poppler tints it cream).
 
-**Tests: `zig build test` in the worktree gives 353 pass, 5 skipped, 3 fail**, all in the
-pdfrender test binary:
+**Tests: all pass as of commit 448cd6e** (the three failures below were fixed: Type 1 glyph 0 was
+treated as unmapped, small images were smoothed, and the gradient test PDF was malformed). History:
 - `render.test.inline images are drawn, with their abbreviated keys` and
   `type1.test.a real Type 1 font draws glyphs`: dkde's own decision record
   (`docs/decisions/0001-architecture-realignment.md`) says these two **already failed before this
@@ -107,7 +108,7 @@ Build/run (worktree, ReleaseSafe, about 6 minutes cold because it builds every G
 
 ## Suggested next steps (ask the maintainer to confirm the order)
 1. ~~Validate CCITT~~ (done, see Known gaps).
-2. Fix or drop the new failing dkde test; investigate the two old ones if wanted.
+2. ~~Fix the failing dkde tests~~ (done).
 3. Review the dkde branch with the maintainer, then decide: merge into their tree, delete zpdf.
 4. Push pdf-zig; tag a release (v0.1.0) only if asked; follow the md-zig/gtroff-zig release recipe
    (`git archive` tarball attached to a GitHub release, URL+hash dependency).
