@@ -47,7 +47,7 @@ pub const Page = struct {
 };
 
 const Inherited = struct {
-    resources: ?Dict = null,
+    resources: ?Object = null,
     media_box: ?Object = null,
     crop_box: ?Object = null,
     rotate: ?Object = null,
@@ -113,7 +113,7 @@ pub const PageList = struct {
 
     fn inheritFrom(parent: Inherited, d: Dict) Inherited {
         return .{
-            .resources = if (d.get("Resources")) |r| (r.asDict() orelse parent.resources) else parent.resources,
+            .resources = d.get("Resources") orelse parent.resources,
             .media_box = d.get("MediaBox") orelse parent.media_box,
             .crop_box = d.get("CropBox") orelse parent.crop_box,
             .rotate = d.get("Rotate") orelse parent.rotate,
@@ -150,7 +150,7 @@ pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
         .media_box = media,
         .crop_box = if (crop.width() > 0 and crop.height() > 0) crop else media,
         .rotate = rot,
-        .resources = e.inh.resources orelse .{},
+        .resources = if (e.inh.resources) |r| (doc.resolve(r).asDict() orelse .{}) else .{},
     };
 }
 

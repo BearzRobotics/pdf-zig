@@ -25,6 +25,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfinfo);
 
+    const pdftext = b.addExecutable(.{
+        .name = "pdftext",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdftext.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdftext);
+
+    const pdfdump = b.addExecutable(.{
+        .name = "pdfdump",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfdump.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfdump);
+
     const test_step = b.step("test", "Run unit tests");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);

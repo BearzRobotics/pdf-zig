@@ -13,6 +13,12 @@ pub const cmap = @import("cmap.zig");
 pub const font = @import("font.zig");
 pub const function = @import("function.zig");
 pub const color = @import("color.zig");
+pub const display = @import("display.zig");
+pub const interp = @import("interp.zig");
+pub const text = @import("text.zig");
+
+pub const Renderer = interp.Renderer;
+pub const DisplayList = display.DisplayList;
 
 pub const Document = document.Document;
 pub const Options = document.Options;
@@ -32,5 +38,8 @@ test {
     _ = @import("font.zig");
     _ = @import("function.zig");
     _ = @import("color.zig");
+    _ = @import("display.zig");
+    _ = @import("interp.zig");
+    _ = @import("text.zig");
     _ = @import("doc_tests.zig");
 }

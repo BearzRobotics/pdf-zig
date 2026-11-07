@@ -292,3 +292,22 @@ test "page contents: one stream, several streams, none" {
     try testing.expectEqualStrings("0 g\n1 0 0 RG\n", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 1).?));
     try testing.expectEqualStrings("", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 2).?));
 }
+
+test "page resources given as an indirect object, inherited" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /Resources 5 0 R >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /Resources 6 0 R >>",
+        "<< /Font << /F1 7 0 R >> >>",
+        "<< /XObject << >> >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    try testing.expect(pdf.pages.page(&doc, list, 0).?.resources.has("Font")); // inherited, through a reference
+    try testing.expect(pdf.pages.page(&doc, list, 1).?.resources.has("XObject")); // its own, through a reference
+}
