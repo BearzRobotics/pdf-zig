@@ -47,6 +47,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfdump);
 
+    const pdfmark = b.addExecutable(.{
+        .name = "pdfmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfmark);
+
+    const pdffill = b.addExecutable(.{
+        .name = "pdffill",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdffill.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdffill);
+
     const pdfsvg = b.addExecutable(.{
         .name = "pdfsvg",
         .root_module = b.createModule(.{

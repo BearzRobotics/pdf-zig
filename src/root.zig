@@ -27,6 +27,10 @@ pub const DisplayList = display.DisplayList;
 
 pub const Document = document.Document;
 pub const Options = document.Options;
+pub const write = @import("write.zig");
+pub const annot = @import("annot.zig");
+pub const outline = @import("outline.zig");
+pub const form = @import("form.zig");
 pub const Object = object.Object;
 pub const Dict = object.Dict;
 pub const Ref = object.Ref;
@@ -49,6 +53,10 @@ test {
     _ = @import("display.zig");
     _ = @import("interp.zig");
     _ = @import("text.zig");
+    _ = @import("write.zig");
+    _ = @import("annot.zig");
+    _ = @import("outline.zig");
+    _ = @import("form.zig");
     _ = @import("image.zig");
     _ = @import("ccitt.zig");
     _ = @import("image_tests.zig");
