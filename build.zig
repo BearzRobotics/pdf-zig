@@ -58,6 +58,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfsvg);
 
+    const pdfimg = b.addExecutable(.{
+        .name = "pdfimg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfimg.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfimg);
+
     // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
     for ([_][]const u8{ "plain", "enc_rc4_40", "enc_rc4_128", "enc_aes_128", "enc_aes_256", "enc_aes_256_pw", "enc_rc4_128_pw" }) |name| {
         mod.addAnonymousImport(b.fmt("{s}.pdf", .{name}), .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}.pdf", .{name})) });

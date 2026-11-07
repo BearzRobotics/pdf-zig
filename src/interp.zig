@@ -894,11 +894,16 @@ const Run = struct {
         const h = doc_.getInt(st.dict, "Height") orelse doc_.getInt(st.dict, "H") orelse return;
         if (w <= 0 or h <= 0 or w > 1 << 20 or h > 1 << 20) return;
         const is_mask = if (doc_.get(st.dict, "ImageMask")) |m| (m == .boolean and m.boolean) else false;
+        const space: color.Space = if (is_mask) .gray else if (st.dict.get("ColorSpace") orelse st.dict.get("CS")) |cs|
+            try color.parse(doc_, cs, self.resources, 0)
+        else
+            .gray;
         try self.emit(.{ .image = .{
             .stream = st,
             .width = @intCast(w),
             .height = @intCast(h),
             .is_mask = is_mask,
+            .space = space,
             .fill = self.gs.fill.paint,
             .ctm = self.gs.ctm,
             .alpha = self.gs.fill_alpha,

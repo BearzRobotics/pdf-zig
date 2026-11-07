@@ -8,7 +8,7 @@ const display = pdf.display;
 
 /// A one-page PDF. Objects: 1 catalog, 2 pages, 3 page, 4 content stream,
 /// 5 and up: `extra` bodies (referenced from `resources`).
-fn page(a: Allocator, content: []const u8, resources: []const u8, extra: []const []const u8, page_extra: []const u8) ![]u8 {
+pub fn page(a: Allocator, content: []const u8, resources: []const u8, extra: []const []const u8, page_extra: []const u8) ![]u8 {
     var bodies: std.ArrayList([]const u8) = .empty;
     try bodies.append(a, "<< /Type /Catalog /Pages 2 0 R >>");
     try bodies.append(a, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
@@ -29,7 +29,7 @@ fn page(a: Allocator, content: []const u8, resources: []const u8, extra: []const
     return out.items;
 }
 
-const Rendered = struct {
+pub const Rendered = struct {
     doc: pdf.Document,
     rend: pdf.Renderer,
     list: display.DisplayList,
@@ -41,7 +41,7 @@ const Rendered = struct {
     }
 };
 
-fn render(bytes: []const u8) !*Rendered {
+pub fn render(bytes: []const u8) !*Rendered {
     const r = try testing.allocator.create(Rendered);
     errdefer testing.allocator.destroy(r);
     r.doc = try pdf.Document.open(testing.allocator, bytes, .{});
@@ -54,7 +54,7 @@ fn render(bytes: []const u8) !*Rendered {
     return r;
 }
 
-fn done(r: *Rendered) void {
+pub fn done(r: *Rendered) void {
     r.deinit();
     testing.allocator.destroy(r);
 }

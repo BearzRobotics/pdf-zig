@@ -188,6 +188,9 @@ pub const Image = struct {
     height: u32,
     /// Stencil mask: paint `fill` through the 1-bits (or 0-bits per /Decode).
     is_mask: bool,
+    /// The image's colour space, resolved with the resources in effect where it
+    /// was drawn (inline images may name one). DeviceGray for a stencil mask.
+    space: color.Space,
     fill: Paint,
     ctm: Matrix,
     alpha: f64,

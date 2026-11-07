@@ -57,6 +57,15 @@ pub fn main(init: std.process.Init) !u8 {
                 continue;
             };
             commands += dl.commands.len;
+            // Decode every image too (JPEG and the like are left to a codec).
+            var scratch = std.heap.ArenaAllocator.init(gpa);
+            defer scratch.deinit();
+            for (dl.commands) |c| if (c == .image) {
+                _ = pdf.image.decode(&doc, scratch.allocator(), c.image) catch {
+                    render_errors += 1;
+                };
+                _ = scratch.reset(.retain_capacity);
+            };
             dl.deinit();
         }
         std.debug.print("rendered: commands={d} page-errors={d}\n", .{ commands, render_errors });
