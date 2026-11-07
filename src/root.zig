@@ -8,6 +8,11 @@ pub const filters = @import("filters.zig");
 pub const document = @import("document.zig");
 pub const pages = @import("pages.zig");
 pub const content = @import("content.zig");
+pub const encoding = @import("encoding.zig");
+pub const cmap = @import("cmap.zig");
+pub const font = @import("font.zig");
+pub const function = @import("function.zig");
+pub const color = @import("color.zig");
 
 pub const Document = document.Document;
 pub const Options = document.Options;
@@ -22,5 +27,10 @@ test {
     _ = @import("document.zig");
     _ = @import("pages.zig");
     _ = @import("content.zig");
+    _ = @import("encoding.zig");
+    _ = @import("cmap.zig");
+    _ = @import("font.zig");
+    _ = @import("function.zig");
+    _ = @import("color.zig");
     _ = @import("doc_tests.zig");
 }
