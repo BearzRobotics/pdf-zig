@@ -246,3 +246,49 @@ test "damaged files never crash (seeded mutation)" {
         }
     }
 }
+
+test "page tree: inheritance, nesting, wrong counts, cycles" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 5 0 R 2 0 R] /Count 99 /MediaBox [0 0 300 400] /Rotate 90 /Resources << /Font << >> >> >>",
+        "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 /MediaBox [0 0 100 50] >>",
+        "<< /Type /Page /Parent 3 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /CropBox [50 50 5000 5000] /Rotate -90 >>",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    try testing.expectEqual(@as(usize, 2), list.entries.len); // /Count 99 is ignored; the cycle (2 0 R) ends
+    const p1 = pdf.pages.page(&doc, list, 0).?;
+    try testing.expectEqual(@as(f64, 100), p1.media_box.width()); // nearest /MediaBox wins
+    try testing.expectEqual(@as(u16, 90), p1.rotate); // inherited from the root
+    try testing.expect(p1.resources.has("Font"));
+    const s1 = p1.displaySize();
+    try testing.expectEqual(@as(f64, 50), s1.w); // rotated: width and height swap
+    const p2 = pdf.pages.page(&doc, list, 1).?;
+    try testing.expectEqual(@as(u16, 270), p2.rotate); // -90 is 270
+    try testing.expectEqual(@as(f64, 250), p2.crop_box.width()); // clipped to the media box
+    try testing.expect(pdf.pages.page(&doc, list, 2) == null);
+}
+
+test "page contents: one stream, several streams, none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+        "<< /Type /Page /Contents 6 0 R >>",
+        "<< /Type /Page /Contents [6 0 R 7 0 R] >>",
+        "<< /Type /Page >>",
+        "<< /Length 3 >>\nstream\n0 g\nendstream",
+        "<< /Length 6 >>\nstream\n1 0 0 RG\nendstream",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    try testing.expectEqualStrings("0 g", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 0).?));
+    try testing.expectEqualStrings("0 g\n1 0 0 RG\n", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 1).?));
+    try testing.expectEqualStrings("", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 2).?));
+}

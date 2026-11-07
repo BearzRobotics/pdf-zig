@@ -43,8 +43,9 @@ pub fn main(init: std.process.Init) !u8 {
         };
         if (r.rest.len > 0) image_codecs += 1;
     }
-    std.debug.print("{s}: objects={d} streams={d} undecodable={d} image-codec-streams={d} repaired={}\n", .{
-        args[1], doc.xref.count(), streams, failed, image_codecs, doc.repaired,
+    const list = try pdf.pages.PageList.build(&doc);
+    std.debug.print("{s}: pages={d} objects={d} streams={d} undecodable={d} image-codec-streams={d} repaired={}\n", .{
+        args[1], list.entries.len, doc.xref.count(), streams, failed, image_codecs, doc.repaired,
     });
     return 0;
 }
