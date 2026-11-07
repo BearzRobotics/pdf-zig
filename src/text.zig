@@ -50,6 +50,30 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
     }
 }
 
+/// Appends `s`, expanding the Latin ligature code points U+FB00..U+FB06 into
+/// letters (as `pdftotext` does), so that "ﬁle" is found when searching "file".
+fn appendText(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
+    var i: usize = 0;
+    while (i < s.len) {
+        // U+FB00..U+FB06 are the UTF-8 bytes EF AC 80..86.
+        if (i + 2 < s.len and s[i] == 0xEF and s[i + 1] == 0xAC and s[i + 2] >= 0x80 and s[i + 2] <= 0x86) {
+            const rep = switch (s[i + 2]) {
+                0x80 => "ff",
+                0x81 => "fi",
+                0x82 => "fl",
+                0x83 => "ffi",
+                0x84 => "ffl",
+                else => "st",
+            };
+            try out.appendSlice(a, rep);
+            i += 3;
+            continue;
+        }
+        try out.append(a, s[i]);
+        i += 1;
+    }
+}
+
 fn gapNeedsSpace(prev: Item, next: Item) bool {
     const gap = next.x0 - prev.x1;
     return gap > 0.15 * @max(prev.size, next.size);
@@ -69,7 +93,7 @@ fn contentOrder(a: Allocator, items: []const Item, out: *std.ArrayList(u8)) Allo
                 try out.append(a, ' ');
             }
         }
-        try out.appendSlice(a, it.text);
+        try appendText(a, out, it.text);
         prev = it;
     }
     if (out.items.len > 0) try out.append(a, '\n');
@@ -103,7 +127,7 @@ fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8)) Allocator.
             if (prev) |p| {
                 if (gapNeedsSpace(p, it) and !endsWithSpace(p.text) and !startsWithSpace(it.text)) try out.append(a, ' ');
             }
-            try out.appendSlice(a, it.text);
+            try appendText(a, out, it.text);
             prev = it;
         }
         try out.append(a, '\n');

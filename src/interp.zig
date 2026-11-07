@@ -790,13 +790,14 @@ const Run = struct {
         };
         if (glyphs.items.len == 0) return;
         const run_tm = self.tm;
-        if (f.subtype == .type3) {
-            try self.type3Run(f, glyphs.items, run_tm);
-        } else {
+        // A Type 3 font draws its glyphs as the paths of their procedures
+        // (`type3Run`). The run is also emitted as invisible text (mode 3) so
+        // that the characters can be extracted and searched.
+        {
             try self.emit(.{ .text = .{
                 .font = f,
                 .size = size,
-                .mode = self.gs.mode,
+                .mode = if (f.subtype == .type3) 3 else self.gs.mode,
                 .h_scale = self.gs.th,
                 .rise = self.gs.rise,
                 .tm = run_tm,
@@ -808,6 +809,7 @@ const Run = struct {
                 .glyphs = glyphs.items,
             } });
         }
+        if (f.subtype == .type3) try self.type3Run(f, glyphs.items, run_tm);
         self.tm = Matrix.translate(x, 0).mul(self.tm);
     }
 
