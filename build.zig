@@ -47,6 +47,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfdump);
 
+    const pdfsvg = b.addExecutable(.{
+        .name = "pdfsvg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfsvg.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfsvg);
+
     const test_step = b.step("test", "Run unit tests");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);

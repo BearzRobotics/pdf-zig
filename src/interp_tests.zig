@@ -130,7 +130,7 @@ test "colour operators: gray, CMYK, Indexed" {
     , "/ColorSpace << /Pal [/Indexed /DeviceRGB 1 <FF0000 0000FF>] >>", &.{}, ""));
     defer done(r);
     try testing.expectEqual(@as(f32, 0.5), r.list.commands[0].fill.paint.color.r);
-    try testing.expectEqual(@as(f32, 0), r.list.commands[1].fill.paint.color.r);
+    try testing.expect(r.list.commands[1].fill.paint.color.r < 0.2); // 0 0 0 1 k is black (a soft one)
     try testing.expectEqual(@as(f32, 1), r.list.commands[2].fill.paint.color.b);
     try testing.expectEqual(@as(f32, 0), r.list.commands[2].fill.paint.color.r);
 }

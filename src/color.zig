@@ -119,13 +119,41 @@ pub fn grayRgb(g: f64) Rgb {
     return .{ .r = v, .g = v, .b = v };
 }
 
+/// sRGB values of the 16 corner inks of CMYK (index bits C, M, Y, K), taken from
+/// a typical SWOP press profile: pure cyan is #00AEEF, magenta #EC008C, yellow
+/// #FFF200 and black #231F20. A colour is the multilinear interpolation of the
+/// corners, which is how most viewers approximate CMYK on a screen.
+const cmyk_corners = [16][3]f64{
+    .{ 1, 1, 1 }, // 0000 paper
+    .{ 0.1373, 0.1216, 0.1255 }, // K
+    .{ 1, 0.9490, 0 }, // Y
+    .{ 0.1098, 0.1020, 0 }, // YK
+    .{ 0.9255, 0, 0.5490 }, // M
+    .{ 0.1412, 0, 0 }, // MK
+    .{ 0.9294, 0.1098, 0.1412 }, // MY
+    .{ 0.1333, 0, 0 }, // MYK
+    .{ 0, 0.6784, 0.9373 }, // C
+    .{ 0, 0.0588, 0.1412 }, // CK
+    .{ 0, 0.6510, 0.3137 }, // CY
+    .{ 0, 0.0745, 0 }, // CYK
+    .{ 0.1804, 0.1922, 0.5725 }, // CM
+    .{ 0, 0, 0.0078 }, // CMK
+    .{ 0.2118, 0.2119, 0.2235 }, // CMY
+    .{ 0, 0, 0 }, // CMYK
+};
+
 pub fn cmykRgb(c: f64, m: f64, y: f64, k: f64) Rgb {
-    const kk = 1 - std.math.clamp(k, 0, 1);
-    return .{
-        .r = clamp((1 - std.math.clamp(c, 0, 1)) * kk),
-        .g = clamp((1 - std.math.clamp(m, 0, 1)) * kk),
-        .b = clamp((1 - std.math.clamp(y, 0, 1)) * kk),
-    };
+    const v = [4]f64{ std.math.clamp(c, 0, 1), std.math.clamp(m, 0, 1), std.math.clamp(y, 0, 1), std.math.clamp(k, 0, 1) };
+    var out = [3]f64{ 0, 0, 0 };
+    for (cmyk_corners, 0..) |corner, i| {
+        var w: f64 = 1;
+        for (0..4) |bit| {
+            const on = (i >> @intCast(3 - bit)) & 1 == 1;
+            w *= if (on) v[bit] else 1 - v[bit];
+        }
+        for (0..3) |ch| out[ch] += w * corner[ch];
+    }
+    return .{ .r = clamp(out[0]), .g = clamp(out[1]), .b = clamp(out[2]) };
 }
 
 fn labRgb(l: Lab, ls: f64, as: f64, bs: f64) Rgb {
@@ -260,8 +288,12 @@ pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseErro
 
 test "device spaces and conversion" {
     try std.testing.expectEqual(@as(u8, 3), (Space{ .rgb = {} }).components());
-    const c = (Space{ .cmyk = {} }).toRgb(&.{ 0, 0, 0, 1 });
-    try std.testing.expectEqual(@as(f32, 0), c.r);
+    const c = (Space{ .cmyk = {} }).toRgb(&.{ 0, 0, 0, 1 }); // pure K is a soft black, #231F20
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1373), c.r, 1e-4);
+    const cy = (Space{ .cmyk = {} }).toRgb(&.{ 1, 0, 0, 0 }); // #00AEEF
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6784), cy.g, 1e-4);
+    const half = (Space{ .cmyk = {} }).toRgb(&.{ 0.5, 0, 0, 0 });
+    try std.testing.expect(half.r > 0.4 and half.r < 0.6); // between paper and cyan
     const w = (Space{ .cmyk = {} }).toRgb(&.{ 0, 0, 0, 0 });
     try std.testing.expectEqual(@as(f32, 1), w.g);
     const g = (Space{ .gray = {} }).toRgb(&.{0.5});

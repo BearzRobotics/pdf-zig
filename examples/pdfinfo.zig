@@ -44,6 +44,23 @@ pub fn main(init: std.process.Init) !u8 {
         if (r.rest.len > 0) image_codecs += 1;
     }
     const list = try pdf.pages.PageList.build(&doc);
+    // With -r every page is interpreted (graphics on): a robustness check.
+    var render_errors: usize = 0;
+    var commands: usize = 0;
+    if (args.len > 2 and std.mem.eql(u8, args[2], "-r")) {
+        var rend = pdf.Renderer.init(&doc, .{});
+        defer rend.deinit();
+        for (0..list.entries.len) |n| {
+            const page = pdf.pages.page(&doc, list, n) orelse continue;
+            var dl = rend.render(gpa, page) catch {
+                render_errors += 1;
+                continue;
+            };
+            commands += dl.commands.len;
+            dl.deinit();
+        }
+        std.debug.print("rendered: commands={d} page-errors={d}\n", .{ commands, render_errors });
+    }
     std.debug.print("{s}: pages={d} objects={d} streams={d} undecodable={d} image-codec-streams={d} repaired={}\n", .{
         args[1], list.entries.len, doc.xref.count(), streams, failed, image_codecs, doc.repaired,
     });
