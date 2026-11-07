@@ -6,6 +6,7 @@
 pub const object = @import("object.zig");
 pub const filters = @import("filters.zig");
 pub const document = @import("document.zig");
+pub const crypt = @import("crypt.zig");
 pub const pages = @import("pages.zig");
 pub const content = @import("content.zig");
 pub const encoding = @import("encoding.zig");
@@ -31,6 +32,8 @@ test {
     _ = @import("object.zig");
     _ = @import("filters.zig");
     _ = @import("document.zig");
+    _ = @import("crypt.zig");
+    _ = @import("crypt_tests.zig");
     _ = @import("pages.zig");
     _ = @import("content.zig");
     _ = @import("encoding.zig");

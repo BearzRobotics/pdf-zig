@@ -9,6 +9,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
 const filters = @import("filters.zig");
+const crypt = @import("crypt.zig");
 const Object = object.Object;
 const Dict = object.Dict;
 const Ref = object.Ref;
@@ -23,6 +24,8 @@ pub const Options = struct {
     max_stream_bytes: usize = 512 << 20,
     /// Most `/Prev` sections followed.
     max_sections: usize = 4096,
+    /// The user password of an encrypted file (the empty password opens most).
+    password: []const u8 = "",
 };
 
 pub const Error = error{
@@ -30,8 +33,10 @@ pub const Error = error{
     NotPdf,
     /// The file has no usable catalog even after repair.
     NoCatalog,
-    /// The file is encrypted; the standard security handler is not read yet.
-    Encrypted,
+    /// The file is encrypted with a handler or version this library does not read.
+    UnsupportedEncryption,
+    /// The file is encrypted and `Options.password` does not open it.
+    PasswordRequired,
     /// The input is longer than `Options.max_bytes`.
     InputTooLarge,
     ReadFailed,
@@ -68,6 +73,8 @@ pub const Document = struct {
     cache: std.AutoHashMapUnmanaged(u32, Object) = .empty,
     objstms: std.AutoHashMapUnmanaged(u32, ?ObjStm) = .empty,
     repaired: bool = false,
+    /// Set for an encrypted file once the key is derived.
+    crypt: ?crypt.Crypt = null,
     /// Guards against references that lead back to the object being read.
     reading: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
@@ -111,8 +118,9 @@ pub const Document = struct {
         if (std.mem.indexOf(u8, self.data[0..head_len], "%PDF-")) |i| self.base = i;
 
         const ok = self.readXrefChain();
+        // The key must be known before any other object is read and cached.
+        if (ok) try self.setupEncryption();
         if (!ok or !self.catalogReachable()) try self.rebuild();
-        if (self.trailer.get("Encrypt") != null) return error.Encrypted;
         if (!self.catalogReachable()) return error.NoCatalog;
     }
 
@@ -352,7 +360,7 @@ pub const Document = struct {
             .free => {},
             .in_use => |e| {
                 if (self.readIndirectAt(self.base + @as(usize, @intCast(@min(e.offset, std.math.maxInt(usize) / 2))), num)) |ind| {
-                    result = ind.value;
+                    result = self.decryptObject(ind.value, num, ind.gen) catch .null;
                 } else if (!self.repaired) {
                     self.rebuild() catch {};
                     // Repair replaced the table: look again, once.
@@ -452,6 +460,109 @@ pub const Document = struct {
         return self.getDict(self.trailer, "Root");
     }
 
+    // ---- encryption (7.6) ------------------------------------------------------------
+
+    const Resolver = struct {
+        doc: *Document,
+
+        pub fn name(r: Resolver, d: Dict, key: []const u8) ?[]const u8 {
+            return r.doc.getName(d, key);
+        }
+        pub fn int(r: Resolver, d: Dict, key: []const u8) ?i64 {
+            return r.doc.getInt(d, key);
+        }
+        pub fn boolean(r: Resolver, d: Dict, key: []const u8) ?bool {
+            const v = r.doc.get(d, key) orelse return null;
+            return if (v == .boolean) v.boolean else null;
+        }
+        pub fn string(r: Resolver, d: Dict, key: []const u8) ?[]const u8 {
+            const v = r.doc.get(d, key) orelse return null;
+            return if (v == .string) v.string else null;
+        }
+        /// The method of the crypt filter named by `/StmF` or `/StrF` (7.6.5).
+        pub fn cryptFilter(r: Resolver, d: Dict, key: []const u8) crypt.Method {
+            const nm = r.doc.getName(d, key) orelse return .none;
+            if (std.mem.eql(u8, nm, "Identity")) return .none;
+            const cf = r.doc.getDict(d, "CF") orelse return .none;
+            const f = r.doc.getDict(cf, nm) orelse return .none;
+            const cfm = r.doc.getName(f, "CFM") orelse return .none;
+            if (std.mem.eql(u8, cfm, "V2")) return .rc4;
+            if (std.mem.eql(u8, cfm, "AESV2")) return .aes128;
+            if (std.mem.eql(u8, cfm, "AESV3")) return .aes256;
+            return .none;
+        }
+    };
+
+    /// Derives the file key if the trailer names an encryption dictionary.
+    fn setupEncryption(self: *Document) Error!void {
+        if (self.crypt != null) return;
+        const enc_ref = self.trailer.get("Encrypt") orelse return;
+        const enc = self.resolve(enc_ref).asDict() orelse return error.UnsupportedEncryption;
+        var id0: []const u8 = "";
+        if (self.getArray(self.trailer, "ID")) |ids| if (ids.len > 0) {
+            if (self.resolve(ids[0]) == .string) id0 = self.resolve(ids[0]).string;
+        };
+        var c = crypt.Crypt.init(enc, Resolver{ .doc = self }, id0, self.options.password) catch |err| switch (err) {
+            error.UnsupportedEncryption => return error.UnsupportedEncryption,
+            error.PasswordRequired => return error.PasswordRequired,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        c.encrypt_obj = if (enc_ref == .ref) enc_ref.ref.num else 0;
+        self.crypt = c;
+        // Objects read so far were not decrypted: forget them.
+        self.cache = .empty;
+        self.objstms = .empty;
+        if (c.encrypt_obj != 0) try self.cache.put(self.a(), c.encrypt_obj, .{ .dict = enc });
+    }
+
+    /// Decrypts the strings of `v` (and marks streams) for object `num gen`.
+    fn decryptObject(self: *Document, v: Object, num: u32, gen: u16) Allocator.Error!Object {
+        const c = self.crypt orelse return v;
+        if (num == c.encrypt_obj) return v;
+        switch (v) {
+            .string => |s| return .{ .string = try c.decrypt(self.a(), c.string_method, num, gen, s) },
+            .array => |arr| {
+                const out = try self.a().alloc(Object, arr.len);
+                for (arr, 0..) |item, i| out[i] = try self.decryptObject(item, num, gen);
+                return .{ .array = out };
+            },
+            .dict => |d| return .{ .dict = try self.decryptDict(d, num, gen) },
+            .stream => |st| {
+                const d = try self.decryptDict(st.dict, num, gen);
+                // Cross-reference streams are never encrypted; metadata may be exempt;
+                // a stream with its own `/Crypt` filter of `/Identity` is left alone.
+                const ty = if (st.dict.get("Type")) |t| (t.asName() orelse "") else "";
+                var encrypted = !std.mem.eql(u8, ty, "XRef");
+                if (std.mem.eql(u8, ty, "Metadata") and !c.encrypt_metadata) encrypted = false;
+                if (hasIdentityCrypt(st.dict)) encrypted = false;
+                return .{ .stream = .{ .dict = d, .data = st.data, .encrypted = encrypted, .num = num, .gen = gen } };
+            },
+            else => return v,
+        }
+    }
+
+    fn decryptDict(self: *Document, d: Dict, num: u32, gen: u16) Allocator.Error!Dict {
+        const out = try self.a().alloc(object.Entry, d.entries.len);
+        for (d.entries, 0..) |e, i| out[i] = .{ .key = e.key, .value = try self.decryptObject(e.value, num, gen) };
+        return .{ .entries = out };
+    }
+
+    fn hasIdentityCrypt(d: Dict) bool {
+        const f = d.get("Filter") orelse return false;
+        const names: []const Object = switch (f) {
+            .name => &.{f},
+            .array => |arr| arr,
+            else => return false,
+        };
+        for (names) |n| if (std.mem.eql(u8, n.asName() orelse "", "Crypt")) {
+            const parms = d.get("DecodeParms") orelse return true;
+            const pd = if (parms.asArray()) |arr| (if (arr.len > 0) arr[0].asDict() else null) else parms.asDict();
+            const nm = if (pd) |pdict| (if (pdict.get("Name")) |x| (x.asName() orelse "Identity") else "Identity") else "Identity";
+            return std.mem.eql(u8, nm, "Identity");
+        };
+        return false;
+    }
+
     // ---- streams -------------------------------------------------------------------
 
     /// The `/Filter` chain of a stream with its decode parameters resolved.
@@ -497,7 +608,11 @@ pub const Document = struct {
     /// allocated from `a`, for example a scratch arena that is reset per page.
     pub fn decodeStreamIn(self: *Document, alloc: Allocator, st: Stream) Error!filters.Result {
         const list = try self.filterList(st.dict);
-        return filters.decode(alloc, st.data, list, self.options.max_stream_bytes);
+        var data = st.data;
+        if (st.encrypted) if (self.crypt) |c| {
+            data = try c.decrypt(alloc, c.stream_method, st.num, st.gen, data);
+        };
+        return filters.decode(alloc, data, list, self.options.max_stream_bytes);
     }
 
     pub fn streamDataIn(self: *Document, alloc: Allocator, st: Stream) Error![]const u8 {
@@ -572,6 +687,17 @@ pub const Document = struct {
                 entries[0] = .{ .key = "Root", .value = .{ .ref = .{ .num = kv.key_ptr.*, .gen = e.in_use.gen } } };
                 try trailers.append(self.a(), .{ .entries = entries });
             }
+        }
+        // The trailer is known: derive the key before reading object streams.
+        {
+            var ordered0: std.ArrayList(Dict) = .empty;
+            var k0 = trailers.items.len;
+            while (k0 > 0) {
+                k0 -= 1;
+                try ordered0.append(self.a(), trailers.items[k0]);
+            }
+            self.trailer = try self.mergeTrailers(ordered0.items);
+            try self.setupEncryption();
         }
         // Objects inside object streams, where no direct definition exists.
         std.mem.sort(u32, objstm_nums.items, {}, std.sort.asc(u32));

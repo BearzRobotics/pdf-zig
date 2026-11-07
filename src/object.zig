@@ -43,6 +43,11 @@ pub const Dict = struct {
 pub const Stream = struct {
     dict: Dict,
     data: []const u8,
+    /// The data is encrypted with the document's key (7.6): `Document` decrypts
+    /// it before applying filters. `num` and `gen` select the object key.
+    encrypted: bool = false,
+    num: u32 = 0,
+    gen: u16 = 0,
 };
 
 pub const Object = union(enum) {

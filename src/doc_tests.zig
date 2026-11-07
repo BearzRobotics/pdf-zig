@@ -180,15 +180,16 @@ test "junk before the header shifts offsets" {
     try testing.expectEqualStrings("Page", doc.getName(doc.getObject(3).asDict().?, "Type").?);
 }
 
-test "errors: not a PDF, no catalog, encrypted, too large" {
+test "errors: not a PDF, no catalog, unsupported encryption, too large" {
     try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, "hello, world", .{}));
     try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, "", .{}));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     try testing.expectError(error.NoCatalog, pdf.Document.open(testing.allocator, try build(a, &.{"<< /Type /Pages >>"}), .{}));
-    const enc = try std.mem.replaceOwned(u8, a, try build(a, &simple), "/Root 1 0 R >>", "/Root 1 0 R /Encrypt 3 0 R >>");
-    try testing.expectError(error.Encrypted, pdf.Document.open(testing.allocator, enc, .{}));
+    // A handler that is not the standard one is refused, not misread.
+    const enc = try std.mem.replaceOwned(u8, a, try build(a, &simple), "/Root 1 0 R >>", "/Root 1 0 R /Encrypt << /Filter /Adobe.PubSec /V 4 >> >>");
+    try testing.expectError(error.UnsupportedEncryption, pdf.Document.open(testing.allocator, enc, .{}));
     try testing.expectError(error.InputTooLarge, pdf.Document.open(testing.allocator, try build(a, &simple), .{ .max_bytes = 10 }));
 }
 

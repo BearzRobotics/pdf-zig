@@ -58,6 +58,11 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfsvg);
 
+    // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
+    for ([_][]const u8{ "plain", "enc_rc4_40", "enc_rc4_128", "enc_aes_128", "enc_aes_256", "enc_aes_256_pw", "enc_rc4_128_pw" }) |name| {
+        mod.addAnonymousImport(b.fmt("{s}.pdf", .{name}), .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}.pdf", .{name})) });
+    }
+
     const test_step = b.step("test", "Run unit tests");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);

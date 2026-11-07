@@ -46,8 +46,7 @@ fn canonical(name: []const u8) []const u8 {
 
 fn isImageCodec(name: []const u8) bool {
     return std.mem.eql(u8, name, "DCTDecode") or std.mem.eql(u8, name, "JPXDecode") or
-        std.mem.eql(u8, name, "JBIG2Decode") or std.mem.eql(u8, name, "CCITTFaxDecode") or
-        std.mem.eql(u8, name, "Crypt");
+        std.mem.eql(u8, name, "JBIG2Decode") or std.mem.eql(u8, name, "CCITTFaxDecode");
 }
 
 /// Applies `filters` in order. Allocations come from `a` (intermediate buffers
@@ -56,6 +55,9 @@ pub fn decode(a: Allocator, data: []const u8, filters: []const Filter, max: usiz
     var cur = data;
     for (filters, 0..) |f, i| {
         const name = canonical(f.name);
+        // A `/Crypt` filter only says how the data was encrypted; the document
+        // has already decrypted it (7.4.10).
+        if (std.mem.eql(u8, name, "Crypt")) continue;
         if (isImageCodec(name)) return .{ .data = cur, .rest = filters[i..] };
         if (std.mem.eql(u8, name, "FlateDecode")) {
             cur = try predict(a, try flateDecode(a, cur, max), f.parms, max);

@@ -10,22 +10,28 @@ pub fn main(init: std.process.Init) !u8 {
     var raw = false;
     var path: ?[]const u8 = null;
     var only: ?usize = null;
-    for (args[1..]) |a| {
+    var password: []const u8 = "";
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (std.mem.eql(u8, a, "-raw")) {
             raw = true;
+        } else if (std.mem.eql(u8, a, "-p") and i + 1 < args.len) {
+            i += 1;
+            password = args[i];
         } else if (path == null) {
             path = a;
         } else only = std.fmt.parseInt(usize, a, 10) catch null;
     }
     const file_path = path orelse {
-        std.debug.print("usage: pdftext [-raw] FILE [PAGE]\n", .{});
+        std.debug.print("usage: pdftext [-raw] [-p PASSWORD] FILE [PAGE]\n", .{});
         return 2;
     };
     var file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
     defer file.close(io);
     var buf: [65536]u8 = undefined;
     var reader = file.reader(io, &buf);
-    var doc = pdf.Document.openReader(gpa, &reader.interface, .{}) catch |err| {
+    var doc = pdf.Document.openReader(gpa, &reader.interface, .{ .password = password }) catch |err| {
         std.debug.print("pdftext: {s}: {s}\n", .{ file_path, @errorName(err) });
         return 1;
     };
