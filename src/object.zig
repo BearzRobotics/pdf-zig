@@ -103,6 +103,29 @@ pub const Object = union(enum) {
     }
 };
 
+/// A deep copy of `o` allocated from `a`. Stream data is copied too. Nesting is
+/// bounded because objects come from `Parser`, which limits it.
+pub fn dupe(a: Allocator, o: Object) Allocator.Error!Object {
+    switch (o) {
+        .string => |s| return .{ .string = try a.dupe(u8, s) },
+        .name => |s| return .{ .name = try a.dupe(u8, s) },
+        .array => |arr| {
+            const out = try a.alloc(Object, arr.len);
+            for (arr, 0..) |item, i| out[i] = try dupe(a, item);
+            return .{ .array = out };
+        },
+        .dict => |d| return .{ .dict = try dupeDict(a, d) },
+        .stream => |s| return .{ .stream = .{ .dict = try dupeDict(a, s.dict), .data = try a.dupe(u8, s.data), .encrypted = s.encrypted, .num = s.num, .gen = s.gen } },
+        else => return o,
+    }
+}
+
+pub fn dupeDict(a: Allocator, d: Dict) Allocator.Error!Dict {
+    const out = try a.alloc(Entry, d.entries.len);
+    for (d.entries, 0..) |e, i| out[i] = .{ .key = try a.dupe(u8, e.key), .value = try dupe(a, e.value) };
+    return .{ .entries = out };
+}
+
 pub const ParseError = error{
     /// The text is not valid PDF syntax at this point.
     Syntax,

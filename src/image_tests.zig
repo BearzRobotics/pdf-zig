@@ -153,3 +153,47 @@ test "short data and absurd sizes are handled" {
     defer it.done(r);
     for (r.list.commands) |c| if (c == .image) try testing.expectError(error.TooBig, pdf.image.decode(&r.doc, a, c.image));
 }
+
+test "inline images stay valid after other pages are rendered (the scratch arena is reused)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Page 1: an indexed inline image whose palette string lives in the operands.
+    // Page 2: lots of text and operands that overwrite the scratch memory page 1 used.
+    const c1 = "q 10 0 0 10 0 0 cm BI /W 2 /H 1 /BPC 8 /CS [/I /RGB 1 <FF00000000FF>] ID \x00\x01\nEI Q";
+    var c2: std.ArrayList(u8) = .empty;
+    for (0..400) |_| try c2.appendSlice(a, "(ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ) [(YYYYYYYYYYYYYYYYYYYYYYYYY)] 1 2 3 4 5 6 cm ");
+    const bodies = [_][]const u8{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Contents 4 0 R >>",
+        try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ c1.len, c1 }),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Contents 6 0 R >>",
+        try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ c2.items.len, c2.items }),
+    };
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "%PDF-1.7\n");
+    var offs: [bodies.len]usize = undefined;
+    for (bodies, 0..) |b, i| {
+        offs[i] = out.items.len;
+        try out.print(a, "{d} 0 obj\n{s}\nendobj\n", .{ i + 1, b });
+    }
+    const xref_at = out.items.len;
+    try out.print(a, "xref\n0 {d}\n0000000000 65535 f \n", .{bodies.len + 1});
+    for (offs) |o| try out.print(a, "{d:0>10} 00000 n \n", .{o});
+    try out.print(a, "trailer\n<< /Size {d} /Root 1 0 R >>\nstartxref\n{d}\n%%EOF\n", .{ bodies.len + 1, xref_at });
+
+    var doc = try pdf.Document.open(testing.allocator, out.items, .{});
+    defer doc.deinit();
+    var rend = pdf.Renderer.init(&doc, .{});
+    defer rend.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    var l1 = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 0).?);
+    defer l1.deinit();
+    var l2 = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 1).?);
+    defer l2.deinit();
+    for (l1.commands) |c| if (c == .image) {
+        const px = (try pdf.image.decode(&doc, a, c.image)).pixels;
+        try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255, 0, 0, 255, 255 }, px.rgba);
+    };
+}

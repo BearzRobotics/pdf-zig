@@ -913,7 +913,11 @@ const Run = struct {
     }
 
     fn inlineImage(self: *Run, im: content.InlineImage) Error!void {
-        try self.imageOp(.{ .dict = im.dict, .data = im.data }, 0);
+        if (!self.r.options.graphics) return;
+        // The scanner's strings and the data live in scratch memory that is
+        // reset when the page is done; the display list keeps its own copy.
+        const dict = try object.dupeDict(self.a, im.dict);
+        try self.imageOp(.{ .dict = dict, .data = try self.a.dupe(u8, im.data) }, 0);
     }
 
     fn formOp(self: *Run, st: object.Stream, num_id: u32) Error!void {
