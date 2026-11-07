@@ -67,6 +67,12 @@ pub fn fromSamples(doc: *Document, a: Allocator, img: display.Image, samples: []
     return fromSamplesBpc(doc, a, img, samples, width, height, ncomp, 8);
 }
 
+/// Applies the soft mask, stencil mask or colour-key mask named in the image
+/// dictionary `d` to pixels the caller decoded itself (a JPEG, say).
+pub fn withMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
+    return applyMasks(doc, a, d, px);
+}
+
 fn decodeArray(doc: *Document, a: Allocator, d: Dict, n: usize) Allocator.Error!?[]const f64 {
     const arr = doc.getArray(d, "Decode") orelse doc.getArray(d, "D") orelse return null;
     if (arr.len < 2 * n) return null;
