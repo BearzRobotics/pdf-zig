@@ -375,3 +375,21 @@ test "damaged content streams never crash (seeded mutation)" {
         dl.deinit();
     }
 }
+
+test "graphics off: only text is produced" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try page(arena.allocator(), "0 0 50 50 re f BT /F1 10 Tf 10 10 Td (ok) Tj ET 0 0 m 5 5 l S", helv, &.{helv_obj}, "");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var rend = pdf.Renderer.init(&doc, .{ .graphics = false });
+    defer rend.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    var dl = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 0).?);
+    defer dl.deinit();
+    try testing.expectEqual(@as(usize, 1), dl.commands.len);
+    try testing.expect(dl.commands[0] == .text);
+    const text = try pdf.text.extract(testing.allocator, &dl, .reading);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("ok\n", text);
+}

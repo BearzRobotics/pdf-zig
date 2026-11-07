@@ -34,6 +34,10 @@ pub const Options = struct {
     max_commands: usize = 4_000_000,
     /// Deepest nesting of forms, patterns and Type 3 glyphs.
     max_depth: u8 = 12,
+    /// Build paths, images, shadings and Type 3 glyph drawings. Turn this off
+    /// to get only the text runs, which is several times faster and needs far
+    /// less memory (text extraction, search).
+    graphics: bool = true,
 };
 
 pub const Error = Allocator.Error || doc_mod.Error || error{LimitExceeded};
@@ -295,6 +299,10 @@ const Run = struct {
     }
 
     fn emit(self: *Run, c: display.Command) Error!void {
+        if (!self.r.options.graphics) switch (c) {
+            .text => {},
+            else => return,
+        };
         if (self.hidden_depth > 0) switch (c) {
             .save, .restore => {},
             else => return,
@@ -512,6 +520,7 @@ const Run = struct {
     // ---- paths ----------------------------------------------------------------------------
 
     fn addSeg(self: *Run, s: display.Seg) Error!void {
+        if (!self.r.options.graphics) return;
         if (self.path.items.len > 5_000_000) return error.LimitExceeded;
         try self.path.append(self.a, s);
     }
@@ -527,6 +536,7 @@ const Run = struct {
             self.path.clearRetainingCapacity();
             self.pending_clip = null;
         }
+        if (!self.r.options.graphics) return;
         if (close and self.path.items.len > 0) try self.addSeg(.close);
         if (self.path.items.len == 0) return;
         const p = try self.a.dupe(display.Seg, self.path.items);
@@ -625,6 +635,7 @@ const Run = struct {
     // ---- patterns and shadings -------------------------------------------------------------
 
     fn patternPaint(self: *Run, name: []const u8, rgb: ?color.Rgb) Error!Paint {
+        if (!self.r.options.graphics) return .none;
         const doc_ = self.doc();
         const pats = doc_.getDict(self.resources, "Pattern") orelse return .none;
         const po = doc_.get(pats, name) orelse return .none;
@@ -754,6 +765,7 @@ const Run = struct {
     }
 
     fn shadingOp(self: *Run, op: content.Op) Error!void {
+        if (!self.r.options.graphics) return;
         const name = (if (op.operands.len > 0) op.operands[0].asName() else null) orelse return;
         const shs = self.doc().getDict(self.resources, "Shading") orelse return;
         const so = self.doc().get(shs, name) orelse return;
@@ -822,7 +834,7 @@ const Run = struct {
                 .glyphs = glyphs.items,
             } });
         }
-        if (f.subtype == .type3) try self.type3Run(f, glyphs.items, run_tm);
+        if (f.subtype == .type3 and self.r.options.graphics) try self.type3Run(f, glyphs.items, run_tm);
         self.tm = Matrix.translate(x, 0).mul(self.tm);
     }
 
@@ -876,6 +888,7 @@ const Run = struct {
     }
 
     fn imageOp(self: *Run, st: object.Stream, num_id: u32) Error!void {
+        if (!self.r.options.graphics) return;
         const doc_ = self.doc();
         const w = doc_.getInt(st.dict, "Width") orelse doc_.getInt(st.dict, "W") orelse return;
         const h = doc_.getInt(st.dict, "Height") orelse doc_.getInt(st.dict, "H") orelse return;
@@ -913,7 +926,7 @@ const Run = struct {
         const m = self.matrixOf(st.dict, "Matrix");
         try self.save();
         self.gs.ctm = m.mul(self.gs.ctm);
-        if (self.rectOf(st.dict, "BBox")) |b| {
+        if (if (self.r.options.graphics) self.rectOf(st.dict, "BBox") else null) |b| {
             const clip_path = try self.a.alloc(display.Seg, 5);
             clip_path[0] = .{ .move = .{ .x = b[0], .y = b[1] } };
             clip_path[1] = .{ .line = .{ .x = b[2], .y = b[1] } };

@@ -83,6 +83,8 @@ pub fn unicodeOfName(name: []const u8) ?u21 {
     // Names with a suffix (`a.sc`, `one.oldstyle`) stand for the base glyph.
     const base = if (std.mem.indexOfScalar(u8, name, '.')) |d| (if (d > 0) name[0..d] else name) else name;
     for (names) |n| if (std.mem.eql(u8, n[0], base)) return n[1];
+    // Some producers (dvips, Type 3 bitmap fonts) name a glyph by its character.
+    if (base.len == 1 and base[0] > 0x20 and base[0] < 0x7F) return base[0];
     if (std.mem.startsWith(u8, base, "uni") and base.len >= 7) {
         return std.fmt.parseInt(u21, base[3..7], 16) catch null;
     }
@@ -231,6 +233,7 @@ test "glyph names" {
     try std.testing.expectEqual(@as(?u21, 'a'), unicodeOfName("a.sc"));
     try std.testing.expectEqual(@as(?u21, 0x2603), unicodeOfName("uni2603"));
     try std.testing.expectEqual(@as(?u21, 0x1F600), unicodeOfName("u1F600"));
+    try std.testing.expectEqual(@as(?u21, '0'), unicodeOfName("0")); // a glyph named by its character
     try std.testing.expectEqual(@as(?u21, null), unicodeOfName("g123"));
     try std.testing.expectEqual(@as(?u21, null), unicodeOfName(".notdef"));
     try std.testing.expectEqualStrings("eacute", nameOfUnicode(0xE9).?);
