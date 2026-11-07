@@ -31,6 +31,7 @@ a fraction of the memory, for search and extraction.
 
 | Area | State |
 |---|---|
+| Encryption | the standard security handler: RC4 40-128 bit, AES-128, AES-256 (R5, R6), user password (`Options.password`, empty by default); other handlers give `error.UnsupportedEncryption`, a wrong password `error.PasswordRequired` |
 | File structure | header, cross-reference tables and streams, `/Prev` chains, hybrid files, object streams, incremental updates; **repair** by scanning when the table is damaged |
 | Filters | Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG and TIFF predictors. DCT, JPX, JBIG2 and CCITT are passed on undecoded (`Document.decodeStream` reports the first one in `rest`) |
 | Page tree | inherited `Resources`, `MediaBox`, `CropBox`, `Rotate`; wrong `/Count` and cycles tolerated |
@@ -39,9 +40,9 @@ a fraction of the memory, for search and extraction.
 | Text | simple fonts (Type 1, TrueType, Type 3), composite fonts (Type 0 with Identity or embedded CMaps), encodings (Standard, WinAnsi, MacRoman, Differences), `/ToUnicode`, `/Widths`, `/W`, the standard 14 metrics, text state and all text operators |
 | Text extraction | reading order or content-stream order; ligatures expanded |
 
-Not done (see `docs/architecture.md`, "Not supported"): encryption (an encrypted file gives
-`error.Encrypted`), mesh and function-based shadings, soft masks, vertical writing, predefined
-CJK CMaps other than Identity, image pixel decoding.
+| Images | `image.decode` gives straight-alpha RGBA for Flate/LZW/ASCII/RunLength/raw images: 1, 2, 4, 8, 16 bit, every colour space above, `/Decode`, stencil masks, colour-key masks, soft masks. JPEG, JPX, JBIG2 and CCITT data is returned undecoded with the codec name; `image.fromSamples` then applies the colour space and masks to the codec's samples |
+
+Not done (see `docs/architecture.md`, "Not supported"): JBIG2 and CCITT decoding (JPEG and JPX are the viewer's codec's job), public-key encryption, mesh and function-based shadings, soft masks of graphics state, vertical writing, predefined CJK CMaps other than Identity.
 
 ## Checked against poppler
 
@@ -54,13 +55,14 @@ conformance claim.
 
 ## Example programs
 
-`zig build` installs `pdfinfo` (structure, `-r` renders every page), `pdftext` (`-raw`
-for stream order) and `pdfdump` (the display list of a page).
+`zig build` installs `pdfinfo` (structure, `-r` renders every page and decodes its images),
+`pdftext` (`-raw` for stream order, `-p` for a password), `pdfdump` (the display list of a page),
+`pdfsvg` (a page as SVG, to look at) and `pdfimg` (decode the images of a page).
 
 ## Tests
 
 `zig build test`: syntax, filters (with the spec's LZW example), documents (incremental
-updates, xref streams, repair, mutation fuzzing), pages, content streams, encodings,
-CMaps, fonts, functions, colour, the interpreter on hand-built pages, text extraction.
+updates, xref streams, repair, mutation fuzzing, encrypted files made with qpdf), pages, content streams, encodings,
+CMaps, fonts, functions, colour, the interpreter on hand-built pages, text extraction, images.
 
 License: MIT.

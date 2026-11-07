@@ -1,6 +1,6 @@
 # 0001: Architecture of pdf-zig
 
-Status: accepted by the maintainer in conversation (role and first milestone). Milestone 1 is implemented except encryption (decision 5) and image pixel decoding; see docs/architecture.md.
+Status: accepted by the maintainer in conversation (role and first milestone). Milestone 1 is implemented, including encryption (decision 5) and image pixels (decision 4); see docs/architecture.md.
 
 ## Problem
 

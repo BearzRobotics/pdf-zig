@@ -10,6 +10,7 @@
 | `root.zig` | Public API |
 | `object.zig` | Object model (`Object`, `Dict`, `Stream`, `Ref`) and the syntax parser (7.2, 7.3) |
 | `filters.zig` | Stream filters and predictors (7.4); bounded output |
+| `crypt.zig` | The standard security handler: key derivation, password check, RC4 and AES decryption |
 | `document.zig` | `Document`: header, xref tables and streams, trailers, object streams, repair, indirect objects, stream decoding |
 | `pages.zig` | `PageList` (the page tree with inheritance), `Page`, page contents |
 | `content.zig` | Content-stream scanner, including inline images |
@@ -22,6 +23,7 @@
 | `display.zig` | The display list types and `Matrix` |
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
+| `image.zig` | Image samples to RGBA; masks; hand-off to a JPEG/JPX codec |
 
 ## Ownership
 
@@ -64,13 +66,23 @@ catalog by `/Type /Catalog` if no trailer names it. It runs at most once.
 
 ## Not supported
 
-- Encryption: `error.Encrypted` (the standard security handler is the next milestone).
+- Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - Shadings other than types 2 and 3 (function-based and mesh): skipped.
 - Soft masks and transparency groups: alpha values and blend-mode names are passed on;
   masks are not.
 - Vertical writing (`WMode 1`) is read horizontally; predefined CMaps other than
   Identity are treated as the identity (CIDs equal codes), so CJK text without
   `/ToUnicode` has no Unicode.
-- Image pixel decoding: image commands carry the stream; the renderer decodes it.
+- Image codecs: DCT, JPX, JBIG2 and CCITT data is not decoded here (`image.decode` returns it with the codec name). JPEG and JPX are expected to be decoded by the viewer, then passed to `image.fromSamples`; JBIG2 and CCITT have no decoder yet.
 - Text clipping modes (4 to 7) and `d1` colour suppression in Type 3 glyphs.
 - Symbol and ZapfDingbats built-in encodings.
+
+## Encryption
+
+`Document.load` derives the file key (`crypt.zig`) as soon as the cross-reference data is read
+and before any other object is cached, from `Options.password` (empty by default). Strings are
+decrypted when an object is loaded. Stream data is decrypted when it is decoded (`Stream.encrypted`
+with the object number and generation), so decrypted content can live in a scratch arena.
+Objects inside object streams are not decrypted separately; the object stream is. Cross-reference
+streams, the encryption dictionary itself, a stream with an identity `/Crypt` filter and, with
+`/EncryptMetadata false`, the metadata stream are left alone. The owner password is not used.
