@@ -7,6 +7,7 @@
 //! no Unicode value here (text then comes from `/ToUnicode`).
 
 const std = @import("std");
+const agl = @import("agl.zig");
 
 pub const Base = enum { standard, win_ansi, mac_roman, pdf_doc, none };
 
@@ -85,6 +86,7 @@ pub fn unicodeOfName(name: []const u8) ?u21 {
     for (names) |n| if (std.mem.eql(u8, n[0], base)) return n[1];
     // Some producers (dvips, Type 3 bitmap fonts) name a glyph by its character.
     if (base.len == 1 and base[0] > 0x20 and base[0] < 0x7F) return base[0];
+    if (agl.glyphNameToUnicode(base)) |u| return u;
     if (std.mem.startsWith(u8, base, "uni") and base.len >= 7) {
         return std.fmt.parseInt(u21, base[3..7], 16) catch null;
     }
@@ -234,6 +236,8 @@ test "glyph names" {
     try std.testing.expectEqual(@as(?u21, 0x2603), unicodeOfName("uni2603"));
     try std.testing.expectEqual(@as(?u21, 0x1F600), unicodeOfName("u1F600"));
     try std.testing.expectEqual(@as(?u21, '0'), unicodeOfName("0")); // a glyph named by its character
+    try std.testing.expectEqual(@as(?u21, 0x03B1), unicodeOfName("alpha")); // the full Adobe Glyph List
+    try std.testing.expectEqual(@as(?u21, 0x0416), unicodeOfName("Zhecyrillic.alt"));
     try std.testing.expectEqual(@as(?u21, null), unicodeOfName("g123"));
     try std.testing.expectEqual(@as(?u21, null), unicodeOfName(".notdef"));
     try std.testing.expectEqualStrings("eacute", nameOfUnicode(0xE9).?);

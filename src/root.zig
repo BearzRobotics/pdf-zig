@@ -10,6 +10,8 @@ pub const crypt = @import("crypt.zig");
 pub const pages = @import("pages.zig");
 pub const content = @import("content.zig");
 pub const encoding = @import("encoding.zig");
+pub const agl = @import("agl.zig");
+pub const cff_strings = @import("cff_strings.zig");
 pub const cmap = @import("cmap.zig");
 pub const font = @import("font.zig");
 pub const function = @import("function.zig");
@@ -38,6 +40,7 @@ test {
     _ = @import("pages.zig");
     _ = @import("content.zig");
     _ = @import("encoding.zig");
+    _ = @import("agl.zig");
     _ = @import("cmap.zig");
     _ = @import("font.zig");
     _ = @import("function.zig");
