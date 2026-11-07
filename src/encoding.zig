@@ -207,6 +207,14 @@ pub fn unicodeOf(base: Base, code: u8) u21 {
     }
 }
 
+/// StandardEncoding as a table: the code point of each code, 0 where unused.
+pub const standard_encoding: [256]u21 = blk: {
+    @setEvalBranchQuota(10_000);
+    var t: [256]u21 = undefined;
+    for (0..256) |c| t[c] = unicodeOf(.standard, @intCast(c));
+    break :blk t;
+};
+
 pub fn baseFromName(name: []const u8) ?Base {
     if (std.mem.eql(u8, name, "WinAnsiEncoding")) return .win_ansi;
     if (std.mem.eql(u8, name, "MacRomanEncoding")) return .mac_roman;
@@ -226,6 +234,12 @@ test "base encodings" {
     try std.testing.expectEqual(@as(u21, 0xFB01), unicodeOf(.standard, 0xAE));
     try std.testing.expectEqual(@as(u21, 0), unicodeOf(.standard, 0x80));
     try std.testing.expectEqual(@as(u21, 0), unicodeOf(.win_ansi, 0x05));
+}
+
+test "standard_encoding table" {
+    try std.testing.expectEqual(@as(u21, 'A'), standard_encoding['A']);
+    try std.testing.expectEqual(@as(u21, 0xFB01), standard_encoding[0xAE]);
+    try std.testing.expectEqual(@as(u21, 0), standard_encoding[0x80]);
 }
 
 test "glyph names" {
