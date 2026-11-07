@@ -1,8 +1,10 @@
 # pdf-zig
 
-A PDF reader library for Zig, built on `std.Io`, for the DKDE PDF viewer. It reads the
+A PDF library for Zig, built on `std.Io`, for the DKDE PDF viewer. It reads the
 file structure and turns pages into a **display list** (paths, text, images, shadings)
-that a renderer draws; it draws nothing itself. Zig 0.17.1, no dependencies.
+that a renderer draws; it draws nothing itself. It also finds text on the page, reads
+bookmarks and form fields, and writes annotations, bookmarks and form values as an
+incremental update. Zig 0.17.1, no dependencies.
 
 Written from ISO 32000-1:2008 (see `docs/decisions/0001-architecture.md`).
 
@@ -26,6 +28,44 @@ const text = try pdf.text.extract(gpa, &dl, .reading);    // or just the text
 
 `Renderer.Options.graphics = false` returns only the text runs: several times faster and
 a fraction of the memory, for search and extraction.
+
+## Text positions, bookmarks, annotations and forms
+
+```zig
+// Where every glyph is: select, copy and search on the displayed page.
+var lay = try pdf.text.layout(gpa, &dl);                  // text + a box per glyph
+defer lay.deinit(gpa);
+const at = lay.offsetAt(x, y);                            // byte offset nearest a point
+var found: std.ArrayList([2]u32) = .empty;
+try lay.find(gpa, "needle", &found);                      // byte ranges of matches
+try lay.rectsFor(gpa, from, to, &rects);                  // one rectangle per line
+
+// The document outline ("bookmarks"), as a tree.
+const items = try pdf.outline.read(arena, &doc, list);
+
+// Edits are an incremental update appended to the file; the original bytes stay.
+var upd = try pdf.write.Update.init(gpa, &doc);
+defer upd.deinit();
+_ = try pdf.annot.addMarkup(&upd, page, .highlight, rects.items, .{ .contents = "why" });
+_ = try pdf.annot.addNote(&upd, page, x, y, .{ .contents = "a note" });
+_ = try pdf.outline.add(&upd, page.num, "A bookmark", null);
+const fields = try pdf.form.fields(arena, &doc, list);
+try pdf.form.setText(&upd, fields[0], "Dakota");
+try upd.write(gpa, &writer.interface);                    // original file + the update
+```
+
+| Module | What it does |
+|---|---|
+| `text.layout` | reading-order text with a box for every glyph; hit testing, search ranges and per-line rectangles |
+| `outline` | reads the bookmark tree (named destinations too); adds and removes bookmarks |
+| `write` | serializes objects; appends an incremental update with a classic table or a cross-reference stream. Refuses encrypted files and files that had to be repaired on open |
+| `annot` | reads annotations; adds highlight, underline, strike-out and note annotations with appearance streams; edits and removes them |
+| `form` | finds AcroForm fields (groups, check boxes, radio groups, choices); fills text, check box, radio, combo and list fields |
+
+Form limits: a filled text field gets a new appearance in Helvetica with WinAnsi
+characters (others draw as `?`; `/V` keeps the full text); signature fields are
+listed, not filled; XFA forms are not read; no scripts run. Annotation output was
+checked against poppler (`zig build` makes `pdfmark` and `pdffill` for that).
 
 ## What it reads
 

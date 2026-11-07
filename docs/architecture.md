@@ -86,3 +86,22 @@ with the object number and generation), so decrypted content can live in a scrat
 Objects inside object streams are not decrypted separately; the object stream is. Cross-reference
 streams, the encryption dictionary itself, a stream with an identity `/Crypt` filter and, with
 `/EncryptMetadata false`, the metadata stream are left alone. The owner password is not used.
+
+## Text layout, outlines, writing, annotations and forms
+
+`text.zig` (`layout`), `outline.zig`, `write.zig`, `annot.zig` and `form.zig` sit on top of
+the reader. Reading stays in the document arena; everything an edit creates lives in the
+`write.Update`'s own arena and is written once.
+
+- **Coordinates.** Reading annotations and fields returns rectangles in PDF user space (y up).
+  Creating annotations takes rectangles on the *displayed page* (points, top left origin, y down,
+  the space `text.Layout` and `DisplayList.base` use) and converts them with the page's base matrix.
+- **Incremental update.** `write.Update.write` emits the original bytes unchanged, the new and
+  changed objects, a cross-reference section (a table, or a stream when the file's last section is
+  one) with `/Prev`, and a trailer. A changed object is written whole with the same number.
+  Encrypted files and files whose cross-reference data had to be rebuilt are refused
+  (`error.Encrypted`, `error.Repaired`) instead of written wrongly.
+- **Undo.** An edit only appends, so cutting the bytes back to their earlier length undoes it.
+- **Appearance streams.** Highlights draw with the Multiply blend mode; notes and filled text
+  fields have their own streams, so any reader shows them. `NeedAppearances` is set only for list
+  boxes, which have no generated appearance.
