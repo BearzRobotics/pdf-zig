@@ -156,16 +156,17 @@ pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
 
 /// Content streams of a page joined into one buffer, separated by a newline
 /// (7.8.2: the split between streams may fall between any two tokens).
-pub fn contents(doc: *Document, p: Page) (Allocator.Error || doc_mod.Error)![]const u8 {
-    const a = doc.arena.allocator();
+/// The buffer is allocated from `a`; pass a scratch arena to avoid keeping it
+/// for the life of the document.
+pub fn contents(doc: *Document, a: Allocator, p: Page) (Allocator.Error || doc_mod.Error)![]const u8 {
     const c = doc.get(p.dict, "Contents") orelse return "";
     var out: std.ArrayList(u8) = .empty;
     switch (c) {
-        .stream => |s| try out.appendSlice(a, try doc.streamData(s)),
+        .stream => |s| try out.appendSlice(a, try doc.streamDataIn(a, s)),
         .array => |arr| for (arr) |item| {
             const r = doc.resolve(item);
             if (r != .stream) continue;
-            try out.appendSlice(a, try doc.streamData(r.stream));
+            try out.appendSlice(a, try doc.streamDataIn(a, r.stream));
             try out.append(a, '\n');
             if (out.items.len > doc.options.max_stream_bytes) return error.TooLarge;
         },

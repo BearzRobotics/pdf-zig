@@ -487,10 +487,22 @@ pub const Document = struct {
     }
 
     /// The stream's data with all filters applied, except image codecs: those
-    /// are left in `rest`. Memory is owned by the document.
+    /// are left in `rest`. Memory is owned by the document and lives until
+    /// `deinit`; use `decodeStreamIn` for data that is needed only briefly.
     pub fn decodeStream(self: *Document, st: Stream) Error!filters.Result {
+        return self.decodeStreamIn(self.a(), st);
+    }
+
+    /// Like `decodeStream`, but the decoded data (and intermediate buffers) are
+    /// allocated from `a`, for example a scratch arena that is reset per page.
+    pub fn decodeStreamIn(self: *Document, alloc: Allocator, st: Stream) Error!filters.Result {
         const list = try self.filterList(st.dict);
-        return filters.decode(self.a(), st.data, list, self.options.max_stream_bytes);
+        return filters.decode(alloc, st.data, list, self.options.max_stream_bytes);
+    }
+
+    pub fn streamDataIn(self: *Document, alloc: Allocator, st: Stream) Error![]const u8 {
+        const r = try self.decodeStreamIn(alloc, st);
+        return r.data;
     }
 
     /// Decoded data of a stream that has no image codec in its filters.

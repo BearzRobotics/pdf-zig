@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer doc.deinit();
     const list = try pdf.pages.PageList.build(&doc);
     var rend = pdf.Renderer.init(&doc, .{});
+    defer rend.deinit();
 
     var out_buf: [65536]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buf);

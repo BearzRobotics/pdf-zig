@@ -288,9 +288,9 @@ test "page contents: one stream, several streams, none" {
     var doc = try pdf.Document.open(testing.allocator, bytes, .{});
     defer doc.deinit();
     const list = try pdf.pages.PageList.build(&doc);
-    try testing.expectEqualStrings("0 g", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 0).?));
-    try testing.expectEqualStrings("0 g\n1 0 0 RG\n", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 1).?));
-    try testing.expectEqualStrings("", try pdf.pages.contents(&doc, pdf.pages.page(&doc, list, 2).?));
+    try testing.expectEqualStrings("0 g", try pdf.pages.contents(&doc, arena.allocator(), pdf.pages.page(&doc, list, 0).?));
+    try testing.expectEqualStrings("0 g\n1 0 0 RG\n", try pdf.pages.contents(&doc, arena.allocator(), pdf.pages.page(&doc, list, 1).?));
+    try testing.expectEqualStrings("", try pdf.pages.contents(&doc, arena.allocator(), pdf.pages.page(&doc, list, 2).?));
 }
 
 test "page resources given as an indirect object, inherited" {

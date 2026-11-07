@@ -41,5 +41,6 @@ test {
     _ = @import("display.zig");
     _ = @import("interp.zig");
     _ = @import("text.zig");
+    _ = @import("interp_tests.zig");
     _ = @import("doc_tests.zig");
 }

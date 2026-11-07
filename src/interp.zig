@@ -46,9 +46,16 @@ pub const Renderer = struct {
     /// Object numbers of optional content groups that are off in the default configuration.
     ocg_off: std.AutoHashMapUnmanaged(u32, void) = .empty,
     ocg_loaded: bool = false,
+    /// Decoded content streams and operands: reset after every page, so that
+    /// rendering many pages does not keep every page's content in memory.
+    scratch: ?std.heap.ArenaAllocator = null,
 
     pub fn init(doc: *Document, options: Options) Renderer {
         return .{ .doc = doc, .options = options };
+    }
+
+    pub fn deinit(self: *Renderer) void {
+        if (self.scratch) |*s| s.deinit();
     }
 
     /// Interprets page `p`. The result is owned by the caller (`DisplayList.deinit`);
@@ -61,8 +68,11 @@ pub const Renderer = struct {
         list.height = size.h;
         list.base = baseMatrix(p);
 
-        var run: Run = .{ .r = self, .a = list.arena.allocator() };
-        const data = try pages.contents(self.doc, p);
+        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(gpa);
+        defer _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
+        const scratch = self.scratch.?.allocator();
+        var run: Run = .{ .r = self, .a = list.arena.allocator(), .scratch = scratch };
+        const data = try pages.contents(self.doc, scratch, p);
         run.gs = .{};
         try run.interpret(data, p.resources, .identity);
         try run.annotations(p);
@@ -255,7 +265,10 @@ const max_gs_depth = 256;
 
 const Run = struct {
     r: *Renderer,
+    /// Allocator for the results (the display list's arena).
     a: Allocator,
+    /// Allocator for data needed only while the page is interpreted.
+    scratch: Allocator,
     commands: std.ArrayList(display.Command) = .empty,
     gs: GState = .{},
     stack: std.ArrayList(GState) = .empty,
@@ -302,7 +315,7 @@ const Run = struct {
             self.resources = saved_res;
             self.base_ctm = saved_base;
         }
-        var sc = content.Scanner.init(self.a, data);
+        var sc = content.Scanner.init(self.scratch, data);
         while (try sc.next()) |op| {
             self.ops += 1;
             if (self.ops > self.r.options.max_ops) return error.LimitExceeded;
@@ -542,9 +555,9 @@ const Run = struct {
         if (doc_.getNum(d, "CA")) |v| self.gs.stroke_alpha = std.math.clamp(v, 0, 1);
         if (doc_.getNum(d, "ca")) |v| self.gs.fill_alpha = std.math.clamp(v, 0, 1);
         if (doc_.get(d, "BM")) |bm| switch (bm) {
-            .name => |n| self.gs.blend = n,
+            .name => |n| self.gs.blend = try self.a.dupe(u8, n),
             .array => |arr| if (arr.len > 0) {
-                if (doc_.resolve(arr[0]).asName()) |n| self.gs.blend = n;
+                if (doc_.resolve(arr[0]).asName()) |n| self.gs.blend = try self.a.dupe(u8, n);
             },
             else => {},
         };
@@ -635,7 +648,7 @@ const Run = struct {
         };
         const cell = try self.a.create(display.DisplayList);
         cell.* = .{ .arena = std.heap.ArenaAllocator.init(self.a) };
-        var sub: Run = .{ .r = self.r, .a = cell.arena.allocator(), .depth = self.depth + 1 };
+        var sub: Run = .{ .r = self.r, .a = cell.arena.allocator(), .scratch = self.scratch, .depth = self.depth + 1 };
         sub.ops = self.ops;
         sub.gs = .{};
         if (rgb) |c| {
@@ -643,7 +656,7 @@ const Run = struct {
             sub.gs.stroke.paint = .{ .color = c };
         }
         const res = doc_.getDict(pd, "Resources") orelse self.resources;
-        const data = doc_.streamData(po.stream) catch "";
+        const data = doc_.streamDataIn(self.scratch, po.stream) catch "";
         sub.interpret(data, res, .identity) catch |err| switch (err) {
             error.LimitExceeded => {},
             else => |e| return e,
@@ -822,7 +835,7 @@ const Run = struct {
             const gname = f.names[g.code] orelse continue;
             const proc = doc_.get(f.char_procs, gname) orelse continue;
             if (proc != .stream) continue;
-            const data = doc_.streamData(proc.stream) catch continue;
+            const data = doc_.streamDataIn(self.scratch, proc.stream) catch continue;
             // Glyph space to user space: FontMatrix, then size, scaling and rise, then Tm and CTM.
             const trm = Matrix{ .a = self.gs.size * self.gs.th, .d = self.gs.size, .f = self.gs.rise };
             const m = Matrix.translate(g.x, 0).mul(trm).mul(run_tm);
@@ -895,7 +908,7 @@ const Run = struct {
             _ = self.active_forms.remove(num_id);
         };
         const doc_ = self.doc();
-        const data = doc_.streamData(st) catch return;
+        const data = doc_.streamDataIn(self.scratch, st) catch return;
         const res = doc_.getDict(st.dict, "Resources") orelse self.resources;
         const m = self.matrixOf(st.dict, "Matrix");
         try self.save();

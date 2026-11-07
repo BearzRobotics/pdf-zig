@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
     var rend = pdf.Renderer.init(&doc, .{});
+    defer rend.deinit();
     var dl = try rend.render(gpa, page);
     defer dl.deinit();
     std.debug.print("page {d}: {d:.0} x {d:.0} pt, rotate {d}, {d} commands\n", .{ page_no, dl.width, dl.height, page.rotate, dl.commands.len });
