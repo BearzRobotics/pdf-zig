@@ -463,16 +463,36 @@ fn winAnsiByte(u: u21) u8 {
     return '?';
 }
 
-/// UTF-8 text as WinAnsi bytes.
+/// UTF-8 text as WinAnsi bytes. Line breaks are kept as `\n` (CR LF and a
+/// lone CR become one), so the appearance can split the text into lines;
+/// a tab becomes a space.
 fn toWinAnsi(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var view = std.unicode.Utf8View.init(utf8) catch {
-        for (utf8) |c| try out.append(a, if (c < 0x80) c else '?');
+        for (utf8) |c| try out.append(a, if (c == '\n' or (c >= 0x20 and c < 0x80)) c else '?');
         return out.items;
     };
     var it = view.iterator();
-    while (it.nextCodepoint()) |cp| try out.append(a, winAnsiByte(cp));
+    var prev_cr = false;
+    while (it.nextCodepoint()) |cp| {
+        const was_cr = prev_cr;
+        prev_cr = cp == '\r';
+        switch (cp) {
+            '\r' => try out.append(a, '\n'),
+            '\n' => if (!was_cr) try out.append(a, '\n'),
+            '\t' => try out.append(a, ' '),
+            else => try out.append(a, winAnsiByte(cp)),
+        }
+    }
     return out.items;
+}
+
+test "line breaks survive the WinAnsi conversion, so multi-line fields break" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const out = try toWinAnsi(arena.allocator(), "Jos\u{e9} Doe\r\n12 Main\rSt\tA\nB");
+    try std.testing.expectEqualStrings("Jos\xe9 Doe\n12 Main\nSt A\nB", out);
 }
 
 fn textWidth(bytes: []const u8, size: f64) f64 {
