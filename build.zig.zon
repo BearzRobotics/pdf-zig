@@ -1,7 +1,7 @@
 .{
     .name = .pdf,
     .fingerprint = 0xef0db8ce2595b1f,
-    .version = "0.2.0",
+    .version = "0.2.1",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{},
     .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "include", "ai", "docs", "test", "LICENSE", "README.md" },
