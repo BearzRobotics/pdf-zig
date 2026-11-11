@@ -1,5 +1,6 @@
 //! Annotations (ISO 32000-1:2008, 12.5): reading the annotations of a page and
-//! creating text markup (highlight, underline, strike-out) and text notes.
+//! creating text markup (highlight, underline, strike-out), text notes,
+//! free-hand ink and text boxes.
 //!
 //! These are real PDF annotations. Each one gets an appearance stream, so
 //! every viewer draws it, and the page's `/Annots` array points at it. Writing
@@ -19,6 +20,7 @@ const display = @import("display.zig");
 const interp = @import("interp.zig");
 const text = @import("text.zig");
 const write = @import("write.zig");
+const forms = @import("form.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -254,6 +256,163 @@ pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta: Meta) Error
     return annot;
 }
 
+/// Adds free-hand ink: each stroke a list of points on the displayed page,
+/// drawn `width` points wide with round ends in `meta.color`.
+pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.Point, width: f64, meta: Meta) Error!Ref {
+    if (page.num == 0) return error.DirectPage;
+    var points: usize = 0;
+    for (strokes) |st| points += st.len;
+    if (strokes.len == 0 or points == 0) return error.BadGeometry;
+    const a = upd.allocator();
+    const inv = interp.baseMatrix(page).invert() orelse return error.BadGeometry;
+
+    // Strokes in user space, and their bounds widened by the line width.
+    const ink = try a.alloc(Object, strokes.len);
+    var bx0 = std.math.inf(f64);
+    var by0 = std.math.inf(f64);
+    var bx1 = -std.math.inf(f64);
+    var by1 = -std.math.inf(f64);
+    var ap: std.ArrayList(u8) = .empty;
+    const c = meta.color;
+    try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d:.2} w 1 J 1 j\n", .{ c[0], c[1], c[2], width });
+    for (strokes, 0..) |st, si| {
+        const nums = try a.alloc(f64, st.len * 2);
+        for (st, 0..) |pt, i| {
+            const u = inv.apply(pt.x, pt.y);
+            nums[i * 2] = u.x;
+            nums[i * 2 + 1] = u.y;
+            bx0 = @min(bx0, u.x);
+            by0 = @min(by0, u.y);
+            bx1 = @max(bx1, u.x);
+            by1 = @max(by1, u.y);
+            try ap.print(a, "{d:.2} {d:.2} {s}\n", .{ u.x, u.y, if (i == 0) "m" else "l" });
+        }
+        // A single point still shows: a dot, as a zero-length round-capped line.
+        if (st.len == 1) try ap.print(a, "{d:.2} {d:.2} l\n", .{ nums[0], nums[1] });
+        try ap.appendSlice(a, "S\n");
+        ink[si] = try write.numbers(a, nums);
+    }
+    const pad = width / 2 + 1;
+    const rect = [4]f64{ bx0 - pad, by0 - pad, bx1 + pad, by1 + pad };
+
+    const form_dict = try write.makeDict(a, &.{
+        .{ "Type", .{ .name = "XObject" } },
+        .{ "Subtype", .{ .name = "Form" } },
+        .{ "BBox", try write.numbers(a, &rect) },
+    });
+    const ap_form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
+    const bs = try write.makeDict(a, &.{.{ "W", .{ .real = width } }});
+
+    var entries: std.ArrayList(object.Entry) = .empty;
+    try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
+    try entries.append(a, .{ .key = "Subtype", .value = .{ .name = "Ink" } });
+    try entries.append(a, .{ .key = "Rect", .value = try write.numbers(a, &rect) });
+    try entries.append(a, .{ .key = "InkList", .value = .{ .array = ink } });
+    try entries.append(a, .{ .key = "BS", .value = .{ .dict = bs } });
+    try entries.append(a, .{ .key = "C", .value = try write.numbers(a, &c) });
+    try entries.append(a, .{ .key = "F", .value = .{ .integer = 4 } }); // Print
+    try appendMeta(a, &entries, meta);
+    const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = ap_form } }});
+    try entries.append(a, .{ .key = "AP", .value = .{ .dict = ap_dict } });
+    const annot = try upd.add(.{ .dict = .{ .entries = entries.items } });
+    try attachToPage(upd, page, annot);
+    return annot;
+}
+
+/// Adds a text box: `meta.contents` written in Helvetica at `size` points in
+/// `meta.color`, wrapped to the box (`x`, `y`, `w`, `h` on the displayed page,
+/// from its top left). Line breaks are kept; characters outside WinAnsi are
+/// drawn as `?` (the text itself keeps them).
+pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta: Meta) Error!Ref {
+    if (page.num == 0) return error.DirectPage;
+    if (w <= 0 or h <= 0 or size <= 0) return error.BadGeometry;
+    const a = upd.allocator();
+    const inv = interp.baseMatrix(page).invert() orelse return error.BadGeometry;
+    const p0 = inv.apply(x, y);
+    const p1 = inv.apply(x + w, y + h);
+    const rect = [4]f64{ @min(p0.x, p1.x), @min(p0.y, p1.y), @max(p0.x, p1.x), @max(p0.y, p1.y) };
+    const bw = rect[2] - rect[0];
+    const bh = rect[3] - rect[1];
+
+    // Lines: the text's own breaks, then a wrap at spaces to fit the box.
+    const pad = 2.0;
+    const bytes = try forms.toWinAnsi(a, meta.contents);
+    var lines: std.ArrayList([]const u8) = .empty;
+    var paras = std.mem.splitScalar(u8, bytes, '\n');
+    while (paras.next()) |para| {
+        var start: usize = 0;
+        var last_space: ?usize = null;
+        var i: usize = 0;
+        while (i < para.len) : (i += 1) {
+            if (para[i] == ' ') last_space = i;
+            if (forms.textWidth(para[start .. i + 1], size) > bw - 2 * pad and i > start) {
+                const cut = last_space orelse i;
+                const brk = if (cut > start) cut else i;
+                try lines.append(a, para[start..brk]);
+                start = if (para[brk] == ' ') brk + 1 else brk;
+                last_space = null;
+                i = start;
+                if (i > 0) i -= 1;
+            }
+        }
+        try lines.append(a, para[start..]);
+    }
+
+    const c = meta.color;
+    var ap: std.ArrayList(u8) = .empty;
+    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.2} Tf {d:.3} {d:.3} {d:.3} rg\n", .{ bw, bh, size, c[0], c[1], c[2] });
+    const leading = size * 1.15;
+    var baseline = bh - pad - size * 0.8;
+    var first = true;
+    for (lines.items) |line| {
+        if (first) {
+            try ap.print(a, "{d:.2} {d:.2} Td\n", .{ pad, baseline });
+            first = false;
+        } else try ap.print(a, "0 {d:.2} Td\n", .{-leading});
+        var sb: std.Io.Writer.Allocating = .init(a);
+        write.writeString(&sb.writer, line) catch return error.OutOfMemory;
+        try ap.print(a, "{s} Tj\n", .{sb.written()});
+        baseline -= leading;
+    }
+    try ap.appendSlice(a, "ET Q\n");
+
+    const font = try write.makeDict(a, &.{
+        .{ "Type", .{ .name = "Font" } },
+        .{ "Subtype", .{ .name = "Type1" } },
+        .{ "BaseFont", .{ .name = "Helvetica" } },
+        .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
+    });
+    const font_ref = try upd.add(.{ .dict = font });
+    const fonts = try write.makeDict(a, &.{.{ "Helv", .{ .ref = font_ref } }});
+    const res = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
+    const form_dict = try write.makeDict(a, &.{
+        .{ "Type", .{ .name = "XObject" } },
+        .{ "Subtype", .{ .name = "Form" } },
+        .{ "BBox", try write.numbers(a, &.{ 0, 0, bw, bh }) },
+        .{ "Matrix", try write.numbers(a, &.{ 1, 0, 0, 1, rect[0], rect[1] }) },
+        .{ "Resources", .{ .dict = res } },
+    });
+    const ap_form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
+    const da = try std.fmt.allocPrint(a, "/Helv {d:.2} Tf {d:.3} {d:.3} {d:.3} rg", .{ size, c[0], c[1], c[2] });
+    const dr = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
+    const border = try write.makeDict(a, &.{.{ "W", .{ .integer = 0 } }});
+
+    var entries: std.ArrayList(object.Entry) = .empty;
+    try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
+    try entries.append(a, .{ .key = "Subtype", .value = .{ .name = "FreeText" } });
+    try entries.append(a, .{ .key = "Rect", .value = try write.numbers(a, &rect) });
+    try entries.append(a, .{ .key = "DA", .value = .{ .string = da } });
+    try entries.append(a, .{ .key = "DR", .value = .{ .dict = dr } });
+    try entries.append(a, .{ .key = "BS", .value = .{ .dict = border } });
+    try entries.append(a, .{ .key = "F", .value = .{ .integer = 4 } }); // Print
+    try appendMeta(a, &entries, meta);
+    const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = ap_form } }});
+    try entries.append(a, .{ .key = "AP", .value = .{ .dict = ap_dict } });
+    const annot = try upd.add(.{ .dict = .{ .entries = entries.items } });
+    try attachToPage(upd, page, annot);
+    return annot;
+}
+
 fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) Allocator.Error!void {
     if (meta.contents.len > 0) try entries.append(a, .{ .key = "Contents", .value = .{ .string = try write.textString(a, meta.contents) } });
     if (meta.author.len > 0) try entries.append(a, .{ .key = "T", .value = .{ .string = try write.textString(a, meta.author) } });
@@ -444,6 +603,58 @@ test "a note, then its text edited, then removed" {
     const none = try list(arena.allocator(), &doc4, pages.page(&doc4, pl4, 0).?);
     try testing.expectEqual(@as(usize, 0), none.len);
     _ = page2;
+}
+
+test "ink and a text box are written, read back and drawn" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const bytes = try tests.page(arena.allocator(), "0 g", "", &.{}, "");
+
+    var doc = try Document.open(a, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const page = pages.page(&doc, pl, 0).?;
+
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const stroke = [_]display.Point{ .{ .x = 10, .y = 10 }, .{ .x = 30, .y = 20 }, .{ .x = 50, .y = 10 } };
+    const dot = [_]display.Point{.{ .x = 60, .y = 60 }};
+    _ = try addInk(&upd, page, &.{ &stroke, &dot }, 2, .{ .author = "Dakota", .color = .{ 0.9, 0.1, 0.1 } });
+    _ = try addFreeText(&upd, page, 10, 30, 80, 40, 10, .{ .contents = "Due Friday\nsee page 2", .color = .{ 0, 0, 0.8 } });
+    try testing.expectError(error.BadGeometry, addInk(&upd, page, &.{}, 2, .{}));
+    try testing.expectError(error.BadGeometry, addFreeText(&upd, page, 0, 0, 0, 10, 10, .{}));
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try roundTrip(a, &upd, &out);
+
+    var doc2 = try Document.open(a, out.written(), .{});
+    defer doc2.deinit();
+    try testing.expect(!doc2.repaired);
+    const pl2 = try pages.PageList.build(&doc2);
+    const page2 = pages.page(&doc2, pl2, 0).?;
+    const found = try list(arena.allocator(), &doc2, page2);
+    try testing.expectEqual(@as(usize, 2), found.len);
+    try testing.expectEqual(Kind.ink, found[0].kind);
+    try testing.expectEqual(Kind.free_text, found[1].kind);
+    try testing.expectEqualStrings("Due Friday\nsee page 2", found[1].contents);
+    // The ink's bounds hold its points (displayed y 10..20, the page 100 high: user 80..90).
+    try testing.expect(found[0].rect.y0 <= 80 and found[0].rect.y1 >= 90);
+
+    // Both drawn through their appearances: two strokes, two lines of text.
+    var rend = pdf_renderer(&doc2);
+    defer rend.deinit();
+    var dl = try rend.render(a, page2);
+    defer dl.deinit();
+    var strokes: usize = 0;
+    var glyph_runs: usize = 0;
+    for (dl.commands) |cmd| switch (cmd) {
+        .stroke => strokes += 1,
+        .text => glyph_runs += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), strokes);
+    try testing.expectEqual(@as(usize, 2), glyph_runs);
 }
 
 test "markup with no rectangles or a wrong kind is refused" {

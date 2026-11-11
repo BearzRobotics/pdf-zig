@@ -466,7 +466,7 @@ fn winAnsiByte(u: u21) u8 {
 /// UTF-8 text as WinAnsi bytes. Line breaks are kept as `\n` (CR LF and a
 /// lone CR become one), so the appearance can split the text into lines;
 /// a tab becomes a space.
-fn toWinAnsi(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
+pub fn toWinAnsi(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var view = std.unicode.Utf8View.init(utf8) catch {
         for (utf8) |c| try out.append(a, if (c == '\n' or (c >= 0x20 and c < 0x80)) c else '?');
@@ -495,7 +495,8 @@ test "line breaks survive the WinAnsi conversion, so multi-line fields break" {
     try std.testing.expectEqualStrings("Jos\xe9 Doe\n12 Main\nSt A\nB", out);
 }
 
-fn textWidth(bytes: []const u8, size: f64) f64 {
+/// Width of WinAnsi `bytes` in Helvetica at `size` points.
+pub fn textWidth(bytes: []const u8, size: f64) f64 {
     var w: f64 = 0;
     for (bytes) |b| w += @as(f64, @floatFromInt(helveticaWidth(encoding.unicodeOf(.win_ansi, b))));
     return w * size / 1000.0;
