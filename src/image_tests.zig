@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Image decoding on hand-built images.
 
 const std = @import("std");

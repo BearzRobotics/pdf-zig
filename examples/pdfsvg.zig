@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Draws a page's display list as SVG (a way to look at the output):
 //!
 //!     zig build && zig-out/bin/pdfsvg FILE.pdf PAGE > page.svg

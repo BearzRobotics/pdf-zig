@@ -105,4 +105,16 @@ conformance claim.
 updates, xref streams, repair, mutation fuzzing, encrypted files made with qpdf), pages, content streams, encodings,
 CMaps, fonts, functions, colour, the interpreter on hand-built pages, text extraction, images.
 
-License: MIT.
+## License
+
+Copyright (c) 2026 Dakota James Owen Keeler.
+
+pdf-zig is free software under the GNU Library General Public License, version 2
+or (at your option) any later version (`LGPL-2.0-or-later`). It comes with no
+warranty. See `LICENSE`. Releases made before this change were published
+under the MIT License.
+
+Material from others keeps its own terms: the Adobe Glyph List in `src/agl.zig`
+(its notice is in the file) and the fax code tables in `src/ccitt_tables.zig`
+(from zigimg, MIT License). The font widths in `src/std14.zig` were measured
+from Ghostscript's fonts (`scripts/gen-std14.py`).

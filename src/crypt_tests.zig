@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Encrypted files made with qpdf (see test/fixtures/README.md).
 
 const std = @import("std");

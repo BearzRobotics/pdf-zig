@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The display list: a page as a flat sequence of drawing commands with the
 //! graphics state resolved (the output of `interp.zig`). A renderer walks it;
 //! this library draws nothing itself.

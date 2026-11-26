@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! pdf-zig: a PDF reader library built on `std.Io`.
 //!
 //! See docs/decisions/0001-architecture.md for scope and docs/architecture.md

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Tests of the interpreter, text extraction and fonts on hand-built pages.
 
 const std = @import("std");

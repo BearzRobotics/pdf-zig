@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The PDF object model and the syntax parser (ISO 32000-1:2008, clauses 7.2
 //! and 7.3).
 //!

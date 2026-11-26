@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! CCITTFaxDecode (ISO 32000-1:2008, 7.4.6): ITU-T T.4 (Group 3, one- and
 //! two-dimensional) and T.6 (Group 4) fax coding.
 //!

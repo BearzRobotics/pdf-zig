@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Font dictionaries (ISO 32000-1:2008, clause 9): encodings, widths, composite
 //! fonts and the Unicode text of character codes.
 //!

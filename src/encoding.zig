@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Simple-font encodings (ISO 32000-1:2008, Annex D) and glyph names.
 //!
 //! An encoding maps a one-byte character code to a Unicode code point. The

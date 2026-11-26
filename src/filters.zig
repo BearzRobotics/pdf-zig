@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Stream filters (ISO 32000-1:2008, 7.4) and the predictors of 7.4.4.4.
 //!
 //! Decoded here: FlateDecode, LZWDecode, ASCII85Decode, ASCIIHexDecode and

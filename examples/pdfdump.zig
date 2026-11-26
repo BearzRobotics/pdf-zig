@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Prints the display list of a page:  zig build && zig-out/bin/pdfdump FILE.pdf [PAGE]
 
 const std = @import("std");

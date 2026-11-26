@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Tests of `Document` on small PDFs built in memory.
 
 const std = @import("std");

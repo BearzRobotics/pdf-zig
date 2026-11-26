@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Image pixels (ISO 32000-1:2008, 8.9): samples to straight-alpha RGBA.
 //!
 //! `decode` turns an image from a display list into pixels when its filters

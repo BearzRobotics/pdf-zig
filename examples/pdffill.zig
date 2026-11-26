@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Lists the form fields of a PDF, or fills them:
 //!     pdffill IN.pdf                       list the fields
 //!     pdffill IN.pdf OUT.pdf name=value…   fill text fields; for a check box "on" or "off",

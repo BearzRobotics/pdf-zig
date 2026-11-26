@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Prints what pdf-zig sees in a PDF file, and decodes every stream:
 //!
 //!     zig build && zig-out/bin/pdfinfo FILE.pdf

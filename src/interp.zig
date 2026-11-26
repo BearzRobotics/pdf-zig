@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The content-stream interpreter (ISO 32000-1:2008, clauses 8 and 9): turns a
 //! page into a `display.DisplayList`.
 //!

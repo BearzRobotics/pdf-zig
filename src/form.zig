@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Interactive forms (ISO 32000-1:2008, 12.7, "AcroForm"): finding the fields of
 //! a document and filling them in.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The document outline, the "bookmarks" of a PDF (ISO 32000-1:2008, 12.3.3),
 //! and destinations (12.3.2).
 //!

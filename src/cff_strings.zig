@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The 391 standard strings of the Compact Font Format (Adobe Technical Note
 //! #5176, Appendix A), by string id. Copied from the vendored zpdf in dkde, which
 //! is in the public domain (CC0).

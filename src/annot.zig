@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Annotations (ISO 32000-1:2008, 12.5): reading the annotations of a page and
 //! creating text markup (highlight, underline, strike-out), text notes,
 //! free-hand ink and text boxes.

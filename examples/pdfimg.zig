@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Decodes the images of a page and writes one as a PPM (alpha over white):
 //!
 //!     pdfimg FILE PAGE            lists the images of the page

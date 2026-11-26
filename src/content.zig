@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Content-stream syntax (ISO 32000-1:2008, 7.8.2): a sequence of operands
 //! followed by an operator. Inline images (`BI` ... `ID` ... `EI`, 8.9.7) are
 //! returned as one operation.

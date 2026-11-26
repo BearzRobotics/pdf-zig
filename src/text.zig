@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Plain text from a display list.
 //!
 //! Glyphs are placed on the page (top left origin, y down), grouped into lines

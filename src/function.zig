@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! PDF functions (ISO 32000-1:2008, 7.10): sampled (type 0), exponential
 //! (type 2), stitching (type 3) and PostScript calculator (type 4).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Highlights the first match of a word on page 1 and puts a note next to it:
 //!     zig build && zig-out/bin/pdfmark IN.pdf OUT.pdf WORD
 //! Used to check the output against other PDF readers.

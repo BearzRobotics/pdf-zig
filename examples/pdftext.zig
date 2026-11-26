@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Prints the text of a PDF:  zig build && zig-out/bin/pdftext [-raw] FILE.pdf [PAGE]
 
 const std = @import("std");

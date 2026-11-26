@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! CMap programs (ISO 32000-1:2008, 9.7.5 and 9.10.3): `/ToUnicode` maps from
 //! character codes to Unicode text, and embedded CID maps from codes to CIDs.
 //!

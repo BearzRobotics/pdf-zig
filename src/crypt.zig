@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The standard security handler (ISO 32000-1:2008, 7.6; AES-256 from ISO
 //! 32000-2:2020, 7.6.4): RC4 with 40 to 128 bit keys (V1, V2), AES-128 (V4,
 //! `AESV2`) and AES-256 (V5, revisions 5 and 6, `AESV3`).

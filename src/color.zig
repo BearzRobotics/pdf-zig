@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! Colour spaces (ISO 32000-1:2008, 8.6) and conversion to RGB.
 //!
 //! Device, CIE-based, ICC-based, Indexed, Separation, DeviceN and Pattern

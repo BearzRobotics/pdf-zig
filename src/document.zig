@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! A PDF file: header, cross-reference data, trailer and indirect objects
 //! (ISO 32000-1:2008, clause 7.5), with repair of damaged files.
 //!

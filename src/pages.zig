@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! The page tree (ISO 32000-1:2008, 7.7.3) and page attributes with
 //! inheritance (7.7.3.4).
 

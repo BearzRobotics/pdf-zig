@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.0-or-later
 //! pdf-zig build script. `zig build test` runs the tests.
 
 const std = @import("std");
