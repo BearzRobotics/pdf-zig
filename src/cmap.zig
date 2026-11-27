@@ -72,6 +72,8 @@ pub const CMap = struct {
     /// CID of `code` (a CID map), or null.
     pub fn cid(self: CMap, code: u32, bytes: u8) ?u32 {
         const r = self.find(code, bytes) orelse return null;
+        // Empty only for a text entry that does not belong in a CID map.
+        if (r.dst.len == 0) return null;
         return @as(u32, r.dst[0]) +| (code - r.first);
     }
 
@@ -427,4 +429,11 @@ test "ToUnicode destinations: long, unpaired surrogate, empty" {
         try std.testing.expect(try m.unicode(a, w[0], 1, &out));
         try std.testing.expectEqualStrings(w[1], out.items);
     }
+}
+
+test "an empty text entry in a CID map is not a CID" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = try parse(arena.allocator(), "1 beginbfchar <41> <> endbfchar");
+    try std.testing.expectEqual(@as(?u32, null), m.cid(0x41, 1));
 }
