@@ -320,3 +320,20 @@ const OneFailure = struct {
         self.child.rawFree(memory, alignment, ra);
     }
 };
+
+test "fromSamples reads the 8-bit samples it is documented to take for stencil masks" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try it.page(a, "q 10 0 0 10 0 0 cm /Im0 Do Q", "/XObject << /Im0 5 0 R >>", &.{try imageBody(a, "/Width 8 /Height 2 /ImageMask true /Filter /JBIG2Decode", "x")}, "");
+    const r = try it.render(bytes);
+    defer it.done(r);
+    var img: pdf.display.Image = undefined;
+    for (r.list.commands) |c| if (c == .image) {
+        img = c.image;
+    };
+    // As a codec gives them: one byte per pixel. 0 is painted.
+    const samples = "\xff\xff\xff\xff\x00\x00\x00\x00" ++ "\x00\x00\x00\x00\xff\xff\xff\xff";
+    const px = try pdf.image.fromSamples(&r.doc, a, img, samples, 8, 2, 1);
+    for (0..16) |i| try testing.expectEqual(@as(u8, if (samples[i] == 0) 255 else 0), px.rgba[i * 4 + 3]);
+}

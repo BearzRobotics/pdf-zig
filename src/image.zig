@@ -178,8 +178,10 @@ fn fromSamplesBpc(doc: *Document, a: Allocator, img: display.Image, samples: []c
         for (0..height) |y| {
             const row = if ((y + 1) * row_bytes <= samples.len) samples[y * row_bytes .. (y + 1) * row_bytes] else if (y * row_bytes < samples.len) samples[y * row_bytes ..] else samples[0..0];
             for (0..width) |x| {
-                const s = sampleAt(row, x, 1);
-                const painted = (s == 0) != invert;
+                // One bit as decoded here, or a caller's wider sample, which
+                // counts as 1 in its upper half.
+                const s = sampleAt(row, x, bpc);
+                const painted = (@as(f64, @floatFromInt(s)) < maxv / 2) != invert;
                 const o = (y * width + x) * 4;
                 rgba[o] = r;
                 rgba[o + 1] = g;
