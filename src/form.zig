@@ -106,6 +106,7 @@ pub fn fields(a: Allocator, doc: *Document, list: pages.PageList) Allocator.Erro
     }
 
     var ctx: Walk = .{ .a = a, .doc = doc, .list = list, .where = &where, .out = &out };
+    defer ctx.seen.deinit(a);
     for (roots) |r| try ctx.visit(r, "", .{}, 0);
     return out.toOwnedSlice(a);
 }
@@ -116,9 +117,16 @@ const Walk = struct {
     list: pages.PageList,
     where: *std.AutoHashMapUnmanaged(u32, usize),
     out: *std.ArrayList(Field),
+    /// Field nodes and `/Kids` arrays already walked, by object number, and the
+    /// number of nodes walked. A field has one parent, so nothing is lost by
+    /// walking an object once, and a damaged tree cannot grow exponentially.
+    seen: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    visited: usize = 0,
 
     fn visit(self: *Walk, node: Object, parent_name: []const u8, inh_in: Inherited, depth: usize) Allocator.Error!void {
-        if (depth > max_depth or self.out.items.len >= max_fields) return;
+        if (depth > max_depth or self.out.items.len >= max_fields or self.visited >= 4 * max_fields) return;
+        self.visited += 1;
+        if (node == .ref) if ((try self.seen.getOrPut(self.a, node.ref.num)).found_existing) return;
         const doc = self.doc;
         const d = doc.resolve(node).asDict() orelse return;
         var inh = inh_in;
@@ -146,6 +154,7 @@ const Walk = struct {
             if (kd.get("T") != null) group = true;
         };
         if (group) {
+            if (d.get("Kids").? == .ref) if ((try self.seen.getOrPut(self.a, d.get("Kids").?.ref.num)).found_existing) return;
             for (kids.?) |k| try self.visit(k, name, inh, depth + 1);
             return;
         }
@@ -732,4 +741,28 @@ test "read-only fields refuse and a signature is not filled" {
     f.read_only = false;
     try testing.expectError(error.WrongKind, setText(&upd, f, "x"));
     _ = &all;
+}
+
+test "a field tree that names its nodes many times is walked once" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Referenced kids, and direct kids that share a /Kids array.
+    for ([_][2][]const u8{
+        .{ "<< /T (a) /Kids [4 0 R 4 0 R 4 0 R 4 0 R] >>", "null" },
+        .{ "<< /T (a) /Kids 5 0 R >>", "[ << /T (b) /Kids 5 0 R >> << /T (c) /Kids 5 0 R >> << /T (d) /FT /Tx >> ]" },
+    }) |case| {
+        const bytes = try tests.buildFile(arena.allocator(), &.{
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            case[0],
+            case[1],
+        });
+        var doc = try Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        const all = try fields(arena.allocator(), &doc, pl);
+        try testing.expect(all.len <= 1);
+    }
 }
