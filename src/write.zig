@@ -140,15 +140,23 @@ pub fn textString(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice(a);
 }
 
-/// A text string read back as UTF-8: UTF-16BE (with a BOM) or PDFDocEncoding
-/// (treated as Latin-1 here, which agrees for all common characters).
+/// A text string (7.9.2.2) read back as UTF-8: UTF-16BE or UTF-8 when it
+/// starts with that byte order mark, else PDFDocEncoding. What cannot be
+/// decoded becomes U+FFFD.
 pub fn textToUtf8(a: Allocator, s: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
-    if (s.len >= 2 and s[0] == 0xFE and s[1] == 0xFF) {
+    if (std.mem.startsWith(u8, s, "\xFE\xFF")) {
         var i: usize = 2;
+        // Inside a language escape (ESC code ESC), which is not text.
+        var escaped = false;
         while (i + 1 < s.len) : (i += 2) {
             var cp: u21 = (@as(u21, s[i]) << 8) | s[i + 1];
+            if (cp == 0x1B) {
+                escaped = !escaped;
+                continue;
+            }
+            if (escaped) continue;
             if (cp >= 0xD800 and cp < 0xDC00 and i + 3 < s.len) {
                 const lo: u21 = (@as(u21, s[i + 2]) << 8) | s[i + 3];
                 if (lo >= 0xDC00 and lo < 0xE000) {
@@ -156,18 +164,46 @@ pub fn textToUtf8(a: Allocator, s: []const u8) Allocator.Error![]u8 {
                     i += 2;
                 }
             }
-            var buf: [4]u8 = undefined;
-            const n = std.unicode.utf8Encode(cp, &buf) catch continue;
-            try out.appendSlice(a, buf[0..n]);
+            try appendCodepoint(a, &out, cp);
+        }
+    } else if (std.mem.startsWith(u8, s, "\xEF\xBB\xBF")) {
+        var i: usize = 3;
+        while (i < s.len) {
+            const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+            const valid = len <= s.len - i and std.unicode.utf8ValidateSlice(s[i .. i + len]);
+            if (valid) try out.appendSlice(a, s[i .. i + len]) else try appendCodepoint(a, &out, 0xFFFD);
+            i += if (valid) len else 1;
         }
     } else {
-        for (s) |c| {
-            var buf: [4]u8 = undefined;
-            const n = std.unicode.utf8Encode(c, &buf) catch continue;
-            try out.appendSlice(a, buf[0..n]);
-        }
+        for (s) |c| try appendCodepoint(a, &out, pdfDocCodepoint(c));
     }
     return out.toOwnedSlice(a);
+}
+
+/// Appends `cp` as UTF-8; a surrogate on its own becomes U+FFFD.
+fn appendCodepoint(a: Allocator, out: *std.ArrayList(u8), cp: u21) Allocator.Error!void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch std.unicode.utf8Encode(0xFFFD, &buf) catch unreachable;
+    try out.appendSlice(a, buf[0..n]);
+}
+
+/// PDFDocEncoding (Annex D). It is Latin-1 except from 0x18 to 0x1F and from
+/// 0x80 to 0xA0, and has a few undefined codes.
+fn pdfDocCodepoint(c: u8) u21 {
+    const low = [8]u21{ 0x2D8, 0x2C7, 0x2C6, 0x2D9, 0x2DD, 0x2DB, 0x2DA, 0x2DC };
+    const high = [33]u21{
+        0x2022, 0x2020, 0x2021, 0x2026, 0x2014, 0x2013, 0x192, 0x2044, // 80
+        0x2039, 0x203A, 0x2212, 0x2030, 0x201E, 0x201C, 0x201D, 0x2018, // 88
+        0x2019, 0x201A, 0x2122, 0xFB01, 0xFB02, 0x141, 0x152, 0x160, // 90
+        0x178, 0x17D, 0x131, 0x142, 0x153, 0x161, 0x17E, 0xFFFD, // 98
+        0x20AC, // A0
+    };
+    return switch (c) {
+        0x18...0x1F => low[c - 0x18],
+        0x80...0xA0 => high[c - 0x80],
+        0x7F, 0xAD => 0xFFFD,
+        else => c,
+    };
 }
 
 // ---- building objects --------------------------------------------------------------------
@@ -681,5 +717,27 @@ test "reals keep their value when written and read back" {
         var aw: Io.Writer.Allocating = .init(a);
         try writeObject(&aw.writer, .{ .real = v });
         try testing.expectEqualStrings("0", aw.written());
+    }
+}
+
+test "text strings: PDFDocEncoding, UTF-8 and language escapes" {
+    const a = testing.allocator;
+    const cases = [_][2][]const u8{
+        // Where PDFDocEncoding differs from Latin-1 (Annex D).
+        .{ "\x18\x1f", "\u{2d8}\u{2dc}" },
+        .{ "\x80\x85\x8d\x8e\x90\x92\x96\x9e\xa0", "\u{2022}\u{2013}\u{201c}\u{201d}\u{2019}\u{2122}\u{152}\u{17e}\u{20ac}" },
+        .{ "tab\tcaf\xe9\n", "tab\tcaf\u{e9}\n" },
+        // Undefined codes are replaced.
+        .{ "a\x9f\x7f\xad", "a\u{fffd}\u{fffd}\u{fffd}" },
+        // UTF-8 with its byte order mark (PDF 2.0).
+        .{ "\xef\xbb\xbfcaf\xc3\xa9", "caf\u{e9}" },
+        .{ "\xef\xbb\xbfbad\xff", "bad\u{fffd}" },
+        // A language escape in UTF-16 is not text.
+        .{ "\xfe\xff\x00A\x00\x1b\x00e\x00n\x00\x1b\x00B", "AB" },
+    };
+    for (cases) |c| {
+        const got = try textToUtf8(a, c[0]);
+        defer a.free(got);
+        try testing.expectEqualStrings(c[1], got);
     }
 }
