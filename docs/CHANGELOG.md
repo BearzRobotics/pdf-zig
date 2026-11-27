@@ -5,6 +5,9 @@
 - UTF-8 passwords with non-ASCII characters now open files encrypted at R2 to R4
   (they are converted to PDFDocEncoding). R5 and R6 passwords also get SASLprep's
   character mapping; its NFKC normalization is still not applied.
+- In a composite font, a code outside the CMap's code space ranges now takes as many
+  bytes as ISO 32000-1, 9.7.6.3 says. It could take too few, which shifted the rest of
+  the string.
 - Squiggly underlines are drawn as a zigzag, not a straight line.
 - Filled comb text fields lay one character in each cell. `form.Field` has `comb`.
 

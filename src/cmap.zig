@@ -43,19 +43,26 @@ pub const CMap = struct {
     pub fn codeLength(self: CMap, s: []const u8, default: u8) u8 {
         if (self.spaces.len == 0) return @min(default, @as(u8, @intCast(@min(s.len, 255))));
         var best: u8 = 0;
+        var best_matched: usize = 0;
         for (self.spaces) |sp| {
-            if (sp.bytes > s.len) continue;
             // Each byte lies within the range of the bytes at its place
             // (9.7.6.2): <8140> <9FFC> does not take 82 20.
-            for (s[0..sp.bytes], 0..) |b, i| {
-                const shift: u5 = @intCast(8 * (sp.bytes - 1 - i));
+            var matched: usize = 0;
+            while (matched < sp.bytes and matched < s.len) : (matched += 1) {
+                const shift: u5 = @intCast(8 * (sp.bytes - 1 - matched));
                 const lo: u8 = @truncate(sp.lo >> shift);
                 const hi: u8 = @truncate(sp.hi >> shift);
-                if (b < lo or b > hi) break;
-            } else return sp.bytes;
-            if (best == 0 or sp.bytes < best) best = sp.bytes;
+                if (s[matched] < lo or s[matched] > hi) break;
+            }
+            if (matched == sp.bytes) return sp.bytes;
+            // No valid code so far. The one to consume is as long as those of
+            // the range that matches the most bytes, the shortest of equals;
+            // with no byte matching, that is the shortest of all (9.7.6.3).
+            if (best == 0 or matched > best_matched or (matched == best_matched and sp.bytes < best)) {
+                best = sp.bytes;
+                best_matched = matched;
+            }
         }
-        // No range matched: skip the shortest code length (9.7.6.3).
         return @min(best, @as(u8, @intCast(@min(s.len, 255))));
     }
 
@@ -449,9 +456,31 @@ test "code space ranges are matched byte by byte" {
     const m = try parse(arena.allocator(), "2 begincodespacerange <8140> <9FFC> <00> <80> endcodespacerange");
     try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x81\x40", 2));
     try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x9f\xfc", 2));
-    // 0x8220 lies between the two numbers, but 0x20 is below 0x40.
-    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x82\x20", 2));
     try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x41\x40", 2));
+    // 0x8220 lies between the two numbers, but 0x20 is below 0x40, so it is no
+    // valid code. Its first byte begins the two-byte range, whose length it
+    // therefore takes (9.7.6.3, b).
+    try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x82\x20", 2));
+    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x82", 2));
+    // A first byte that begins no range takes the shortest length (a).
+    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\xa0\x40", 2));
+}
+
+test "an invalid code takes the length of the range it matches furthest" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = try parse(arena.allocator(), "4 begincodespacerange <00> <20> <8000> <80ff> <813000> <8130ff> <90000000> <90ffffff> endcodespacerange");
+    // Two bytes match the three-byte range, one the two-byte range.
+    try std.testing.expectEqual(@as(u8, 3), m.codeLength("\x81\x30\x00\x00", 2));
+    // No more is taken than the string has left.
+    try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x81\x30", 2));
+    // Only the first byte of <813000> matches.
+    try std.testing.expectEqual(@as(u8, 3), m.codeLength("\x81\x99\x00\x00", 2));
+    // Nothing begins with 0x50: the shortest.
+    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x50\x00\x00\x00", 2));
+    // Equal partial matches: the shorter codes.
+    const tie = try parse(arena.allocator(), "2 begincodespacerange <813000> <8130ff> <8140> <81ff> endcodespacerange");
+    try std.testing.expectEqual(@as(u8, 2), tie.codeLength("\x81\x00\x00", 2));
 }
 
 test "random programs made of real operators are parsed and looked up safely" {
