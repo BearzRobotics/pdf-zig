@@ -45,6 +45,11 @@ pub const Space = union(enum) {
     /// A pattern space with the space of uncoloured patterns, if any.
     pattern: ?*const Space,
 
+    /// Whether painting in this space marks nothing (a `None` separation).
+    pub fn isInvisible(self: Space) bool {
+        return self == .tint and self.tint.none;
+    }
+
     /// Number of colour components of a colour in this space.
     pub fn components(self: Space) u8 {
         return switch (self) {

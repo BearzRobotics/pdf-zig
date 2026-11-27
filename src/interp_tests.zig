@@ -1048,3 +1048,20 @@ test "ToUnicode keys of another width still apply when none of the right width d
     const got = try pdf.text.extract(a, &r.list, .content);
     try testing.expectEqualStrings("HZ\n", got);
 }
+
+test "painting in a None separation leaves no mark" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tint = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>";
+    const resources = "/ColorSpace << /N [/Separation /None /DeviceGray " ++ tint ++ "] /DN [/DeviceN [/None /None] /DeviceGray " ++ tint ++ "] >> /Font << /F1 5 0 R >>";
+    const r = try render(try page(arena.allocator(), "/N cs 0 0 9 9 re f 1 sc 0 0 9 9 re f /DN CS 1 1 SC 0 0 9 9 re S BT /F1 10 Tf (x) Tj ET " ++
+        "BI /W 1 /H 1 /BPC 8 /CS /N ID a\nEI", resources, &.{helv_obj}, ""));
+    defer done(r);
+    for (r.list.commands) |c| switch (c) {
+        .fill => |f| try testing.expect(f.paint == .none),
+        .stroke => |s| try testing.expect(s.paint == .none),
+        .text => |t| try testing.expect(t.fill == .none),
+        .image => return error.TestUnexpectedResult,
+        else => {},
+    };
+}

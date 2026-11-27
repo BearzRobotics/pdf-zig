@@ -695,7 +695,7 @@ const Run = struct {
         cs.comps = @splat(0);
         const n = cs.space.components();
         cs.space.initial(cs.comps[0..n]);
-        cs.paint = if (cs.space == .pattern) .none else .{ .color = cs.space.toRgb(cs.comps[0..n]) };
+        cs.paint = if (cs.space == .pattern or cs.space.isInvisible()) .none else .{ .color = cs.space.toRgb(cs.comps[0..n]) };
     }
 
     fn setColor(self: *Run, op: content.Op, is_fill: bool) Error!void {
@@ -717,7 +717,7 @@ const Run = struct {
         const n = cs.space.components();
         cs.comps = @splat(0);
         for (0..@min(n, op.operands.len)) |i| cs.comps[i] = op.operands[i].asNum() orelse 0;
-        cs.paint = .{ .color = cs.space.toRgb(cs.comps[0..n]) };
+        cs.paint = if (cs.space.isInvisible()) .none else .{ .color = cs.space.toRgb(cs.comps[0..n]) };
     }
 
     // ---- patterns and shadings -------------------------------------------------------------
@@ -796,6 +796,7 @@ const Run = struct {
         const st = doc_.getInt(sd, "ShadingType") orelse return null;
         if (st != 2 and st != 3) return null;
         const space = try color.parseOwned(doc_, sd.get("ColorSpace") orelse return null, self.resources, 0);
+        if (space.isInvisible()) return null;
         const coords_arr = doc_.getArray(sd, "Coords") orelse return null;
         const need: usize = if (st == 2) 4 else 6;
         if (coords_arr.len < need) return null;
@@ -1022,6 +1023,7 @@ const Run = struct {
             if (inline_image) try color.parse(doc_, cs, self.resources, 0) else try color.parseOwned(doc_, cs, self.resources, 0)
         else
             .gray;
+        if (!is_mask and space.isInvisible()) return;
         try self.emit(.{ .image = .{
             .stream = st,
             .width = @intCast(w),
