@@ -1185,3 +1185,36 @@ test "a DeviceN space with more than eight colorants keeps its component count" 
     try testing.expectEqual(@as(u8, 255), px.rgba[0]);
     try testing.expectEqual(@as(u8, 0), px.rgba[4]);
 }
+
+test "encoding edge cases: unused and special WinAnsi codes, expert and Type 3 names" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const enc = pdf.encoding;
+    try testing.expectEqual(@as(u21, 0x2022), enc.unicodeOf(.win_ansi, 0x7F));
+    // PDFDocEncoding is its own table, not WinAnsi.
+    try testing.expectEqual(@as(u21, 0x2022), enc.unicodeOf(.pdf_doc, 0x80));
+    try testing.expectEqual(@as(u21, 0x20AC), enc.unicodeOf(.pdf_doc, 0xA0));
+    try testing.expectEqual(@as(u21, 0), enc.unicodeOf(.pdf_doc, 0x9F));
+    const r = try render(try page(a, "BT /F1 10 Tf (x) Tj /F2 10 Tf (x) Tj /F3 10 Tf (a) Tj ET", "/Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R >>", &.{
+        "<< /Type /Font /Subtype /TrueType /BaseFont /X /Encoding /WinAnsiEncoding >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /X /Encoding /MacExpertEncoding >>",
+        "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << >> /Encoding << /Differences [97 /ga] >> /FirstChar 97 /Widths [500] >>",
+    }, ""));
+    defer done(r);
+    var fonts: [3]*const pdf.font.Font = undefined;
+    var n: usize = 0;
+    for (r.list.commands) |c| if (c == .text) {
+        fonts[n] = c.text.font;
+        n += 1;
+    };
+    // The names a font program has for the no-break space and soft hyphen.
+    try testing.expectEqualStrings("space", fonts[0].names[0xA0].?);
+    try testing.expectEqualStrings("hyphen", fonts[0].names[0xAD].?);
+    try testing.expectEqualStrings("bullet", fonts[0].names[0x7F].?);
+    // No expert glyph tables: nothing is invented.
+    try testing.expect(fonts[1].names['x'] == null);
+    // A Type 3 font has only the names of its Differences.
+    try testing.expect(fonts[2].names['b'] == null);
+    try testing.expectEqualStrings("ga", fonts[2].names['a'].?);
+}

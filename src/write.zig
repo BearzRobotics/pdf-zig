@@ -204,7 +204,7 @@ fn appendCodepoint(a: Allocator, out: *std.ArrayList(u8), cp: u21) Allocator.Err
 
 /// PDFDocEncoding (Annex D). It is Latin-1 except from 0x18 to 0x1F and from
 /// 0x80 to 0xA0, and has a few undefined codes.
-fn pdfDocCodepoint(c: u8) u21 {
+pub fn pdfDocCodepoint(c: u8) u21 {
     const low = [8]u21{ 0x2D8, 0x2C7, 0x2C6, 0x2D9, 0x2DD, 0x2DB, 0x2DA, 0x2DC };
     const high = [33]u21{
         0x2022, 0x2020, 0x2021, 0x2026, 0x2014, 0x2013, 0x192, 0x2044, // 80

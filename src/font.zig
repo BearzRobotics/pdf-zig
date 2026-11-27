@@ -178,7 +178,12 @@ pub const Font = struct {
             self.unicode[c] = u;
             // The Unicode value stays as a guess for text extraction; no
             // name, so that the program's own encoding picks the glyph.
-            if (u != 0 and !built_in) self.names[c] = encoding.nameOfUnicode(u);
+            // A Type 3 font draws only what its Differences name.
+            if (u != 0 and !built_in and self.subtype != .type3) {
+                // Fonts call the no-break space and soft hyphen by the plain
+                // names (Annex D, notes to the table).
+                self.names[c] = encoding.nameOfUnicode(if (u == 0xA0) ' ' else if (u == 0xAD) '-' else u);
+            }
         }
         if (diffs) |ds| {
             var code: i64 = 0;
@@ -205,10 +210,6 @@ pub const Font = struct {
             self.width_scale = self.font_matrix[0];
             if (doc.getArray(dict, "FontBBox")) |b| if (b.len >= 4) {
                 for (0..4) |i| self.font_bbox[i] = doc.resolve(b[i]).asNum() orelse 0;
-            };
-            // Type 3 glyph names come from the Differences only.
-            if (diffs == null) for (&self.names) |*nm| {
-                nm.* = null;
             };
         }
 

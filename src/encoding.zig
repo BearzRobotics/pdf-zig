@@ -11,7 +11,15 @@
 const std = @import("std");
 const agl = @import("agl.zig");
 
-pub const Base = enum { standard, win_ansi, mac_roman, pdf_doc, none };
+pub const Base = enum {
+    standard,
+    win_ansi,
+    mac_roman,
+    pdf_doc,
+    /// MacExpertEncoding: its glyphs have no tables here, so no code has a value.
+    expert,
+    none,
+};
 
 /// Glyph names with Unicode values: the Latin glyphs of the three encodings and
 /// the common typographic extras, from the Adobe Glyph List.
@@ -205,6 +213,7 @@ pub fn unicodeOf(base: Base, code: u8) u21 {
     switch (base) {
         .win_ansi => {
             if (code >= 0x20 and code < 0x7F) return code;
+            if (code == 0x7F) return 0x2022; // unused codes show a bullet (Annex D)
             if (code >= 0x80 and code < 0xA0) return win_high[code - 0x80];
             if (code >= 0xA0) return code;
             return 0;
@@ -221,8 +230,11 @@ pub fn unicodeOf(base: Base, code: u8) u21 {
             if (code >= 0xA1) return standardHigh(code);
             return 0;
         },
-        .pdf_doc => return unicodeOf(.win_ansi, code),
-        .none => return 0,
+        .pdf_doc => {
+            const u = @import("write.zig").pdfDocCodepoint(code);
+            return if (u == 0xFFFD or u < 0x20) 0 else u;
+        },
+        .expert, .none => return 0,
     }
 }
 
@@ -239,7 +251,7 @@ pub fn baseFromName(name: []const u8) ?Base {
     if (std.mem.eql(u8, name, "MacRomanEncoding")) return .mac_roman;
     if (std.mem.eql(u8, name, "StandardEncoding")) return .standard;
     if (std.mem.eql(u8, name, "PDFDocEncoding")) return .pdf_doc;
-    if (std.mem.eql(u8, name, "MacExpertEncoding")) return .standard; // no expert glyph tables here
+    if (std.mem.eql(u8, name, "MacExpertEncoding")) return .expert;
     return null;
 }
 
