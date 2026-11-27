@@ -745,6 +745,12 @@ const Run = struct {
         const bbox = self.rectOf(pd, "BBox") orelse return .none;
         const xstep = doc_.getNum(pd, "XStep") orelse (bbox[2] - bbox[0]);
         const ystep = doc_.getNum(pd, "YStep") orelse (bbox[3] - bbox[1]);
+        // A renderer steps across the area it fills: a step of zero, or one
+        // that is not finite, would never get there (8.7.3.1).
+        for ([_]f64{ xstep, ystep }) |step| {
+            if (!(std.math.isFinite(step) and step != 0)) return .none;
+        }
+        if (!(bbox[2] > bbox[0] and bbox[3] > bbox[1])) return .none;
         if (num_id != 0) if (self.tiling_cache.get(key)) |cell| {
             return .{ .tiling = .{ .cell = cell, .bbox = bbox, .xstep = xstep, .ystep = ystep, .matrix = m, .color = rgb } };
         };
@@ -831,6 +837,9 @@ const Run = struct {
                 error.BadFunction => self.r.left_out = true,
             },
         };
+        // A shading of these types must have a function (table 80, table 81);
+        // without one there are no colours to show.
+        if (funcs.items.len == 0) return null;
         const n_stops = 64;
         const stops = try self.a.alloc(display.Stop, n_stops);
         for (0..n_stops) |i| {
@@ -846,10 +855,6 @@ const Run = struct {
                 f.eval(&.{t}, &one);
                 comps[n] = one[0];
                 n += 1;
-            }
-            if (funcs.items.len == 0) {
-                n = space.components();
-                if (n > 0) comps[0] = t;
             }
             stops[i] = .{ .offset = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n_stops - 1)), .color = space.toRgb(comps[0..n]) };
         }

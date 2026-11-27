@@ -1134,3 +1134,20 @@ test "Type 3 text is sized by its font matrix, not by Tf alone" {
     try testing.expectEqualStrings("aaa\n", lay.text);
     try testing.expectApproxEqAbs(@as(f64, 10), lay.boxes[0].rect.y1 - lay.boxes[0].rect.y0, 0.01);
 }
+
+test "shadings without a usable function and tiling without steps paint nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "", "/Function << /FunctionType 99 >>" }) |function| {
+        const r = try render(try page(a, "/S sh", "/Shading << /S 5 0 R >>", &.{try std.fmt.allocPrint(a, "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] {s} >>", .{function})}, ""));
+        defer done(r);
+        try testing.expectEqual(@as(usize, 0), countKind(r.list, .shading));
+    }
+    const nines: [400]u8 = @splat('9');
+    for ([_][]const u8{ "/BBox [0 0 1 1] /XStep 0 /YStep 1", "/BBox [0 0 1 1] /XStep 1 /YStep 0", try std.fmt.allocPrint(a, "/BBox [0 0 1 1] /XStep {s} /YStep 1", .{&nines}), "/BBox [0 0 0 0]" }) |geometry| {
+        const r = try render(try page(a, "/Pattern cs /P scn 0 0 9 9 re f", "/Pattern << /P 5 0 R >>", &.{try std.fmt.allocPrint(a, "<< /PatternType 1 /PaintType 1 {s} /Length 0 >>\nstream\n\nendstream", .{geometry})}, ""));
+        defer done(r);
+        for (r.list.commands) |c| if (c == .fill) try testing.expect(c.fill.paint == .none);
+    }
+}
