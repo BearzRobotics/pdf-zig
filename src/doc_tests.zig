@@ -771,3 +771,18 @@ test "out of memory inside an object stream is not remembered either" {
         try testing.expectEqual(@as(usize, 20_000), doc.getObject(5).array.len);
     }
 }
+
+test "a trailer with very many keys is merged quickly, first value first" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var keys: std.ArrayList(u8) = .empty;
+    // Comparing every key with every other would take minutes.
+    for (0..200_000) |i| try keys.print(a, "/K{d} {d} ", .{ i, i });
+    try keys.appendSlice(a, "/K7 999 ");
+    const bytes = try std.mem.replaceOwned(u8, a, try build(a, &simple), "/Root 1 0 R", try std.fmt.allocPrint(a, "/Root 1 0 R {s}", .{keys.items}));
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expectEqual(@as(?i64, 7), doc.trailer.get("K7").?.asInt());
+    try testing.expectEqual(@as(?i64, 199_999), doc.trailer.get("K199999").?.asInt());
+}

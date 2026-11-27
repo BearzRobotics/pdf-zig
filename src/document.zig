@@ -241,14 +241,12 @@ pub const Document = struct {
     /// The newest value of each trailer key that matters.
     fn mergeTrailers(self: *Document, trailers: []const Dict) Allocator.Error!Dict {
         var entries: std.ArrayList(object.Entry) = .empty;
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.arena.child_allocator);
         for (trailers) |t| {
             for (t.entries) |e| {
                 if (std.mem.eql(u8, e.key, "Prev") or std.mem.eql(u8, e.key, "XRefStm")) continue;
-                var seen = false;
-                for (entries.items) |x| if (std.mem.eql(u8, x.key, e.key)) {
-                    seen = true;
-                };
-                if (!seen) try entries.append(self.a(), e);
+                if (!(try seen.getOrPut(self.arena.child_allocator, e.key)).found_existing) try entries.append(self.a(), e);
             }
         }
         return .{ .entries = entries.items };
