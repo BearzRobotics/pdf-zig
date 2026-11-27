@@ -322,8 +322,8 @@ fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) E
     const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, shown, field.password)));
     for (field.widgets) |w| {
         if (w.num == 0) continue;
-        const ap = try textAppearance(upd, w.rect, shown, field.multiline, field.password, da);
         const wd = upd.get(w.num).asDict() orelse continue;
+        const ap = try textAppearance(upd, w.rect, try widgetStyle(upd.doc, a, wd), shown, field.multiline, field.password, da);
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
     }
 }
@@ -596,11 +596,58 @@ fn shownText(a: Allocator, value: []const u8, password: bool) Allocator.Error![]
     return stars;
 }
 
+/// What a widget says about how it is drawn: `/MK` and its border.
+const WidgetStyle = struct {
+    /// `/MK /R`: the content is turned this far counterclockwise.
+    rotate: u16 = 0,
+    /// Operators setting the fill and stroke colour of the background and border.
+    background: ?[]const u8 = null,
+    border: ?[]const u8 = null,
+    border_width: f64 = 1,
+};
+
+fn widgetStyle(doc: *Document, a: Allocator, wd: Dict) Allocator.Error!WidgetStyle {
+    var style: WidgetStyle = .{};
+    if (doc.getDict(wd, "MK")) |mk| {
+        const turn = @mod(doc.getInt(mk, "R") orelse 0, 360);
+        if (turn == 90 or turn == 180 or turn == 270) style.rotate = @intCast(turn);
+        if (doc.getArray(mk, "BG")) |c| style.background = try colorOperator(doc, a, c, .{ "g", "rg", "k" });
+        if (doc.getArray(mk, "BC")) |c| style.border = try colorOperator(doc, a, c, .{ "G", "RG", "K" });
+    }
+    var width: ?f64 = null;
+    if (doc.getDict(wd, "BS")) |bs| width = doc.getNum(bs, "W");
+    if (width == null) if (doc.getArray(wd, "Border")) |b| if (b.len >= 3) {
+        width = doc.resolve(b[2]).asNum();
+    };
+    if (width) |w| style.border_width = if (w > 0 and w <= 100) w else 0;
+    return style;
+}
+
+/// The operator for an `/MK` colour of 1, 3 or 4 components; null for none.
+fn colorOperator(doc: *Document, a: Allocator, c: []const Object, names: [3][]const u8) Allocator.Error!?[]const u8 {
+    const which: usize = switch (c.len) {
+        1 => 0,
+        3 => 1,
+        4 => 2,
+        else => return null,
+    };
+    var out: std.ArrayList(u8) = .empty;
+    for (c) |item| {
+        const v = doc.resolve(item).asNum() orelse return null;
+        if (!std.math.isFinite(v)) return null;
+        try out.print(a, "{d} ", .{std.math.clamp(v, 0, 1)});
+    }
+    try out.appendSlice(a, names[which]);
+    return out.items;
+}
+
 /// A form XObject that draws `value` inside `rect` (placed at the widget's size).
-fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: bool, password: bool, da: DefaultAppearance) Error!Ref {
+fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, multiline: bool, password: bool, da: DefaultAppearance) Error!Ref {
     const a = upd.allocator();
-    const w = rect.width();
-    const h = rect.height();
+    // Width and height of the content, which a turned widget swaps.
+    const sideways = style.rotate == 90 or style.rotate == 270;
+    const w = if (sideways) rect.height() else rect.width();
+    const h = if (sideways) rect.width() else rect.height();
     const pad = 2.0;
 
     const bytes = try toWinAnsi(a, try shownText(a, value, password));
@@ -635,6 +682,11 @@ fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: 
     var content: std.ArrayList(u8) = .empty;
     var font_name: std.Io.Writer.Allocating = .init(a);
     write.writeName(&font_name.writer, da.font_name) catch return error.OutOfMemory;
+    if (style.background) |paint_op| try content.print(a, "q {s} 0 0 {d:.2} {d:.2} re f Q\n", .{ paint_op, w, h });
+    if (style.border) |paint_op| if (style.border_width > 0) {
+        const bw = style.border_width;
+        try content.print(a, "q {s} {d:.2} w {d:.2} {d:.2} {d:.2} {d:.2} re S Q\n", .{ paint_op, bw, bw / 2, bw / 2, w - bw, h - bw });
+    };
     try content.print(a, "/Tx BMC\nq\n{d:.2} {d:.2} {d:.2} {d:.2} re W n\nBT\n{s}\n{s} {d:.2} Tf\n", .{ pad / 2, pad / 2, w - pad, h - pad, da.color_ops, font_name.written(), size });
     const leading = size * 1.15;
     // The first baseline: vertically centred for one line, from the top for several.
@@ -665,6 +717,13 @@ fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: 
         .{ "Type", .{ .name = "XObject" } },
         .{ "Subtype", .{ .name = "Form" } },
         .{ "BBox", try write.numbers(a, &.{ 0, 0, w, h }) },
+        // The turn; viewers fit the turned box onto the widget's rectangle.
+        .{ "Matrix", try write.numbers(a, &switch (style.rotate) {
+            90 => [6]f64{ 0, 1, -1, 0, h, 0 },
+            180 => [6]f64{ -1, 0, 0, -1, w, h },
+            270 => [6]f64{ 0, -1, 1, 0, 0, w },
+            else => [6]f64{ 1, 0, 0, 1, 0, 0 },
+        }) },
         .{ "Resources", .{ .dict = res } },
     });
     return upd.add(.{ .stream = .{ .dict = dict, .data = content.items } });
@@ -1112,4 +1171,49 @@ test "a widget whose normal appearance is a single stream has no on state" {
     defer upd.deinit();
     try testing.expectEqualStrings("", all[0].widgets[0].on_state);
     try testing.expectError(error.NoAppearanceState, setChecked(&upd, all[0], 0, true));
+}
+
+test "a filled field keeps the widget's background, border and rotation" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>",
+        "<< /Subtype /Widget /FT /Tx /T (f) /Rect [20 20 50 180] /MK << /R 90 /BG [1 1 0] /BC [0 0 1] >> /BS << /W 2 >> >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setText(&upd, all[0], "sideways text");
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try upd.write(testing.allocator, &out.writer);
+    var doc2 = try Document.open(testing.allocator, out.written(), .{});
+    defer doc2.deinit();
+    const pl2 = try pages.PageList.build(&doc2);
+    var rend = interp.Renderer.init(&doc2, .{});
+    defer rend.deinit();
+    var dl = try rend.render(testing.allocator, pages.page(&doc2, pl2, 0).?);
+    defer dl.deinit();
+    var yellow = false;
+    var blue_border = false;
+    for (dl.commands) |c| switch (c) {
+        .fill => |f| yellow = yellow or (f.paint.color.r == 1 and f.paint.color.g == 1 and f.paint.color.b == 0),
+        .stroke => |s| blue_border = blue_border or (s.paint.color.b == 1 and s.paint.color.r == 0 and s.style.width == 2),
+        .text => |t| {
+            // Written along the widget's long side, reading upwards, inside it.
+            const m = t.tm.mul(t.ctm);
+            try testing.expectApproxEqAbs(@as(f64, 0), m.a, 1e-9);
+            try testing.expect(m.b > 0);
+            try testing.expect(m.e > 20 and m.e < 50 and m.f >= 20 and m.f < 40);
+        },
+        else => {},
+    };
+    try testing.expect(yellow and blue_border);
 }
