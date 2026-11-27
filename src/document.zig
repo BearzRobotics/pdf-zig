@@ -794,34 +794,43 @@ pub const Document = struct {
 
     // ---- streams -------------------------------------------------------------------
 
-    /// The `/Filter` chain of a stream with its decode parameters resolved.
+    /// The `/Filter` chain of a stream with its decode parameters resolved,
+    /// owned by the document.
     pub fn filterList(self: *Document, dict: Dict) Allocator.Error![]const filters.Filter {
+        return self.filterListIn(self.a(), dict);
+    }
+
+    fn filterListIn(self: *Document, alloc: Allocator, dict: Dict) Allocator.Error![]const filters.Filter {
         var list: std.ArrayList(filters.Filter) = .empty;
         const f = self.get(dict, "Filter") orelse self.get(dict, "F") orelse return list.items;
         const parms = self.get(dict, "DecodeParms") orelse self.get(dict, "DP");
         switch (f) {
-            .name => |n| try list.append(self.a(), .{ .name = n, .parms = self.parmsAt(parms, 0) }),
+            .name => |n| try list.append(alloc, .{ .name = n, .parms = self.parmsAt(alloc, parms, 0) }),
             .array => |arr| for (arr, 0..) |item, i| {
                 const name = self.resolve(item).asName() orelse continue;
-                try list.append(self.a(), .{ .name = name, .parms = self.parmsAt(parms, i) });
+                try list.append(alloc, .{ .name = name, .parms = self.parmsAt(alloc, parms, i) });
             },
             else => {},
         }
         return list.items;
     }
 
-    fn parmsAt(self: *Document, parms: ?Object, i: usize) Dict {
+    fn parmsAt(self: *Document, alloc: Allocator, parms: ?Object, i: usize) Dict {
         const p = parms orelse return .{};
         return switch (p) {
-            .dict => |d| if (i == 0) self.resolveDict(d) else .{},
-            .array => |arr| if (i < arr.len) self.resolveDict(self.resolve(arr[i]).asDict() orelse .{}) else .{},
+            .dict => |d| if (i == 0) self.resolveDict(alloc, d) else .{},
+            .array => |arr| if (i < arr.len) self.resolveDict(alloc, self.resolve(arr[i]).asDict() orelse .{}) else .{},
             else => .{},
         };
     }
 
-    /// A copy of `d` whose values are resolved (so filter code sees numbers, not references).
-    fn resolveDict(self: *Document, d: Dict) Dict {
-        const out = self.a().alloc(object.Entry, d.entries.len) catch |err| {
+    /// `d` with its values resolved (so filter code sees numbers, not
+    /// references): `d` itself when there is nothing to resolve.
+    fn resolveDict(self: *Document, alloc: Allocator, d: Dict) Dict {
+        for (d.entries) |e| {
+            if (e.value == .ref) break;
+        } else return d;
+        const out = alloc.alloc(object.Entry, d.entries.len) catch |err| {
             self.noteError(err);
             return d;
         };
@@ -851,7 +860,7 @@ pub const Document = struct {
 
     fn decodeFiltered(self: *Document, alloc: Allocator, st: Stream) Error!filters.Result {
         const oom_before = self.oom_events;
-        const list = try self.filterList(st.dict);
+        const list = try self.filterListIn(alloc, st.dict);
         // A filter that could not be read must not look like no filter.
         try self.checkMemory(oom_before);
         var data = st.data;

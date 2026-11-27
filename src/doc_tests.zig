@@ -803,3 +803,22 @@ test "references inside a /DecodeParms array are resolved" {
     try testing.expectEqual(@as(?i64, 12), list[1].parms.get("Predictor").?.asInt());
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, try doc.streamData(doc.getObject(4).stream));
 }
+
+test "decoding into the caller's allocator does not grow the document" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(testing.allocator, try build(a, &(simple ++ .{
+        "<< /Filter [/AHx /Fl] /DecodeParms [null << /Predictor 1 /Columns 3 >>] /Length 31 >>\nstream\n7801010400fbff01010101000e0005>\nendstream",
+    })), .{});
+    defer doc.deinit();
+    const st = doc.getObject(4).stream;
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const before = doc.arena.queryCapacity();
+    for (0..20_000) |_| {
+        _ = try doc.decodeStreamIn(scratch.allocator(), st);
+        _ = scratch.reset(.retain_capacity);
+    }
+    try testing.expectEqual(before, doc.arena.queryCapacity());
+}
