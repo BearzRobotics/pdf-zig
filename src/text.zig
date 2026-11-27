@@ -11,6 +11,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const display = @import("display.zig");
+const font_mod = @import("font.zig");
 
 pub const Order = enum { reading, content };
 
@@ -151,6 +152,9 @@ pub fn extract(a: Allocator, list: *const display.DisplayList, order: Order) All
 fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: display.Matrix) Allocator.Error!void {
     // Glyph space to page: text space, then user space, then the page.
     const to_page = t.tm.mul(t.ctm).mul(base);
+    // The height of an em in text space units: the font size, except for a
+    // Type 3 font, whose font matrix and bounding box say how large it is.
+    const em = t.size * emScale(t.font);
     for (t.glyphs) |g| {
         if (g.text.len == 0) continue;
         const p0 = to_page.apply(g.x, t.rise);
@@ -162,8 +166,8 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
         // ascent of 0.8 of the font size, which fits most fonts closely enough
         // to show a selection.
         const right = g.x + g.advance * t.size * t.h_scale;
-        const low = t.rise - 0.2 * t.size;
-        const high = t.rise + 0.8 * t.size;
+        const low = t.rise - 0.2 * em;
+        const high = t.rise + 0.8 * em;
         // All four corners: tilted or sheared, any of them can be an extreme.
         const first = to_page.apply(g.x, low);
         var box: Rect = .{ .x0 = first.x, .y0 = first.y, .x1 = first.x, .y1 = first.y };
@@ -180,11 +184,19 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
             .x0 = p0.x * along.x + p0.y * along.y,
             .x1 = p1.x * along.x + p1.y * along.y,
             .y = p0.x * across.x + p0.y * across.y,
-            .size = @abs(t.size * vscale),
+            .size = @abs(em * vscale),
             .text = g.text,
             .box = box,
         });
     }
+}
+
+/// What a font size of 1 is in em heights: 1, but for a Type 3 font the height
+/// of its bounding box under its font matrix, when it gives one.
+fn emScale(f: *const font_mod.Font) f64 {
+    if (f.subtype != .type3) return 1;
+    const height = @abs((f.font_bbox[3] - f.font_bbox[1]) * f.font_matrix[3]);
+    return if (height > 0 and std.math.isFinite(height)) height else 1;
 }
 
 /// The direction glyphs advance in, in whole degrees clockwise on the page.

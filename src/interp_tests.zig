@@ -1119,3 +1119,18 @@ test "text and shadings carry the blend mode" {
     try testing.expectEqualStrings("Multiply", r.list.commands[0].text.blend);
     try testing.expectEqualStrings("Multiply", r.list.commands[1].shading.blend);
 }
+
+test "Type 3 text is sized by its font matrix, not by Tf alone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Glyph space is user space: with Tf 1 the glyphs are about 10 points high.
+    const r = try render(try page(a, "BT /F1 1 Tf 10 50 Td [(a) -500 (a) -500 (a)] TJ ET", helv, &.{
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 -2 6 8] /FontMatrix [1 0 0 1 0 0] /CharProcs << /ga 6 0 R >> /Encoding << /Differences [97 /a] >> /FirstChar 97 /Widths [6] >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+    }, ""));
+    defer done(r);
+    const lay = try pdf.text.layout(a, &r.list);
+    try testing.expectEqualStrings("aaa\n", lay.text);
+    try testing.expectApproxEqAbs(@as(f64, 10), lay.boxes[0].rect.y1 - lay.boxes[0].rect.y0, 0.01);
+}

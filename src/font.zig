@@ -78,6 +78,8 @@ pub const Font = struct {
 
     // Type 3.
     font_matrix: [6]f64 = .{ 0.001, 0, 0, 0.001, 0, 0 },
+    /// `/FontBBox` of a Type 3 font, in glyph space; zero if absent.
+    font_bbox: [4]f64 = @splat(0),
     char_procs: Dict = .{},
     resources: ?Dict = null,
 
@@ -201,6 +203,9 @@ pub const Font = struct {
                 for (0..6) |i| self.font_matrix[i] = doc.resolve(m[i]).asNum() orelse self.font_matrix[i];
             };
             self.width_scale = self.font_matrix[0];
+            if (doc.getArray(dict, "FontBBox")) |b| if (b.len >= 4) {
+                for (0..4) |i| self.font_bbox[i] = doc.resolve(b[i]).asNum() orelse 0;
+            };
             // Type 3 glyph names come from the Differences only.
             if (diffs == null) for (&self.names) |*nm| {
                 nm.* = null;
