@@ -539,3 +539,21 @@ test "font dictionary numbers outside their ranges never crash" {
     defer done(r);
     try testing.expect(r.list.commands[0].text.font.isSymbolic());
 }
+
+test "a Lab /Range with minimum above maximum falls back to the default" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const huge: [400]u8 = @splat('9');
+    for ([_][]const u8{
+        "[100 -100 -100 100]",
+        "[-100 100 100 -100]",
+        try std.fmt.allocPrint(arena.allocator(), "[{s} 100 -100 100]", .{&huge}),
+    }) |range| {
+        const cs = try std.fmt.allocPrint(arena.allocator(), "/ColorSpace << /CS0 [/Lab << /WhitePoint [0.9642 1 0.8249] /Range {s} >>] >>", .{range});
+        const r = try render(try page(arena.allocator(), "/CS0 cs 100 0 0 sc 0 0 10 10 re f", cs, &.{}, ""));
+        defer done(r);
+        // L* 100 with no chroma is white.
+        const c = r.list.commands[0].fill.paint.color;
+        try testing.expect(c.r > 0.9 and c.g > 0.9);
+    }
+}

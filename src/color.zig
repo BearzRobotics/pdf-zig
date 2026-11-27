@@ -229,6 +229,12 @@ pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseErro
                 if (doc.getArray(d, "Range")) |r| if (r.len >= 4) for (0..4) |i| {
                     range[i] = doc.resolve(r[i]).asNum() orelse range[i];
                 };
+                // Each pair must be a finite interval; otherwise the default is used.
+                for (0..2) |i| {
+                    const lo = range[2 * i];
+                    const hi = range[2 * i + 1];
+                    if (!(std.math.isFinite(lo) and std.math.isFinite(hi) and lo <= hi)) range[2 * i ..][0..2].* = .{ -100, 100 };
+                }
                 return .{ .lab = .{ .white = white, .range = range } };
             }
             if (eq(u8, family, "ICCBased")) {
