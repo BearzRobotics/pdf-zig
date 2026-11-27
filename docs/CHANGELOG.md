@@ -1,34 +1,57 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-27)
 
-- New `draw.Canvas` and `compose.Builder.addPage`: draw new pages with paths, colours,
-  transparency, clipping, text in the twelve built-in text fonts, and JPEG or raw images.
-- New `draw.Stamp`: puts a canvas over or under pages of an existing file, upright at any
-  rotation and `/UserUnit`. New example `pdfstamp`.
-- New `compose.Builder.setInfo` (title, author and other document information).
-  `compose.Error` has `BadValue` and `PathOpen`. New example `pdfdraw`.
-- Annotations and form fields without a stored appearance are now drawn: text, combo and
-  list fields, check boxes, radio and push buttons, highlights and other text markup,
-  squares, circles, lines, polygons, ink, free text and notes. In a form with
-  `NeedAppearances`, text and choice fields with a value are made again. The file is not
-  changed. `interp.Options.generate_appearances` turns it off. Text extraction includes
-  such fields' values. New module `appearance`.
-- Filling a list box now draws it, scrolled to show the selection, in place of removing
-  its appearance and setting `NeedAppearances`.
+Fields and marks that used to be blank are now drawn, forms can do more, and pdf-zig can
+draw: new pages, and onto existing ones. No public function or type of 0.4.0 was removed
+or had its signature changed.
+
+### Check this when upgrading
+
+- **Annotations and form fields without a stored appearance are now drawn**, and in a form
+  with `NeedAppearances`, text and choice fields with a value are made again. So pages draw
+  more, and **text extraction and search include those fields' values.**
+  `interp.Options.generate_appearances` turns it off.
+- `form.Error` has `NotMultiSelect` and `compose.Error` has `BadValue` and `PathOpen`:
+  switches over them need the cases. `form.Field` has `multi_select` and `selected`.
+- Filling a list box now writes its appearance; it no longer removes it and sets
+  `NeedAppearances`.
+
+### Forms
+
 - New `form.setChoices` (several entries of a multi-select list) and `form.reset`.
-  `form.Field` has `multi_select` and `selected`; `form.Error` has `NotMultiSelect`.
+- New `flatten.widgets`: makes a page's form widgets part of its content and takes those
+  fields out of the form. Hidden widgets and signatures stay. **It is not redaction:** the
+  earlier version stays in the file. `pdffill` has `--flatten`.
+- Appearances are made for text, combo and list fields, check boxes, radio and push
+  buttons, and for highlights and other text markup, squares, circles, lines, polygons,
+  ink, free text and notes. New module `appearance`. They do not follow bevelled or inset
+  border styles, and may place text taller than its box differently from other readers.
 - A filled comb field with a border colour has lines between its cells.
-- New `flatten.widgets`: makes the form widgets of a page part of its content and takes
-  those fields out of the form. Hidden widgets and signatures stay. It is not redaction:
-  the earlier version stays in the file. `pdffill` has `--flatten`.
-- A button whose appearance states include no drawing at all was shown as nothing; it
-  now gets a made appearance.
+
+### Creating and changing pages
+
+- New `draw.Canvas` and `compose.Builder.addPage`: paths, colours, transparency, clipping,
+  text in the twelve built-in text fonts, and JPEG or raw images, measured from the top
+  left of the page. New example `pdfdraw`.
+- New `draw.Stamp`: puts a canvas over or under pages of an existing file, upright at any
+  rotation, crop box and `/UserUnit`. New example `pdfstamp`.
+- New `compose.Builder.setInfo` (title, author and other document information).
+- The built-in fonts cover WinAnsi (Western European) and are **not embedded**: a reader
+  draws them with its own substitute, which may lack a character. There is no line
+  wrapping, text shaping or embedding of other fonts yet.
+
+### Also
+
+- `DisplayList.omissions` says what a page uses that is left out or only approximated.
+  `incomplete` means what it did. New example `pdfsurvey` and `test/tools/survey.py`.
+
+### Fixed
+
+- A button whose appearance states include no drawing at all was shown as nothing.
 - `write.Update.write` reported `error.WriteFailed` when it ran out of memory; it now
   reports `error.OutOfMemory`.
 - The `pdfsvg` example put the letters of a run too far apart.
-- `DisplayList.omissions` says what a page uses that is left out or only approximated.
-  `incomplete` means what it did. New example `pdfsurvey`.
 
 ## 0.4.0 (2026-11-27)
 

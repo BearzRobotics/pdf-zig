@@ -7,7 +7,7 @@ what changed in the library and **which features the viewer needs to add**.
 Work on pdf-zig does not change viewer code: it only records here what the viewer needs.
 
 **This file is kept up to date by whoever changes pdf-zig:** anything that needs work in
-the viewer is added here in the same commit. Last updated 2026-11-27, after pdf-zig 0.4.0.
+the viewer is added here in the same commit. Last updated 2026-11-27, for pdf-zig 0.5.0.
 
 Read `dkde`'s own `ai/AGENTS.md` and docs first. Its rules govern that repository. Do not
 push or release unless asked. The maintainer is "they" if a pronoun is needed. For this
@@ -62,23 +62,26 @@ be right for every page, apply the inverse of `pdf.interp.baseMatrix(p)` to the 
 - **Text (0.3.0).** Reading order and spacing differ in places. Check anything that
   compares extracted text or counts characters, such as the "is this a scan" threshold in
   `src/pdf/ocr.zig` (`scanned_below`).
+- **New error cases (0.5.0).** `form.Error` has `NotMultiSelect`; `compose.Error` has
+  `BadValue` and `PathOpen`. Extraction now includes the values of fields that had no
+  saved appearance.
 - **Passwords (0.3.1).** UTF-8 passwords with non-ASCII characters now work. Pass what the
   user typed.
 
-## 3. Features to add now (in pdf-zig 0.4.0)
+## 3. Features to add now (in pdf-zig 0.4.0 and 0.5.0)
 
 The viewer needs to add these. None needs new drawing code.
 
 | Feature | pdf-zig | In the viewer |
 |---|---|---|
 | Say when a page is incomplete | `DisplayList.incomplete` | The viewer did not read it at `161b555`. Show a small notice |
-| (next release) Fields and marks without a stored appearance | Drawn by default (`interp.Options.generate_appearances`) | Nothing to add. Text extraction and search now include those fields' values; check anything that counts characters |
-| (next release) **Add:** multi-select lists | `form.setChoices`; `Field.multi_select` and `Field.selected` | Let a list with `multi_select` take several choices, and show all of `selected` (`value` is only the first). `form.Error` has the new `NotMultiSelect` |
-| (next release) **Add:** reset a form | `form.reset(&upd, field)` for one field | A "reset form" command: loop over the fields in one update; skip push buttons, signatures (`WrongKind`) and read-only fields (`ReadOnly`) |
-| (next release) **Add:** flatten a form | `flatten.widgets(&upd, page)` for each page, in one update | A "flatten" command: warn that fields can no longer be edited, and that **it hides nothing**, since the earlier version stays in the file. Show how many widgets were kept (hidden ones and signatures). `error.UnreadableContent` and `error.TooLarge` mean the page cannot be flattened. Handle the new error set |
-| (next release) Create documents | `draw.Canvas`, `compose.Builder.addPage` and `setInfo` | Only if the viewer or another program is to make PDFs, such as saving images as a PDF. Nothing needed for display. `compose.Error` has the new `BadValue` and `PathOpen` |
-| (next release) **Add:** stamps | `draw.Canvas` sized with `page.displaySize()`, `draw.Stamp.place(page, &canvas, .over or .under)`, then `finish` before `upd.write` | Watermarks and page numbers. For OCR results, one invisible `textWith` per word with `fit_width` (only WinAnsi text until fonts can be embedded, so OCRmyPDF stays for other languages). `.under` is hidden on scans. Handle `draw.StampError` |
-| (next release) Say why a page may look wrong | `DisplayList.omissions`: a flag for each thing left out or approximated | Name the ones that change what is seen (`soft_mask`, `group`, `shading`, `no_appearance`, `jbig2`, `text_clip`) in the notice. `no_unicode` only affects search and copy |
+| (0.5.0) Fields and marks without a stored appearance | Drawn by default (`interp.Options.generate_appearances`) | Nothing to add. Text extraction and search now include those fields' values; check anything that counts characters |
+| (0.5.0) **Add:** multi-select lists | `form.setChoices`; `Field.multi_select` and `Field.selected` | Let a list with `multi_select` take several choices, and show all of `selected` (`value` is only the first). `form.Error` has the new `NotMultiSelect` |
+| (0.5.0) **Add:** reset a form | `form.reset(&upd, field)` for one field | A "reset form" command: loop over the fields in one update; skip push buttons, signatures (`WrongKind`) and read-only fields (`ReadOnly`) |
+| (0.5.0) **Add:** flatten a form | `flatten.widgets(&upd, page)` for each page, in one update | A "flatten" command: warn that fields can no longer be edited, and that **it hides nothing**, since the earlier version stays in the file. Show how many widgets were kept (hidden ones and signatures). `error.UnreadableContent` and `error.TooLarge` mean the page cannot be flattened. Handle the new error set |
+| (0.5.0) Create documents | `draw.Canvas`, `compose.Builder.addPage` and `setInfo` | Only if the viewer or another program is to make PDFs, such as saving images as a PDF. Nothing needed for display. `compose.Error` has the new `BadValue` and `PathOpen` |
+| (0.5.0) **Add:** stamps | `draw.Canvas` sized with `page.displaySize()`, `draw.Stamp.place(page, &canvas, .over or .under)`, then `finish` before `upd.write` | Watermarks and page numbers. For OCR results, one invisible `textWith` per word with `fit_width` (only WinAnsi text until fonts can be embedded, so OCRmyPDF stays for other languages). `.under` is hidden on scans. Handle `draw.StampError` |
+| (0.5.0) Say why a page may look wrong | `DisplayList.omissions`: a flag for each thing left out or approximated | Name the ones that change what is seen (`soft_mask`, `group`, `shading`, `no_appearance`, `jbig2`, `text_clip`) in the notice. `no_unicode` only affects search and copy |
 | Clickable links | `link.list(arena, &doc, list, page)`: rectangle in user space, and a page, a URI, a named action or `unsupported` | Hit-test with the inverse of `baseMatrix`, as annotations are. **A URI is untrusted:** open only schemes you choose (`http`, `https`, `mailto`), show the address, and ask first. Never run `file:` or anything else |
 | Extract, delete, reorder, merge, split, rotate pages | `compose.Builder` | See below |
 
@@ -117,6 +120,7 @@ catch-all at `161b555`, so a new command should stop the build. Keep it that way
 | In release | Change | Viewer work |
 |---|---|---|
 | 0.4.0 and earlier | The check build of section 1 needed no drawing change | none known |
+| 0.5.0 | No new drawing command. Generated appearances use the existing ones | none |
 
 **Planned, not built** (`docs/ROADMAP.md`; shapes will change):
 
@@ -134,10 +138,9 @@ catch-all at `161b555`, so a new command should stop the build. Keep it that way
 These are the maintainer's priorities for pdf-zig, in order. pdf-zig will do the file
 work; the viewer will need an interface for each. Details follow here as they are built.
 
-1. **Forms:** selecting several list entries, reset, flatten. Showing fields that have no
-   saved appearance should need no viewer change.
-2. **Creating documents:** drawing text, shapes and images on new and existing pages. This
-   includes what an invisible text layer over a scan needs (the viewer now runs OCRmyPDF).
+1. **Forms:** several list entries, reset, flatten and blank fields are in 0.5.0 (section 3).
+2. **Creating documents:** drawing on new and existing pages is in 0.5.0 (section 3).
+   Embedding other fonts than the built-in ones comes next, for other scripts.
 3. **Signatures:** show who signed and whether the file changed afterwards, then the
    result of verification. **Which certificates to trust is the application's decision.**
    Never show "valid" for anything less than a full check.
