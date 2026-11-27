@@ -1107,3 +1107,15 @@ test "standard fonts without /Widths never give a glyph no width" {
         try testing.expectApproxEqAbs(c.advance, r.list.commands[0].text.glyphs[0].advance, 1e-9);
     }
 }
+
+test "text and shadings carry the blend mode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "/M gs BT /F1 10 Tf (x) Tj ET /S sh", helv ++ " /ExtGState << /M << /BM /Multiply >> >> /Shading << /S 6 0 R >>", &.{
+        helv_obj,
+        "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] >> >>",
+    }, ""));
+    defer done(r);
+    try testing.expectEqualStrings("Multiply", r.list.commands[0].text.blend);
+    try testing.expectEqualStrings("Multiply", r.list.commands[1].shading.blend);
+}

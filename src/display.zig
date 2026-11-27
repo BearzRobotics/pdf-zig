@@ -179,6 +179,8 @@ pub const Text = struct {
     alpha: f64,
     stroke_alpha: f64,
     glyphs: []const Glyph,
+    /// The blend mode name (`/BM`), `Normal` unless the page sets another.
+    blend: []const u8 = "Normal",
 };
 
 /// An image to draw into the unit square of `ctm` (8.9.4).
@@ -200,7 +202,13 @@ pub const Image = struct {
     num: u32,
 };
 
-pub const ShadingFill = struct { shading: Shading, ctm: Matrix, alpha: f64 };
+pub const ShadingFill = struct {
+    shading: Shading,
+    ctm: Matrix,
+    alpha: f64,
+    /// The blend mode name (`/BM`), `Normal` unless the page sets another.
+    blend: []const u8 = "Normal",
+};
 
 pub const Command = union(enum) {
     save,

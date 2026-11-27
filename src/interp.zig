@@ -870,7 +870,7 @@ const Run = struct {
         const shs = self.doc().getDict(self.resources, "Shading") orelse return;
         const so = self.doc().get(shs, name) orelse return;
         const sh = (try self.buildShading(so)) orelse return;
-        try self.emit(.{ .shading = .{ .shading = sh, .ctm = self.gs.ctm, .alpha = self.gs.fill_alpha } });
+        try self.emit(.{ .shading = .{ .shading = sh, .ctm = self.gs.ctm, .alpha = self.gs.fill_alpha, .blend = self.gs.blend } });
     }
 
     // ---- text -----------------------------------------------------------------------------
@@ -938,6 +938,7 @@ const Run = struct {
                 .alpha = self.gs.fill_alpha,
                 .stroke_alpha = self.gs.stroke_alpha,
                 .glyphs = glyphs.items,
+                .blend = self.gs.blend,
             } });
         }
         // Modes 3 and 7 neither fill nor stroke (table 106).
