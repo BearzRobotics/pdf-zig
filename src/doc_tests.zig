@@ -864,3 +864,21 @@ test "page boxes that cannot be a page are replaced" {
         try testing.expectEqual(pdf.pages.Rect.letter, p.crop_box);
     }
 }
+
+test "a page tree node without kids is not a page" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { []const u8, usize }{
+        // An empty node between two pages; an untyped leaf still counts.
+        .{ "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] >>", 2 },
+        // A root without kids.
+        .{ "<< /Type /Pages >>", 0 },
+    }) |case| {
+        var doc = try pdf.Document.open(testing.allocator, try build(a, &.{
+            "<< /Type /Catalog /Pages 2 0 R >>", case[0], "<< /Type /Page >>", "<< /Type /Pages /Count 0 >>", "<< /MediaBox [0 0 9 9] >>",
+        }), .{});
+        defer doc.deinit();
+        try testing.expectEqual(case[1], (try pdf.pages.PageList.build(&doc)).entries.len);
+    }
+}

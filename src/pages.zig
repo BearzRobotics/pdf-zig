@@ -103,8 +103,9 @@ pub const PageList = struct {
             }
             var top = &stack.items[stack.items.len - 1];
             const kids = doc.getArray(top.node, "Kids") orelse {
-                // A node with no /Kids that we reached as a node: it is a page.
-                try out.append(a, .{ .num = top.num, .dict = top.node, .inh = top.inh });
+                // A root without /Kids: it is the only page, unless it says it
+                // is a node of the tree.
+                if (!isTreeNode(doc, top.node)) try out.append(a, .{ .num = top.num, .dict = top.node, .inh = top.inh });
                 _ = stack.pop();
                 continue;
             };
@@ -129,8 +130,7 @@ pub const PageList = struct {
                 try visited.put(a, kid_num, {});
             }
             const kd = doc.resolve(kid).asDict() orelse continue;
-            const is_node = doc.getName(kd, "Type") != null and std.mem.eql(u8, doc.getName(kd, "Type").?, "Pages") or kd.has("Kids");
-            if (is_node and kd.has("Kids")) {
+            if (kd.has("Kids")) {
                 // Only this branch is left out; the walk goes on with the rest.
                 if (stack.items.len >= max_depth - 1) {
                     truncated = true;
@@ -138,11 +138,16 @@ pub const PageList = struct {
                 }
                 const inh = inheritFrom(top.inh, kd);
                 try stack.append(a, .{ .node = kd, .num = kid_num, .inh = inh, .next_kid = 0 });
-            } else {
+            } else if (!isTreeNode(doc, kd)) {
                 try out.append(a, .{ .num = kid_num, .dict = kd, .inh = inheritFrom(top.inh, kd) });
             }
         }
         return .{ .entries = out.items, .truncated = truncated };
+    }
+
+    /// Whether `d` calls itself an inner node: without kids it has no pages.
+    fn isTreeNode(doc: *Document, d: Dict) bool {
+        return std.mem.eql(u8, doc.getName(d, "Type") orelse "", "Pages");
     }
 
     fn inheritFrom(parent: Inherited, d: Dict) Inherited {
