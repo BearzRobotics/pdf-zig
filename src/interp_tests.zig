@@ -1517,3 +1517,32 @@ test "fonts: a Type 3 matrix, /MissingWidth, and an embedded code to CID map" {
     try testing.expectEqual(@as(u32, 11), runs[2].glyphs[1].cid);
     try testing.expectApproxEqAbs(@as(f64, 0.2), runs[2].glyphs[1].advance, 1e-12);
 }
+
+test "reading order: raised and lowered pieces stay with the main line" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // A small fraction inside a line: its numerator is 4 above the baseline and
+    // its denominator 4.5 below, further than that from each other.
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 1 0 0 1 10 50 Tm (at the positions) Tj 1 0 0 1 110 50 Tm (and then) Tj " ++
+        "/F1 6 Tf 1 0 0 1 90 54 Tm (1) Tj 1 0 0 1 90 45.5 Tm (2n) Tj /F1 10 Tf 1 0 0 1 10 38 Tm (the next line of text) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .reading);
+    defer testing.allocator.free(got);
+    var lines = std.mem.splitScalar(u8, got, '\n');
+    const first = lines.next().?;
+    try testing.expect(std.mem.startsWith(u8, first, "at the positions"));
+    try testing.expect(std.mem.endsWith(u8, first, "and then"));
+    try testing.expect(std.mem.indexOf(u8, first, "1") != null and std.mem.indexOf(u8, first, "2n") != null);
+    try testing.expectEqualStrings("the next line of text", lines.next().?);
+}
+
+test "reading order: a large label on a line's baseline does not merge it with the next" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Big letters beside a paragraph share the baseline of its first line.
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 1 0 0 1 10 50 Tm (first line of the paragraph) Tj 1 0 0 1 10 38 Tm (second line of the paragraph) Tj /F1 28 Tf 1 0 0 1 150 50 Tm (ABC) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .reading);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("first line of the paragraph ABC\nsecond line of the paragraph\n", got);
+}

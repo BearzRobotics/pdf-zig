@@ -28,6 +28,8 @@ const Item = struct {
     text: []const u8,
     /// The glyph's box on the page.
     box: Rect,
+    /// Set by `assignLines`: lines are numbered from the top.
+    line: u32 = 0,
 };
 
 /// A rectangle on the displayed page: points, origin top left, y down.
@@ -267,6 +269,79 @@ fn startsWithSpace(s: []const u8) bool {
     return s.len > 0 and s[0] == ' ';
 }
 
+/// Glyphs that share a baseline.
+const Baseline = struct {
+    start: usize,
+    count: usize,
+    y: f64,
+    /// The size most of its glyphs have: one large label that happens to
+    /// share a baseline must not widen what counts as close to it.
+    size: f64,
+    /// For finding that size (a majority vote).
+    votes: usize = 1,
+    angle: u16,
+    /// The baseline whose line this one belongs to; itself for a line's own.
+    line: ?u32 = null,
+};
+
+/// How many neighbouring baselines are looked at for a line to join.
+const nearby_baselines = 16;
+
+/// Numbers the lines of `items`, which are sorted by direction and then
+/// position across it. Lines form around the baselines with the most text; a
+/// smaller piece close to one (a superscript, a part of a fraction, a drop cap)
+/// joins the nearest. "Close" is only ever measured from a line's own
+/// baseline, so no piece can pull two lines together.
+fn assignLines(a: Allocator, items: []Item) Allocator.Error!void {
+    var baselines: std.ArrayList(Baseline) = .empty;
+    defer baselines.deinit(a);
+    for (items, 0..) |it, i| {
+        if (baselines.items.len > 0) {
+            const last = &baselines.items[baselines.items.len - 1];
+            if (it.angle == last.angle and @abs(it.y - last.y) <= 0.1 * @max(it.size, 1)) {
+                last.count += 1;
+                if (it.size == last.size) {
+                    last.votes += 1;
+                } else if (last.votes > 0) {
+                    last.votes -= 1;
+                } else {
+                    last.size = it.size;
+                    last.votes = 1;
+                }
+                continue;
+            }
+        }
+        try baselines.append(a, .{ .start = i, .count = 1, .y = it.y, .size = it.size, .angle = it.angle });
+    }
+    const order = try a.alloc(u32, baselines.items.len);
+    defer a.free(order);
+    for (order, 0..) |*slot, i| slot.* = @intCast(i);
+    std.mem.sort(u32, order, baselines.items, struct {
+        fn lt(all: []Baseline, x: u32, y: u32) bool {
+            return if (all[x].count != all[y].count) all[x].count > all[y].count else x < y;
+        }
+    }.lt);
+    const all = baselines.items;
+    for (order) |i| {
+        const this = &all[i];
+        var best: ?u32 = null;
+        var best_distance = std.math.inf(f64);
+        for (i -| nearby_baselines..@min(all.len, i + nearby_baselines + 1)) |j| {
+            const line = all[j].line orelse continue;
+            const own = all[line];
+            const distance = @abs(own.y - this.y);
+            if (own.angle == this.angle and distance <= 0.5 * @max(this.size, own.size, 1) and distance < best_distance) {
+                best = line;
+                best_distance = distance;
+            }
+        }
+        this.line = best orelse i;
+    }
+    for (all) |baseline| {
+        for (items[baseline.start..][0..baseline.count]) |*it| it.line = baseline.line.?;
+    }
+}
+
 /// A total order of coordinates: NaN, which damaged files can produce, sorts
 /// after every number.
 fn coordinateOrder(x: f64, y: f64) std.math.Order {
@@ -291,17 +366,17 @@ fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8), boxes: ?*s
             };
         }
     }.lt);
+    try assignLines(a, items);
+    std.mem.sort(Item, items, {}, struct {
+        fn lt(_: void, p: Item, q: Item) bool {
+            return if (p.line != q.line) p.line < q.line else coordinateOrder(p.x0, q.x0) == .lt;
+        }
+    }.lt);
     var line_start: usize = 0;
     while (line_start < items.len) {
         var line_end = line_start + 1;
-        const y0 = items[line_start].y;
-        while (line_end < items.len and items[line_end].angle == items[line_start].angle and @abs(items[line_end].y - y0) <= 0.5 * @max(items[line_end].size, items[line_start].size, 1)) line_end += 1;
+        while (line_end < items.len and items[line_end].line == items[line_start].line) line_end += 1;
         const line = items[line_start..line_end];
-        std.mem.sort(Item, line, {}, struct {
-            fn lt(_: void, p: Item, q: Item) bool {
-                return coordinateOrder(p.x0, q.x0) == .lt;
-            }
-        }.lt);
         var prev: ?Item = null;
         for (line) |it| {
             if (prev) |p| {
