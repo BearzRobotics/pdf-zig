@@ -698,18 +698,23 @@ pub const Document = struct {
             return if (v == .string) v.string else null;
         }
         /// The method of the crypt filter named by `/StmF` or `/StrF` (7.6.5).
+        /// Without the key the filter is `Identity`. Anything that cannot be
+        /// read is `unsupported`: it must not pass for unencrypted data.
         pub fn cryptFilter(r: Resolver, d: Dict, key: []const u8) crypt.Method {
-            const nm = r.doc.getName(d, key) orelse return .none;
-            if (std.mem.eql(u8, nm, "Identity")) return .none;
-            const cf = r.doc.getDict(d, "CF") orelse return .none;
-            const f = r.doc.getDict(cf, nm) orelse return .none;
-            const cfm = r.doc.getName(f, "CFM") orelse return .none;
-            if (std.mem.eql(u8, cfm, "V2")) return .rc4;
-            if (std.mem.eql(u8, cfm, "AESV2")) return .aes128;
-            if (std.mem.eql(u8, cfm, "AESV3")) return .aes256;
-            return .none;
+            return r.doc.cryptMethod(d, r.doc.getName(d, key) orelse return .none);
         }
     };
+
+    /// The method of crypt filter `name` of the encryption dictionary `enc`.
+    fn cryptMethod(self: *Document, enc: Dict, name: []const u8) crypt.Method {
+        if (std.mem.eql(u8, name, "Identity")) return .none;
+        const filter = self.getDict(self.getDict(enc, "CF") orelse return .unsupported, name) orelse return .unsupported;
+        const cfm = self.getName(filter, "CFM") orelse return .unsupported;
+        if (std.mem.eql(u8, cfm, "V2")) return .rc4;
+        if (std.mem.eql(u8, cfm, "AESV2")) return .aes128;
+        if (std.mem.eql(u8, cfm, "AESV3")) return .aes256;
+        return .unsupported;
+    }
 
     /// Derives the file key if the trailer names an encryption dictionary.
     fn setupEncryption(self: *Document) Error!void {
@@ -763,8 +768,12 @@ pub const Document = struct {
                 const ty = if (st.dict.get("Type")) |t| (t.asName() orelse "") else "";
                 var encrypted = !std.mem.eql(u8, ty, "XRef");
                 if (std.mem.eql(u8, ty, "Metadata") and !c.encrypt_metadata) encrypted = false;
-                if (hasIdentityCrypt(st.dict)) encrypted = false;
-                return .{ .stream = .{ .dict = d, .data = st.data, .encrypted = encrypted, .num = num, .gen = gen } };
+                var own_method: ?crypt.Method = null;
+                if (self.ownCryptFilter(st.dict)) |name| {
+                    own_method = self.cryptMethod(self.encrypt_dict, name);
+                    encrypted = own_method.? != .none;
+                }
+                return .{ .stream = .{ .dict = d, .data = st.data, .encrypted = encrypted, .crypt_method = own_method, .num = num, .gen = gen } };
             },
             else => return v,
         }
@@ -776,20 +785,25 @@ pub const Document = struct {
         return .{ .entries = out };
     }
 
-    fn hasIdentityCrypt(d: Dict) bool {
-        const f = d.get("Filter") orelse return false;
+    /// The crypt filter a stream names for itself with a `/Crypt` filter
+    /// (7.4.10), or null. Its parameters are those at the same position.
+    fn ownCryptFilter(self: *Document, d: Dict) ?[]const u8 {
+        const f = self.resolve(d.get("Filter") orelse return null);
         const names: []const Object = switch (f) {
             .name => &.{f},
             .array => |arr| arr,
-            else => return false,
+            else => return null,
         };
-        for (names) |n| if (std.mem.eql(u8, n.asName() orelse "", "Crypt")) {
-            const parms = d.get("DecodeParms") orelse return true;
-            const pd = if (parms.asArray()) |arr| (if (arr.len > 0) arr[0].asDict() else null) else parms.asDict();
-            const nm = if (pd) |pdict| (if (pdict.get("Name")) |x| (x.asName() orelse "Identity") else "Identity") else "Identity";
-            return std.mem.eql(u8, nm, "Identity");
-        };
-        return false;
+        for (names, 0..) |item, i| {
+            if (!std.mem.eql(u8, self.resolve(item).asName() orelse "", "Crypt")) continue;
+            const parms = self.resolve(d.get("DecodeParms") orelse return "Identity");
+            const own = switch (parms) {
+                .array => |arr| if (i < arr.len) self.resolve(arr[i]).asDict() else null,
+                else => parms.asDict(),
+            };
+            return self.getName(own orelse return "Identity", "Name") orelse "Identity";
+        }
+        return null;
     }
 
     // ---- streams -------------------------------------------------------------------
@@ -865,7 +879,9 @@ pub const Document = struct {
         try self.checkMemory(oom_before);
         var data = st.data;
         if (st.encrypted) if (self.crypt) |c| {
-            data = try c.decrypt(alloc, c.stream_method, st.num, st.gen, data);
+            const method = st.crypt_method orelse c.stream_method;
+            if (method == .unsupported) return error.UnsupportedFilter;
+            data = try c.decrypt(alloc, method, st.num, st.gen, data);
         };
         return filters.decode(alloc, data, list, self.options.max_stream_bytes);
     }

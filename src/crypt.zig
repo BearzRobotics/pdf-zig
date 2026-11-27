@@ -26,7 +26,14 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const Method = enum { none, rc4, aes128, aes256 };
+pub const Method = enum {
+    none,
+    rc4,
+    aes128,
+    aes256,
+    /// A crypt filter that is not defined or whose method is not read.
+    unsupported,
+};
 
 const padding = [32]u8{
     0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
@@ -78,8 +85,12 @@ pub const Crypt = struct {
                 @memcpy(&prev, ue[i * 16 ..][0..16]);
             }
             c.key_len = 32;
-            c.stream_method = .aes256;
-            c.string_method = .aes256;
+            // The crypt filters say what is encrypted with this key (7.6.5).
+            c.stream_method = resolve_ctx.cryptFilter(d, "StmF");
+            c.string_method = resolve_ctx.cryptFilter(d, "StrF");
+            for ([_]Method{ c.stream_method, c.string_method }) |m| {
+                if (m != .none and m != .aes256) return error.UnsupportedEncryption;
+            }
             return c;
         }
         if (v != 1 and v != 2 and v != 4) return error.UnsupportedEncryption;
@@ -97,6 +108,9 @@ pub const Crypt = struct {
             key_len = 16;
             c.stream_method = resolve_ctx.cryptFilter(d, "StmF");
             c.string_method = resolve_ctx.cryptFilter(d, "StrF");
+            for ([_]Method{ c.stream_method, c.string_method }) |m| {
+                if (m != .none and m != .rc4 and m != .aes128) return error.UnsupportedEncryption;
+            }
         } else if (v == 1) key_len = 5;
 
         // Algorithm 2: the file key from the password.
@@ -159,11 +173,11 @@ pub const Crypt = struct {
     }
 
     pub fn decrypt(self: Crypt, a: Allocator, method: Method, num: u32, gen: u16, data: []const u8) Allocator.Error![]const u8 {
-        if (method == .none) return data;
+        if (method == .none or method == .unsupported) return data;
         var key: [32]u8 = undefined;
         const klen = self.objectKey(num, gen, method, &key);
         switch (method) {
-            .none => return data,
+            .none, .unsupported => return data,
             .rc4 => {
                 const out = try a.dupe(u8, data);
                 rc4(key[0..klen], out);

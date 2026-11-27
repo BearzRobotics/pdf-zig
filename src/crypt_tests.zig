@@ -68,3 +68,37 @@ test "encrypted files that are damaged do not crash (seeded mutation)" {
         testing.allocator.free(text);
     }
 }
+
+/// `bytes` with `old` replaced by `new` of the same length, so offsets hold.
+fn patched(a: std.mem.Allocator, bytes: []const u8, old: []const u8, new: []const u8) ![]u8 {
+    try testing.expectEqual(old.len, new.len);
+    try testing.expect(std.mem.indexOf(u8, bytes, old) != null);
+    return std.mem.replaceOwned(u8, a, bytes, old, new);
+}
+
+test "an unknown crypt method is refused, not read as plain text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const aes128 = @embedFile("enc_aes_128.pdf");
+    const aes256 = @embedFile("enc_aes_256.pdf");
+    for ([_][]const u8{
+        try patched(a, aes128, "/CFM /AESV2", "/CFM /ZZZV9"),
+        try patched(a, aes128, "/CFM /AESV2", "/CFX /AESV2"),
+        try patched(a, aes128, "/StmF /StdCF", "/StmF /NoSuc"),
+        try patched(a, aes256, "/CFM /AESV3", "/CFM /ZZZV9"),
+        try patched(a, aes256, "/StrF /StdCF", "/StrF /NoSuc"),
+    }) |bytes| {
+        try testing.expectError(error.UnsupportedEncryption, pdf.Document.open(testing.allocator, bytes, .{}));
+    }
+}
+
+test "AES-256 files follow /StmF and /StrF" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try std.mem.replaceOwned(u8, arena.allocator(), @embedFile("enc_aes_256.pdf"), "/StrF /StdCF", "/StrF /Identity");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expectEqual(pdf.crypt.Method.none, doc.crypt.?.string_method);
+    try testing.expectEqual(pdf.crypt.Method.aes256, doc.crypt.?.stream_method);
+}
