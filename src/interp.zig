@@ -933,10 +933,18 @@ const Run = struct {
             const saved_depth = self.depth;
             self.depth += 1;
             defer self.depth = saved_depth;
-            const saved_path = self.path;
+            // What q and Q do not cover: the glyph has its own path and text
+            // position, and must leave the page's as they were.
+            const saved = .{ .path = self.path, .clip = self.pending_clip, .tm = self.tm, .tlm = self.tlm, .cur = self.cur, .start = self.start };
             self.path = .empty;
+            self.pending_clip = null;
             try self.interpret(data, res, glyph_ctm);
-            self.path = saved_path;
+            self.path = saved.path;
+            self.pending_clip = saved.clip;
+            self.tm = saved.tm;
+            self.tlm = saved.tlm;
+            self.cur = saved.cur;
+            self.start = saved.start;
             try self.restore();
         }
     }

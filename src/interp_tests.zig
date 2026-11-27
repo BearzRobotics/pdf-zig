@@ -795,3 +795,27 @@ test "a TJ holding only numbers still moves the text position" {
     const b = r.list.commands[1].text;
     try testing.expectApproxEqAbs(@as(f64, 66.67), b.tm.e, 1e-9);
 }
+
+/// A page using a Type 3 font /T whose glyph "a" runs `proc`. The page
+/// resources name the Type 3 font /T and Helvetica /H.
+fn type3Page(a: Allocator, content: []const u8, proc: []const u8) ![]u8 {
+    return page(a, content, "/Font << /T 5 0 R /H 7 0 R >>", &.{
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /ga 6 0 R >> /Encoding << /Differences [97 /ga] >> /FirstChar 97 /Widths [500] /Resources << /Font << /H 7 0 R >> >> >>",
+        try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ proc.len, proc }),
+        helv_obj,
+    }, "");
+}
+
+test "text operators in a Type 3 glyph do not move the page's text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try type3Page(arena.allocator(), "BT /T 10 Tf 10 50 Td (a) Tj /H 10 Tf (Z) Tj ET", "500 0 d0 BT /H 500 Tf 3 4 Td (q) Tj ET"));
+    defer done(r);
+    var last: display.Text = undefined;
+    for (r.list.commands) |c| if (c == .text) {
+        last = c.text;
+    };
+    try testing.expectEqualStrings("Z", last.glyphs[0].text);
+    try testing.expectApproxEqAbs(@as(f64, 15), last.tm.e, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 50), last.tm.f, 1e-9);
+}
