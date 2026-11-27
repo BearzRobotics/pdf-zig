@@ -67,8 +67,8 @@ pub const Renderer = struct {
 
     /// What the current page's display list and pattern cells hold so far.
     produced: struct { commands: usize = 0, glyphs: usize = 0, segments: usize = 0 } = .{},
-    /// Becomes `DisplayList.incomplete` for the current page.
-    left_out: bool = false,
+    /// Becomes `DisplayList.omissions` for the current page.
+    omissions: display.Omissions = .{},
 
     const StreamKey = struct { ptr: usize, len: usize };
 
@@ -95,7 +95,7 @@ pub const Renderer = struct {
         if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.arena.child_allocator);
         self.decoded = .empty;
         self.produced = .{};
-        self.left_out = false;
+        self.omissions = .{};
         defer {
             self.decoded = .empty;
             _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
@@ -110,7 +110,8 @@ pub const Renderer = struct {
         // Missing content must not pass for success.
         try self.doc.checkMemory(oom_before);
         list.commands = run.commands.items;
-        list.incomplete = self.left_out;
+        list.omissions = self.omissions;
+        list.incomplete = self.omissions.contentMissing();
         return list;
     }
 
@@ -224,6 +225,8 @@ const GState = struct {
     fill_alpha: f64 = 1,
     stroke_alpha: f64 = 1,
     blend: []const u8 = "Normal",
+    /// A soft mask is in force. It is not applied; this is for `Omissions`.
+    soft_mask: bool = false,
     // Text state (9.3).
     font: ?*const font_mod.Font = null,
     size: f64 = 0,
@@ -657,6 +660,15 @@ const Run = struct {
         if (doc_.getNum(d, "ML")) |v| self.gs.line.miter_limit = v;
         if (doc_.getNum(d, "CA")) |v| self.gs.stroke_alpha = std.math.clamp(v, 0, 1);
         if (doc_.getNum(d, "ca")) |v| self.gs.fill_alpha = std.math.clamp(v, 0, 1);
+        if (doc_.get(d, "SMask")) |mask| {
+            self.gs.soft_mask = !std.mem.eql(u8, mask.asName() orelse "", "None");
+            if (self.gs.soft_mask) self.r.omissions.soft_mask = true;
+        }
+        for ([_][]const u8{ "OP", "op" }) |key| {
+            if (doc_.get(d, key)) |v| if (v == .boolean and v.boolean) {
+                self.r.omissions.overprint = true;
+            };
+        }
         if (doc_.get(d, "BM")) |bm| switch (bm) {
             .name => |n| self.gs.blend = try self.a.dupe(u8, n),
             .array => |arr| if (arr.len > 0) {
@@ -743,7 +755,7 @@ const Run = struct {
         }
         if (ptype != 1 or po != .stream) return .none;
         if (self.depth >= self.r.options.max_depth) {
-            self.r.left_out = true;
+            self.r.omissions.too_deep = true;
             return .none;
         }
         const key: u64 = (@as(u64, num_id) << 32) | (if (rgb) |c| (@as(u64, @intFromFloat(c.r * 255)) << 16 | @as(u64, @intFromFloat(c.g * 255)) << 8 | @as(u64, @intFromFloat(c.b * 255)) | (1 << 24)) else 0);
@@ -775,7 +787,7 @@ const Run = struct {
         }
         const res = doc_.getDict(pd, "Resources") orelse self.resources;
         const data = self.contentData(po.stream) catch blk: {
-            self.r.left_out = true;
+            self.r.omissions.undecodable = true;
             break :blk "";
         };
         try sub.interpret(data, res, .identity);
@@ -812,7 +824,7 @@ const Run = struct {
         if (st != 2 and st != 3) {
             // Function-based and mesh shadings (types 1 and 4 to 7) are real
             // content that cannot be passed on.
-            if (st >= 1 and st <= 7) self.r.left_out = true;
+            if (st >= 1 and st <= 7) self.r.omissions.shading = true;
             return null;
         }
         const space = try color.parseOwned(doc_, sd.get("ColorSpace") orelse return null, self.resources, 0);
@@ -840,7 +852,7 @@ const Run = struct {
                 const fn_ = function.loadKept(doc_, item, true) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.BadFunction => {
-                        self.r.left_out = true;
+                        self.r.omissions.bad_function = true;
                         continue;
                     },
                 };
@@ -848,7 +860,7 @@ const Run = struct {
             },
             else => if (function.loadKept(doc_, sd.get("Function").?, true)) |f1| try funcs.append(self.a, f1) else |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.BadFunction => self.r.left_out = true,
+                error.BadFunction => self.r.omissions.bad_function = true,
             },
         };
         // A shading of these types must have a function (table 80, table 81);
@@ -939,6 +951,11 @@ const Run = struct {
             self.tm = Matrix.translate(x, 0).mul(self.tm);
             return;
         }
+        if (self.gs.mode >= 4) self.r.omissions.text_clip = true;
+        if (f.vertical) self.r.omissions.vertical_text = true;
+        for (glyphs.items) |g| if (g.text.len == 0) {
+            self.r.omissions.no_unicode = true;
+        };
         const run_tm = self.tm;
         // A Type 3 font draws its glyphs as the paths of their procedures
         // (`type3Run`). The run is also emitted as invisible text (mode 3) so
@@ -969,7 +986,7 @@ const Run = struct {
     fn type3Run(self: *Run, f: *const font_mod.Font, glyphs: []const display.Glyph, run_tm: Matrix) Error!void {
         // A glyph is drawn inside its own q and Q, like a form.
         if (self.depth >= self.r.options.max_depth) {
-            self.r.left_out = true;
+            self.r.omissions.too_deep = true;
             return;
         }
         const doc_ = self.doc();
@@ -979,7 +996,7 @@ const Run = struct {
             const proc = doc_.get(f.char_procs, gname) orelse continue;
             if (proc != .stream) continue;
             const data = self.contentData(proc.stream) catch {
-                self.r.left_out = true;
+                self.r.omissions.undecodable = true;
                 continue;
             };
             // Glyph space to user space: FontMatrix, then size, scaling and rise, then Tm and CTM.
@@ -1044,6 +1061,7 @@ const Run = struct {
         else
             .gray;
         if (!is_mask and space.isInvisible()) return;
+        self.noteImage(st);
         try self.emit(.{ .image = .{
             .stream = st,
             .width = @intCast(w),
@@ -1058,6 +1076,23 @@ const Run = struct {
         } });
     }
 
+    /// Records what about image `st` cannot be passed on or decoded.
+    fn noteImage(self: *Run, st: object.Stream) void {
+        const doc_ = self.doc();
+        if (doc_.get(st.dict, "Filter")) |filter| {
+            const names: []const Object = switch (filter) {
+                .array => |arr| arr,
+                else => &.{filter},
+            };
+            for (names) |item| {
+                if (std.mem.eql(u8, doc_.resolve(item).asName() orelse "", "JBIG2Decode")) self.r.omissions.jbig2 = true;
+            }
+        }
+        if (doc_.get(st.dict, "SMask")) |mask| if (mask.asDict()) |d| {
+            if (d.has("Matte")) self.r.omissions.matte = true;
+        };
+    }
+
     fn inlineImage(self: *Run, im: content.InlineImage) Error!void {
         if (!self.r.options.graphics) return;
         // The scanner's strings and the data live in scratch memory that is
@@ -1068,7 +1103,7 @@ const Run = struct {
 
     fn formOp(self: *Run, st: object.Stream, num_id: u32) Error!void {
         if (self.depth >= self.r.options.max_depth) {
-            self.r.left_out = true;
+            self.r.omissions.too_deep = true;
             return;
         }
         if (num_id != 0) {
@@ -1080,11 +1115,18 @@ const Run = struct {
         };
         const doc_ = self.doc();
         const data = self.contentData(st) catch {
-            self.r.left_out = true;
+            self.r.omissions.undecodable = true;
             return;
         };
         const res = doc_.getDict(st.dict, "Resources") orelse self.resources;
         const m = self.matrixOf(st.dict, "Matrix");
+        // A group is composited as one object (11.4.5). That only shows when
+        // something applies to the object as a whole.
+        if (self.gs.fill_alpha < 1 or self.gs.soft_mask or !std.mem.eql(u8, self.gs.blend, "Normal")) {
+            if (doc_.getDict(st.dict, "Group")) |group| {
+                if (std.mem.eql(u8, doc_.getName(group, "S") orelse "", "Transparency")) self.r.omissions.group = true;
+            }
+        }
         try self.save();
         self.gs.ctm = m.mul(self.gs.ctm);
         if (if (self.r.options.graphics) self.rectOf(st.dict, "BBox") else null) |b| {
@@ -1115,6 +1157,17 @@ const Run = struct {
 
     // ---- annotations ----------------------------------------------------------------------------
 
+    /// Whether an annotation of `subtype` is meant to be seen, so that one
+    /// without an appearance is missed. Links and pop-ups are not.
+    fn shouldShow(self: *Run, d: Dict, subtype: []const u8) bool {
+        const rect = self.rectOf(d, "Rect") orelse return false;
+        if (!(rect[2] > rect[0] and rect[3] > rect[1])) return false;
+        for ([_][]const u8{ "Widget", "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Highlight", "Underline", "Squiggly", "StrikeOut", "Stamp", "Caret", "Ink", "FileAttachment", "Sound" }) |name| {
+            if (std.mem.eql(u8, subtype, name)) return true;
+        }
+        return false;
+    }
+
     /// Draws the normal appearance of each visible annotation (12.5.5).
     fn annotations(self: *Run, p: pages.Page) Error!void {
         const doc_ = self.doc();
@@ -1126,7 +1179,10 @@ const Run = struct {
             const sub = doc_.getName(ad, "Subtype") orelse "";
             if (std.mem.eql(u8, sub, "Popup")) continue;
             if (ad.get("OC")) |oc| if (self.r.hidden(oc)) continue;
-            const ap = doc_.getDict(ad, "AP") orelse continue;
+            const ap = doc_.getDict(ad, "AP") orelse {
+                if (self.shouldShow(ad, sub)) self.r.omissions.no_appearance = true;
+                continue;
+            };
             var n = doc_.get(ap, "N") orelse continue;
             if (n == .dict) {
                 const state = doc_.getName(ad, "AS") orelse continue;

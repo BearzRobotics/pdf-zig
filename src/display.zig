@@ -221,6 +221,48 @@ pub const Command = union(enum) {
     shading: ShadingFill,
 };
 
+/// What the page uses that its display list leaves out, or only approximates, so
+/// that a viewer can say why a page may not look as its maker meant.
+pub const Omissions = packed struct(u16) {
+    // Content that is missing from the list (`DisplayList.incomplete`).
+
+    /// A stream that could not be decoded.
+    undecodable: bool = false,
+    /// A function that could not be read.
+    bad_function: bool = false,
+    /// Forms, patterns or Type 3 glyphs nested beyond the limit.
+    too_deep: bool = false,
+    /// A function-based or mesh shading (types 1 and 4 to 7).
+    shading: bool = false,
+
+    // Content that is passed on, but not as the file means it.
+
+    /// A soft mask in the graphics state: the content is not masked.
+    soft_mask: bool = false,
+    /// A transparency group drawn with alpha, a blend mode or a soft mask:
+    /// its parts get them one by one.
+    group: bool = false,
+    /// Overprinting was asked for.
+    overprint: bool = false,
+    /// Text as a clipping path (rendering modes 4 to 7): no clip is emitted.
+    text_clip: bool = false,
+    /// A visible annotation or form field without an appearance: not drawn.
+    no_appearance: bool = false,
+    /// A JBIG2 image, which the library cannot decode.
+    jbig2: bool = false,
+    /// Characters for which no Unicode text is known: they cannot be searched.
+    no_unicode: bool = false,
+    /// A vertical font, placed as if it were horizontal.
+    vertical_text: bool = false,
+    /// An image soft mask with `/Matte`, which is not undone.
+    matte: bool = false,
+    _: u3 = 0,
+
+    pub fn contentMissing(self: Omissions) bool {
+        return self.undecodable or self.bad_function or self.too_deep or self.shading;
+    }
+};
+
 pub const DisplayList = struct {
     arena: std.heap.ArenaAllocator,
     commands: []const Command = &.{},
@@ -233,6 +275,10 @@ pub const DisplayList = struct {
     /// a function that could not be read, a function-based or mesh shading, or
     /// nesting beyond the limits. The rest of the page was interpreted as usual.
     incomplete: bool = false,
+    /// Which things were left out or approximated. `incomplete` is
+    /// `omissions.contentMissing()`. With `Options.graphics` off, only what
+    /// the text commands and the streams read for them show.
+    omissions: Omissions = .{},
 
     pub fn deinit(self: *DisplayList) void {
         self.arena.deinit();

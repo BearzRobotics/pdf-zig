@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `DisplayList.omissions` says what a page uses that is left out or only approximated.
+  `incomplete` means what it did. New example `pdfsurvey`.
+
 ## 0.4.0 (2026-11-27)
 
 pdf-zig can now make new documents, to take PDFs apart and put them together. No public

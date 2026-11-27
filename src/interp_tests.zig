@@ -958,6 +958,37 @@ test "a display list says when something was left out" {
     try testing.expect(dl.incomplete);
 }
 
+test "a display list says what it leaves out or approximates" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const group = "<< /Subtype /Form /BBox [0 0 9 9] /Group << /S /Transparency >> /Length 12 >>\nstream\n0 0 1 1 re f\nendstream";
+    const jbig2 = "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /JBIG2Decode /Length 1 >>\nstream\nx\nendstream";
+    const matte = "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /SMask 6 0 R /Length 1 >>\nstream\nx\nendstream";
+    const soft = "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Matte [0] /Length 1 >>\nstream\nx\nendstream";
+    const Case = struct { []const u8, []const u8, []const []const u8, []const u8, display.Omissions };
+    for ([_]Case{
+        .{ "0 0 1 1 re f", "", &.{}, "", .{} },
+        .{ "/G gs", "/ExtGState << /G << /SMask << /S /Luminosity >> >> >>", &.{}, "", .{ .soft_mask = true } },
+        .{ "/G gs", "/ExtGState << /G << /SMask /None /OP false >> >>", &.{}, "", .{} },
+        .{ "/G gs", "/ExtGState << /G << /op true >> >>", &.{}, "", .{ .overprint = true } },
+        // A group matters only when something applies to it as a whole.
+        .{ "/F Do", "/XObject << /F 5 0 R >>", &.{group}, "", .{} },
+        .{ "/G gs /F Do", "/ExtGState << /G << /ca 0.5 >> >> /XObject << /F 5 0 R >>", &.{group}, "", .{ .group = true } },
+        .{ "BT /F1 9 Tf 7 Tr (A) Tj ET", helv, &.{helv_obj}, "", .{ .text_clip = true } },
+        .{ "/I Do", "/XObject << /I 5 0 R >>", &.{jbig2}, "", .{ .jbig2 = true } },
+        .{ "/I Do", "/XObject << /I 5 0 R >>", &.{ matte, soft }, "", .{ .matte = true } },
+        .{ "", "", &.{}, "/Annots [<< /Subtype /Widget /Rect [1 1 9 9] >>]", .{ .no_appearance = true } },
+        // Links have nothing to show, and hidden or empty ones are not missed.
+        .{ "", "", &.{}, "/Annots [<< /Subtype /Link /Rect [1 1 9 9] >> << /Subtype /Widget /F 2 /Rect [1 1 9 9] >> << /Subtype /Square /Rect [1 1 1 1] >>]", .{} },
+    }) |c| {
+        const r = try render(try page(a, c[0], c[1], c[2], c[3]));
+        defer done(r);
+        try testing.expectEqual(c[4], r.list.omissions);
+        try testing.expect(!r.list.incomplete);
+    }
+}
+
 test "a shading that cannot be passed on marks the list incomplete" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

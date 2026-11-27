@@ -59,8 +59,12 @@ of the run, and per glyph the character code, CID, offset along the run, advance
 text. A Type 3 font draws its glyphs as the paths of its procedures and also emits the run as
 invisible text (mode 3) so it can be extracted.
 
-A list with content left out (a stream that cannot be decoded, a function that cannot
-be read, a shading of type 1 or 4 to 7, nesting past `max_depth`) has `DisplayList.incomplete` set.
+`DisplayList.omissions` says what the page uses that the list leaves out or only
+approximates. `incomplete` is set when content is missing: a stream that cannot be decoded,
+a function that cannot be read, a shading of type 1 or 4 to 7, or nesting past
+`max_depth`. The rest (soft masks, transparency groups that matter, overprint, text
+clipping, annotations without an appearance, JBIG2, text without Unicode, vertical fonts,
+`/Matte`) is passed on approximately.
 
 ## New documents
 

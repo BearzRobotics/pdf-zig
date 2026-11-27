@@ -72,6 +72,7 @@ The viewer needs to add these. None needs new drawing code.
 | Feature | pdf-zig | In the viewer |
 |---|---|---|
 | Say when a page is incomplete | `DisplayList.incomplete` | The viewer did not read it at `161b555`. Show a small notice |
+| (next release) Say why a page may look wrong | `DisplayList.omissions`: a flag for each thing left out or approximated | Name the ones that change what is seen (`soft_mask`, `group`, `shading`, `no_appearance`, `jbig2`, `text_clip`) in the notice. `no_unicode` only affects search and copy |
 | Clickable links | `link.list(arena, &doc, list, page)`: rectangle in user space, and a page, a URI, a named action or `unsupported` | Hit-test with the inverse of `baseMatrix`, as annotations are. **A URI is untrusted:** open only schemes you choose (`http`, `https`, `mailto`), show the address, and ask first. Never run `file:` or anything else |
 | Extract, delete, reorder, merge, split, rotate pages | `compose.Builder` | See below |
 

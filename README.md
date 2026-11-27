@@ -137,7 +137,8 @@ compare with `pdftotext` and `pdfinfo`.
 `pdftext` (`-raw` for stream order, `-p` for a password), `pdfdump` (the display list of a page),
 `pdfsvg` (a page as SVG, to look at), `pdfimg` (decode the images of a page), `pdfmark`
 (highlight a word and add a note), `pdffill` (list or fill form fields) and `pdfpages` (a new
-PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`).
+PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`). `pdfsurvey` names the features a
+file uses.
 
 ## Tests
 
