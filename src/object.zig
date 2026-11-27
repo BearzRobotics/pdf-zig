@@ -435,7 +435,10 @@ pub const Parser = struct {
             break;
         }
         if (i == digits_start) return error.Syntax;
-        if (i < self.src.len and isRegular(self.src[i])) return error.Syntax; // `12abc`
+        if (i < self.src.len and isRegular(self.src[i])) {
+            self.pos = i; // how far the failed read got
+            return error.Syntax; // `12abc`
+        }
         const text = self.src[start..i];
         self.pos = i;
         const neg = text[0] == '-';

@@ -375,3 +375,16 @@ test "inline image: the end is found before text that is not ASCII" {
     try std.testing.expectEqualStrings("abc", odd[0].image.?.data);
     try std.testing.expectEqualStrings("Q", odd[odd.len - 1].name);
 }
+
+test "a long malformed number is not rescanned from every byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = try a.alloc(u8, 1 << 20);
+    @memset(src, '1');
+    src[src.len - 3] = 'a';
+    src[src.len - 2] = ' ';
+    src[src.len - 1] = 'q';
+    const ops = try collect(a, src);
+    try std.testing.expectEqualStrings("q", ops[ops.len - 1].name);
+}

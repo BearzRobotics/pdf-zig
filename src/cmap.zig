@@ -30,6 +30,9 @@ pub const CMap = struct {
 
     /// Largest number of entries read from one CMap.
     pub const max_entries = 1 << 20;
+    /// Most code space ranges kept. Every shown glyph is checked against them;
+    /// real CMaps have a handful.
+    pub const max_spaces = 256;
 
     /// How many bytes the next code at `s` takes: from the code space ranges
     /// (9.7.6.2), or `default` if none matches.
@@ -128,8 +131,15 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
         if (p.atEnd()) break;
         const c = p.src[p.pos];
         if (c == '/' or c == '(' or c == '<' or c == '[' or c == '+' or c == '-' or c == '.' or (c >= '0' and c <= '9')) {
-            const o = p.parseObject() catch {
-                p.pos += 1;
+            const start = p.pos;
+            const o = p.parseObject() catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                // Go on from where reading failed, past the rest of a broken
+                // word: retrying from every byte costs the square of its length.
+                p.pos = @max(p.pos, start + 1);
+                if (object.isRegular(c)) while (p.pos < p.src.len and object.isRegular(p.src[p.pos])) {
+                    p.pos += 1;
+                };
                 continue;
             };
             if (section == .none) continue;
@@ -146,7 +156,7 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
                 npending = 0;
                 if (ranges.items.len >= CMap.max_entries) continue;
                 switch (section) {
-                    .space => if (pending[0] == .string and pending[1] == .string and pending[0].string.len <= 4)
+                    .space => if (spaces.items.len < CMap.max_spaces and pending[0] == .string and pending[1] == .string and pending[0].string.len <= 4)
                         try spaces.append(a, .{ .lo = hexValue(pending[0].string), .hi = hexValue(pending[1].string), .bytes = @intCast(pending[0].string.len) }),
                     .bfchar => if (pending[0] == .string and pending[1] == .string and pending[0].string.len <= 4) {
                         const code = hexValue(pending[0].string);
@@ -159,6 +169,7 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
                         switch (pending[2]) {
                             .string => |d| if (hi >= lo) try ranges.append(a, .{ .lo = lo, .hi = hi, .bytes = bytes, .dst = try utf16Of(a, d) }),
                             .array => |arr| for (arr, 0..) |item, i| {
+                                if (ranges.items.len >= CMap.max_entries) break;
                                 if (item != .string or lo + i > hi) continue;
                                 try ranges.append(a, .{ .lo = @intCast(lo + i), .hi = @intCast(lo + i), .bytes = bytes, .dst = try utf16Of(a, item.string) });
                             },
@@ -302,4 +313,25 @@ test "ranges wider than their destination type do not overflow" {
     // An upper bound longer than the lower one is not a range.
     const bad = try parse(a, "1 beginbfrange <0041> <FF00000041> <0041> endbfrange 1 begincidrange <0041> <FF00000041> 7 endcidrange");
     try std.testing.expectEqual(@as(usize, 0), bad.ranges.len);
+}
+
+test "long malformed tokens and endless codespace ranges stay cheap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Retrying from every byte of these would take minutes.
+    for ([_]u8{ '1', '(', '[' }) |c| {
+        const src = try a.alloc(u8, 1 << 20);
+        @memset(src, c);
+        src[src.len - 1] = 'a';
+        _ = try parse(a, src);
+    }
+    // Damage does not hide what follows it.
+    const after = try parse(a, "123abc 1 beginbfchar <41> <0042> endbfchar");
+    try std.testing.expectEqual(@as(usize, 1), after.ranges.len);
+    var spaces: std.ArrayList(u8) = .empty;
+    try spaces.appendSlice(a, "1 begincodespacerange ");
+    for (0..10_000) |_| try spaces.appendSlice(a, "<00> <01> ");
+    const many = try parse(a, spaces.items);
+    try std.testing.expectEqual(@as(usize, CMap.max_spaces), many.spaces.len);
 }
