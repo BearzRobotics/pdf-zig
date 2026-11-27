@@ -37,6 +37,10 @@ pub fn page(a: Allocator, content: []const u8, resources: []const u8, extra: []c
 pub fn expectSoundFile(bytes: []const u8) !void {
     var doc = try pdf.Document.open(testing.allocator, bytes, .{});
     defer doc.deinit();
+    // /Size is more than every object number (table 15).
+    const size = doc.trailer.get("Size").?.asInt().?;
+    var numbers = doc.xref.keyIterator();
+    while (numbers.next()) |n| try testing.expect(n.* < size);
     var it = doc.xref.iterator();
     while (it.next()) |kv| switch (kv.value_ptr.*) {
         .free => {},
