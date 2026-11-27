@@ -247,7 +247,8 @@ const Walk = struct {
 
 pub const Error = write.Error || error{ ReadOnly, WrongKind, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
 
-/// Sets the text of a text field or an editable combo box.
+/// Sets the text of a text field or an editable combo box. The value of a
+/// password field is not stored: it is only shown, masked, in the appearance.
 pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .text and field.kind != .combo) return error.WrongKind;
@@ -268,7 +269,11 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
     }
 
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
-    fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, text) });
+    // A password is never put in the file (12.7.4.3), where an incremental
+    // update would keep it for good. Only its masked appearance is written.
+    fd = if (field.password) try write.dictWithout(a, fd, "V") else try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, text) });
+    // A rich text value would still say what the field said before.
+    fd = try write.dictWithout(a, fd, "RV");
     try upd.set(field.num, .{ .dict = fd });
 
     const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, text, field.password)));
@@ -868,4 +873,34 @@ test "the form's font is used only if it draws the bytes written" {
         try testing.expectEqual(c.keep, got.used_form_font);
         if (!c.keep) try testing.expectEqualStrings(c.value, got.drawn);
     }
+}
+
+test "a password field's value is not stored in the file" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try tests.buildFile(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (pw) /Ff 8192 /Rect [10 10 190 30] /V (old) /RV (old rich) >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(arena.allocator(), &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setText(&upd, all[0], "hunter2");
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try upd.write(testing.allocator, &out.writer);
+    const added = out.written()[bytes.len..];
+    try testing.expect(std.mem.indexOf(u8, added, "hunter2") == null);
+    try testing.expect(std.mem.indexOf(u8, added, "68756e74657232") == null);
+    try testing.expect(std.mem.indexOf(u8, added, "(*******) Tj") != null);
+    var doc2 = try Document.open(testing.allocator, out.written(), .{});
+    defer doc2.deinit();
+    const widget = doc2.getObject(4).asDict().?;
+    try testing.expect(widget.get("V") == null and widget.get("RV") == null);
 }
