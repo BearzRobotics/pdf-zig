@@ -130,6 +130,8 @@ const Walk = struct {
     /// walking an object once, and a damaged tree cannot grow exponentially.
     seen: std.AutoHashMapUnmanaged(u32, void) = .empty,
     visited: usize = 0,
+    /// What the listing may still copy (`write.max_listed_bytes`).
+    left: usize = write.max_listed_bytes,
 
     fn visit(self: *Walk, node: Object, parent_name: []const u8, inh_in: Inherited, depth: usize) Allocator.Error!void {
         if (depth > max_depth or self.out.items.len >= max_fields or self.visited >= 4 * max_fields) return;
@@ -188,7 +190,7 @@ const Walk = struct {
 
         var value: []const u8 = "";
         if (inh.v) |v| switch (doc.resolve(v)) {
-            .string => |s| value = try write.textToUtf8(a, s),
+            .string => |s| value = try write.listedText(a, s, &self.left),
             .name => |n| value = try a.dupe(u8, n),
             else => {},
         };
@@ -197,19 +199,22 @@ const Walk = struct {
         var options: std.ArrayList([]const u8) = .empty;
         var exports: std.ArrayList([]const u8) = .empty;
         if (inh.opt) |opt| for (opt) |o| {
+            // Each entry costs something, however short its text.
+            if (self.left < 64) break;
+            self.left -= 64;
             var shown: []const u8 = "";
             var exported: []const u8 = "";
             switch (doc.resolve(o)) {
                 .string => |s| {
-                    shown = try write.textToUtf8(a, s);
+                    shown = try write.listedText(a, s, &self.left);
                     exported = shown;
                 },
                 // [export display]
                 .array => |pair| if (pair.len == 2) {
                     const first = doc.resolve(pair[0]);
                     const second = doc.resolve(pair[1]);
-                    if (first == .string) exported = try write.textToUtf8(a, first.string);
-                    if (second == .string) shown = try write.textToUtf8(a, second.string);
+                    if (first == .string) exported = try write.listedText(a, first.string, &self.left);
+                    if (second == .string) shown = try write.listedText(a, second.string, &self.left);
                 },
                 else => {},
             }
@@ -1324,4 +1329,42 @@ test "toWinAnsi returns memory the caller can free, also when it fails" {
             a.free(try toWinAnsi(a, "some text\r\nthat needs several allocations to be converted into bytes"));
         }
     }.run, .{});
+}
+
+test "listing items that share one large object has a total bound" {
+    const max_listed_bytes = write.max_listed_bytes;
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 200 fields, annotations and bookmarks sharing one string of 1 MiB.
+    const big = try a.alloc(u8, 1 << 20);
+    @memset(big, 'x');
+    var annots: std.ArrayList(u8) = .empty;
+    var field_refs: std.ArrayList(u8) = .empty;
+    var bodies: std.ArrayList([]const u8) = .empty;
+    try bodies.appendSlice(a, &.{ "", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "", try std.fmt.allocPrint(a, "({s})", .{big}), "<< /First 6 0 R >>" });
+    const count = 200;
+    for (0..count) |i| {
+        const num = 6 + i;
+        try annots.print(a, "{d} 0 R ", .{num});
+        try field_refs.print(a, "{d} 0 R ", .{num});
+        const next = if (i + 1 < count) try std.fmt.allocPrint(a, "/Next {d} 0 R", .{num + 1}) else "";
+        try bodies.append(a, try std.fmt.allocPrint(a, "<< /Subtype /Widget /FT /Tx /T (f{d}) /Rect [0 0 1 1] /V 4 0 R /Contents 4 0 R /Title 4 0 R /Parent 5 0 R {s} >>", .{ i, next }));
+    }
+    bodies.items[0] = try std.fmt.allocPrint(a, "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R /AcroForm << /Fields [{s}] >> >>", .{field_refs.items});
+    bodies.items[2] = try std.fmt.allocPrint(a, "<< /Type /Page /Parent 2 0 R /Annots [{s}] >>", .{annots.items});
+    var doc = try Document.open(testing.allocator, try tests.buildFile(a, bodies.items), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+
+    var total: usize = 0;
+    for (try fields(a, &doc, pl)) |f| total += f.value.len;
+    try testing.expect(total > 0 and total <= max_listed_bytes);
+    total = 0;
+    for (try @import("annot.zig").list(a, &doc, pages.page(&doc, pl, 0).?)) |n| total += n.contents.len;
+    try testing.expect(total > 0 and total <= @import("write.zig").max_listed_bytes);
+    total = 0;
+    for (try @import("outline.zig").read(a, &doc, pl)) |item| total += item.title.len;
+    try testing.expect(total > 0 and total <= @import("write.zig").max_listed_bytes);
 }

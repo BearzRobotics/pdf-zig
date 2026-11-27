@@ -80,7 +80,7 @@ fn children(a: Allocator, doc: *Document, list: pages.PageList, parent: Dict, de
         const count = doc.getInt(d, "Count") orelse 0;
         try out.append(a, .{
             .num = if (c == .ref) c.ref.num else 0,
-            .title = try write.textToUtf8(a, title_raw),
+            .title = try write.listedText(a, title_raw, &work.text_left),
             .dest = destinationWithin(doc, list, d, work),
             .open = count > 0,
             .children = if (d.get("First") != null) try children(a, doc, list, d, depth + 1, budget, seen, work) else &.{},
@@ -103,6 +103,7 @@ const PageIndex = std.AutoHashMapUnmanaged(u32, usize);
 /// What resolving destinations may still spend, and what it can reuse.
 const Work = struct {
     lookups: usize,
+    text_left: usize = write.max_listed_bytes,
     page_of: ?*const PageIndex = null,
 };
 

@@ -81,6 +81,7 @@ pub fn list(a: Allocator, doc: *Document, page: pages.Page) Allocator.Error![]An
     var out: std.ArrayList(Annotation) = .empty;
     errdefer out.deinit(a);
     const items = doc.getArray(page.dict, "Annots") orelse return out.toOwnedSlice(a);
+    var left: usize = write.max_listed_bytes;
     for (items) |item| {
         const d = doc.resolve(item).asDict() orelse continue;
         const sub = doc.getName(d, "Subtype") orelse continue;
@@ -91,7 +92,9 @@ pub fn list(a: Allocator, doc: *Document, page: pages.Page) Allocator.Error![]An
         };
         var quads: []f64 = &.{};
         if (doc.getArray(d, "QuadPoints")) |q| {
-            const n = q.len - q.len % 8;
+            var n = q.len - q.len % 8;
+            if (n > left / @sizeOf(f64)) n = 0;
+            left -= n * @sizeOf(f64);
             quads = try a.alloc(f64, n);
             for (q[0..n], 0..) |v, i| quads[i] = doc.resolve(v).asNum() orelse 0;
         }
@@ -100,8 +103,8 @@ pub fn list(a: Allocator, doc: *Document, page: pages.Page) Allocator.Error![]An
             .kind = kindOf(sub),
             .subtype = try a.dupe(u8, sub),
             .rect = r,
-            .contents = if (doc.get(d, "Contents")) |c| (if (c == .string) try write.textToUtf8(a, c.string) else "") else "",
-            .author = if (doc.get(d, "T")) |c| (if (c == .string) try write.textToUtf8(a, c.string) else "") else "",
+            .contents = if (doc.get(d, "Contents")) |c| (if (c == .string) try write.listedText(a, c.string, &left) else "") else "",
+            .author = if (doc.get(d, "T")) |c| (if (c == .string) try write.listedText(a, c.string, &left) else "") else "",
             .color = color,
             .quads = quads,
             .flags = doc.getInt(d, "F") orelse 0,

@@ -140,6 +140,21 @@ pub fn textString(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice(a);
 }
 
+/// Most bytes of strings and number arrays that one listing (of fields, of a
+/// page's annotations, of the outline) copies out of the document. Any number
+/// of items may share one large object, so each item alone is no bound. What
+/// is past it reads as empty.
+pub const max_listed_bytes = 64 << 20;
+
+/// `textToUtf8` for a listing: charged to `left`, and empty once that is spent.
+pub fn listedText(a: Allocator, s: []const u8, left: *usize) Allocator.Error![]const u8 {
+    // UTF-8 is at most three bytes for each byte read.
+    if (s.len > left.* / 3) return "";
+    const out = try textToUtf8(a, s);
+    left.* -= out.len;
+    return out;
+}
+
 /// A text string (7.9.2.2) read back as UTF-8: UTF-16BE or UTF-8 when it
 /// starts with that byte order mark, else PDFDocEncoding. What cannot be
 /// decoded becomes U+FFFD.
