@@ -213,12 +213,26 @@ fn startsWithSpace(s: []const u8) bool {
     return s.len > 0 and s[0] == ' ';
 }
 
+/// A total order of coordinates: NaN, which damaged files can produce, sorts
+/// after every number.
+fn coordinateOrder(x: f64, y: f64) std.math.Order {
+    if (std.math.isNan(x) or std.math.isNan(y)) {
+        return std.math.order(@intFromBool(std.math.isNan(x)), @intFromBool(std.math.isNan(y)));
+    }
+    return std.math.order(x, y);
+}
+
 fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8), boxes: ?*std.ArrayList(Box)) Allocator.Error!void {
     // Sort by baseline, then x; lines are runs whose baselines are close.
-    std.mem.sortUnstable(Item, items, {}, struct {
+    // "Close" is not transitive, so it must not be part of the sort order: a
+    // large letter would be close to several small lines and mix them up.
+    std.mem.sort(Item, items, {}, struct {
         fn lt(_: void, p: Item, q: Item) bool {
-            if (@abs(p.y - q.y) > 0.5 * @max(p.size, q.size, 1)) return p.y < q.y;
-            return p.x0 < q.x0;
+            return switch (coordinateOrder(p.y, q.y)) {
+                .lt => true,
+                .gt => false,
+                .eq => coordinateOrder(p.x0, q.x0) == .lt,
+            };
         }
     }.lt);
     var line_start: usize = 0;
@@ -227,9 +241,9 @@ fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8), boxes: ?*s
         const y0 = items[line_start].y;
         while (line_end < items.len and @abs(items[line_end].y - y0) <= 0.5 * @max(items[line_end].size, items[line_start].size, 1)) line_end += 1;
         const line = items[line_start..line_end];
-        std.mem.sortUnstable(Item, line, {}, struct {
+        std.mem.sort(Item, line, {}, struct {
             fn lt(_: void, p: Item, q: Item) bool {
-                return p.x0 < q.x0;
+                return coordinateOrder(p.x0, q.x0) == .lt;
             }
         }.lt);
         var prev: ?Item = null;

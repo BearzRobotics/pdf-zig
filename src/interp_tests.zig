@@ -728,3 +728,24 @@ test "limits: glyphs, path segments and commands are counted for the whole page"
     try testing.expectError(error.LimitExceeded, renderCost(path_page, .{ .max_path_segments = 1000 }));
     try testing.expectError(error.LimitExceeded, renderCost(tiled, .{ .max_commands = 1000 }));
 }
+
+test "reading order keeps small lines intact next to a large letter" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "BT /F1 36 Tf 10 38 Td (T) Tj /F1 10 Tf 1 0 0 1 40 56 Tm (he first line) Tj 1 0 0 1 40 44 Tm (second line) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .reading);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("he first line\nT second line\n", got);
+}
+
+test "reading order: superscripts stay on their line and runs sort by position" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 1 0 0 1 60 50 Tm (world) Tj 1 0 0 1 10 50 Tm (hello) Tj " ++
+        "/F1 6 Tf 1 0 0 1 90 54 Tm (2) Tj /F1 10 Tf 1 0 0 1 10 30 Tm (next) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .reading);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("hello world 2\nnext\n", got);
+}
