@@ -339,14 +339,14 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
         .log => st[n - 1] = if (st[n - 1] > 0) std.math.log10(st[n - 1]) else 0,
         .sqrt => st[n - 1] = if (st[n - 1] >= 0) @sqrt(st[n - 1]) else 0,
         .neg => st[n - 1] = -st[n - 1],
-        .not => st[n - 1] = if (st[n - 1] == 0) 1 else if (st[n - 1] == 1) 0 else @floatFromInt(~@as(i64, @intFromFloat(@trunc(st[n - 1])))),
-        .@"and" => binary(st, sp, @floatFromInt(@as(i64, @intFromFloat(@trunc(st[n - 2]))) & @as(i64, @intFromFloat(@trunc(st[n - 1]))))),
-        .@"or" => binary(st, sp, @floatFromInt(@as(i64, @intFromFloat(@trunc(st[n - 2]))) | @as(i64, @intFromFloat(@trunc(st[n - 1]))))),
-        .xor => binary(st, sp, @floatFromInt(@as(i64, @intFromFloat(@trunc(st[n - 2]))) ^ @as(i64, @intFromFloat(@trunc(st[n - 1]))))),
+        .not => st[n - 1] = if (st[n - 1] == 0) 1 else if (st[n - 1] == 1) 0 else @floatFromInt(~int(st[n - 1])),
+        .@"and" => binary(st, sp, @floatFromInt(int(st[n - 2]) & int(st[n - 1]))),
+        .@"or" => binary(st, sp, @floatFromInt(int(st[n - 2]) | int(st[n - 1]))),
+        .xor => binary(st, sp, @floatFromInt(int(st[n - 2]) ^ int(st[n - 1]))),
         .bitshift => {
-            const v: i64 = @intFromFloat(@trunc(st[n - 2]));
-            const sh: i64 = @intFromFloat(@trunc(st[n - 1]));
-            const r: i64 = if (sh >= 0) (if (sh < 62) v << @intCast(sh) else 0) else (if (-sh < 62) v >> @intCast(-sh) else 0);
+            const v = int(st[n - 2]);
+            const sh = int(st[n - 1]);
+            const r: i64 = if (sh >= 0) (if (sh < 62) v << @intCast(sh) else 0) else (if (sh > -62) v >> @intCast(-sh) else 0);
             binary(st, sp, @floatFromInt(r));
         },
         .eq => binary(st, sp, b(st[n - 2] == st[n - 1])),
@@ -365,7 +365,7 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             st[n - 2] = t;
         },
         .copy => {
-            const k: usize = @intFromFloat(@max(0, @trunc(st[n - 1])));
+            const k: usize = @intCast(@max(0, int(st[n - 1])));
             sp.* -= 1;
             if (k > sp.* or sp.* + k > st.len) return;
             const base = sp.* - k;
@@ -373,17 +373,18 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             sp.* += k;
         },
         .index => {
-            const k: usize = @intFromFloat(@max(0, @trunc(st[n - 1])));
+            const k: usize = @intCast(@max(0, int(st[n - 1])));
             sp.* -= 1;
             if (k >= sp.*) return;
             st[sp.*] = st[sp.* - 1 - k];
             sp.* += 1;
         },
         .roll => {
-            const j: i64 = @intFromFloat(@trunc(st[n - 1]));
+            const j = int(st[n - 1]);
             const cnt_f = @trunc(st[n - 2]);
             sp.* -= 2;
-            if (cnt_f < 0 or cnt_f > @as(f64, @floatFromInt(sp.*))) return;
+            // Written to be false for NaN as well.
+            if (!(cnt_f >= 0 and cnt_f <= @as(f64, @floatFromInt(sp.*)))) return;
             const cnt: usize = @intFromFloat(cnt_f);
             if (cnt == 0) return;
             const shift: usize = @intCast(@mod(j, @as(i64, @intCast(cnt))));
@@ -393,6 +394,13 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             for (0..cnt) |i| st[base + i] = tmp[i];
         },
     }
+}
+
+/// A stack value as an integer operand. Anything that is not a number in the
+/// range of i64 (huge, infinite, NaN) counts as 0.
+fn int(v: f64) i64 {
+    if (!(@abs(v) < 9.2e18)) return 0;
+    return @intFromFloat(@trunc(v));
 }
 
 fn b(v: bool) f64 {
@@ -569,4 +577,31 @@ test "exponential and stitching evaluation" {
     try std.testing.expectApproxEqAbs(@as(f64, 5), one[0], 1e-9);
     st.eval(&.{0.75}, &one);
     try std.testing.expectApproxEqAbs(@as(f64, 150), one[0], 1e-9);
+}
+
+test "calculator: operands outside the integer range never crash" {
+    var out: [1]f64 = undefined;
+    for ([_][]const u8{
+        "{ 1e300 not }",
+        "{ pop 10 1000 exp 1 and }",
+        "{ pop 1 1e300 or }",
+        "{ pop nan 1 xor }",
+        "{ pop 1 -9223372036854775808 bitshift }",
+        "{ pop 1e300 1 bitshift }",
+        "{ pop 1 -1e300 bitshift }",
+        "{ 1e300 copy }",
+        "{ inf copy }",
+        "{ 1e300 index }",
+        "{ nan index }",
+        "{ 1 1e300 roll }",
+        "{ nan 1 roll }",
+        "{ 1 nan roll }",
+    }) |program| try calcTest(program, &.{0.5}, &out);
+    // Ordinary integer operators are unchanged.
+    try calcTest("{ pop 12 10 and }", &.{0}, &out);
+    try std.testing.expectEqual(@as(f64, 8), out[0]);
+    try calcTest("{ pop 1 4 bitshift }", &.{0}, &out);
+    try std.testing.expectEqual(@as(f64, 16), out[0]);
+    try calcTest("{ pop 16 -4 bitshift }", &.{0}, &out);
+    try std.testing.expectEqual(@as(f64, 1), out[0]);
 }
