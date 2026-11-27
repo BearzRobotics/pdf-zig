@@ -238,7 +238,17 @@ pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) Edit
 
     if (existing) |outlines| {
         var root = upd.get(outlines.num).asDict() orelse return error.NoCatalog;
-        const last = refOf(root.get("Last"));
+        // The last item is found by walking the list: /Last may be stale,
+        // missing or wrong, and following it would cut off or hide items.
+        var last: ?object.Ref = null;
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        try seen.put(a, outlines.num, {});
+        var cursor = try itemAt(upd, root.get("First"), &seen);
+        while (cursor) |sibling| {
+            last = sibling;
+            const d = upd.get(sibling.num).asDict() orelse break;
+            cursor = try itemAt(upd, d.get("Next"), &seen);
+        }
         var entries: std.ArrayList(object.Entry) = .empty;
         try entries.append(a, .{ .key = "Title", .value = title_obj });
         try entries.append(a, .{ .key = "Parent", .value = .{ .ref = outlines } });
@@ -249,7 +259,7 @@ pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) Edit
             const ld = upd.get(l.num).asDict() orelse return error.NoSuchItem;
             try upd.set(l.num, .{ .dict = try write.dictWith(a, ld, "Next", .{ .ref = item }) });
         }
-        if (root.get("First") == null) root = try write.dictWith(a, root, "First", .{ .ref = item });
+        if (last == null) root = try write.dictWith(a, root, "First", .{ .ref = item });
         root = try write.dictWith(a, root, "Last", .{ .ref = item });
         try upd.set(outlines.num, .{ .dict = try recount(upd, root) });
         return item;
@@ -659,4 +669,27 @@ test "add keeps the bookmarks of a direct /Outlines dictionary" {
     defer doc.deinit();
     const root = doc.catalog().?.get("Outlines").?.ref;
     try testing.expectEqual(root.num, doc.getObject(4).asDict().?.get("Parent").?.ref.num);
+}
+
+test "add appends after the real last bookmark, whatever /Last says" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "/First 5 0 R /Last 5 0 R", "/First 5 0 R", "/First 5 0 R /Last 3 0 R" }) |root| {
+        const bytes = try @import("interp_tests.zig").buildFile(a, &.{
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            try std.fmt.allocPrint(a, "<< {s} >>", .{root}),
+            "<< /Title (one) /Parent 4 0 R /Next 6 0 R >>",
+            "<< /Title (two) /Parent 4 0 R /Next 7 0 R >>",
+            "<< /Title (three) /Parent 4 0 R >>",
+        });
+        const out = try edited(a, bytes, addNew);
+        try testing.expectEqualStrings("one,two,three,new,", try titles(a, out));
+        var doc = try Document.open(testing.allocator, out, .{});
+        defer doc.deinit();
+        try testing.expect(doc.getObject(3).asDict().?.get("Next") == null);
+        try testing.expectEqual(@as(?i64, 4), doc.getObject(4).asDict().?.get("Count").?.asInt());
+    }
 }
