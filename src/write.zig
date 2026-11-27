@@ -70,15 +70,13 @@ fn writeDict(w: *Io.Writer, d: Dict, length: ?usize) Io.Writer.Error!void {
 }
 
 fn writeReal(w: *Io.Writer, r: f64) Io.Writer.Error!void {
-    if (!std.math.isFinite(r)) return w.writeByte('0');
+    // PDF has no infinity or NaN. Magnitudes far below its smallest real are
+    // zero, which also bounds how many leading zeros are written.
+    if (!std.math.isFinite(r) or @abs(r) < 1e-38) return w.writeByte('0');
     if (@abs(r) < 9e15 and r == @trunc(r)) return w.print("{d}", .{@as(i64, @intFromFloat(r))});
-    // Fixed notation, never an exponent (PDF has none); trailing zeros dropped.
-    var buf: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d:.5}", .{r}) catch return w.writeByte('0');
-    var end = text.len;
-    while (end > 0 and text[end - 1] == '0') end -= 1;
-    if (end > 0 and text[end - 1] == '.') end -= 1;
-    try w.writeAll(text[0..end]);
+    // The shortest digits that read back as the same value, in decimal
+    // notation: PDF has no exponents.
+    try w.print("{d}", .{r});
 }
 
 /// A name: bytes outside the printable regular range, delimiters and `#` are written as `#xx`.
@@ -664,4 +662,24 @@ test "adding past the object limit is an error" {
     _ = try upd.add(.null);
     _ = try upd.add(.null);
     try testing.expectError(error.TooManyObjects, upd.add(.null));
+}
+
+test "reals keep their value when written and read back" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]f64{ 0.000001, 1.23456e-5, -4e-6, 0.1, -2.5, 1e60, -1e60, 123456.789012, 9.999999999999999e-31, 1.2345678901234567e-30, 612.0001, 1e15, 3e18 }) |v| {
+        var aw: Io.Writer.Allocating = .init(a);
+        try writeObject(&aw.writer, .{ .real = v });
+        const out = aw.written();
+        try testing.expect(std.mem.indexOfAny(u8, out, "eE") == null);
+        var p = object.Parser.init(a, out, 0);
+        try testing.expectEqual(v, (try p.parseObject()).asNum().?);
+    }
+    // Smaller than anything PDF can mean, and not a number: zero.
+    for ([_]f64{ 1e-60, -1e-310, std.math.nan(f64), std.math.inf(f64) }) |v| {
+        var aw: Io.Writer.Allocating = .init(a);
+        try writeObject(&aw.writer, .{ .real = v });
+        try testing.expectEqualStrings("0", aw.written());
+    }
 }
