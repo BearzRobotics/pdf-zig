@@ -43,7 +43,8 @@ pub const Function = struct {
     /// Evaluates the function. `out` must hold `nOutputs()` values.
     pub fn eval(self: Function, in: []const f64, out: []f64) void {
         @memset(out, 0);
-        var x: [max_inputs]f64 = undefined;
+        // A missing input is 0: some functions read the first one regardless.
+        var x: [max_inputs]f64 = @splat(0);
         const n = @min(self.nInputs(), in.len);
         for (0..n) |i| x[i] = std.math.clamp(in[i], self.domain[2 * i], @max(self.domain[2 * i], self.domain[2 * i + 1]));
         switch (self.kind) {
@@ -634,4 +635,11 @@ test "calculator: operands outside the integer range never crash" {
     try std.testing.expectEqual(@as(f64, 16), out[0]);
     try calcTest("{ pop 16 -4 bitshift }", &.{0}, &out);
     try std.testing.expectEqual(@as(f64, 1), out[0]);
+}
+
+test "evaluating without an input uses zero" {
+    const f = Function{ .domain = &.{ 0, 1 }, .range = &.{}, .kind = .{ .exponential = .{ .c0 = &.{2}, .c1 = &.{10}, .n = 1 } } };
+    var out: [1]f64 = undefined;
+    f.eval(&.{}, &out);
+    try std.testing.expectEqual(@as(f64, 2), out[0]);
 }
