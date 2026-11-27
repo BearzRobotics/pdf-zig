@@ -43,6 +43,9 @@ try lay.rectsFor(gpa, from, to, &rects);                  // one rectangle per l
 // The document outline ("bookmarks"), as a tree.
 const items = try pdf.outline.read(arena, &doc, list);
 
+// The links of a page: a rectangle and a target (a page, a URI, a named action).
+const links = try pdf.link.list(arena, &doc, list, page);
+
 // Edits are an incremental update appended to the file; the original bytes stay.
 var upd = try pdf.write.Update.init(gpa, &doc);
 defer upd.deinit();
@@ -58,6 +61,7 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 |---|---|
 | `text.layout` | reading-order text with a box for every glyph; hit testing, search ranges and per-line rectangles |
 | `outline` | reads the bookmark tree (named destinations too); adds and removes bookmarks |
+| `link` | reads a page's links. It follows none: a URI is untrusted text, so check its scheme before opening it |
 | `write` | serializes objects; appends an incremental update with a classic table or a cross-reference stream. Refuses encrypted files and files that had to be repaired on open |
 | `annot` | reads annotations; adds highlights, underlines (straight or squiggly), strike-outs, notes, ink and text boxes with appearance streams; edits and removes them |
 | `form` | finds AcroForm fields (groups, check boxes, radio groups, choices); fills text, check box, radio, combo and list fields |

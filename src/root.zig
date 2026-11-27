@@ -31,6 +31,7 @@ pub const Options = document.Options;
 pub const write = @import("write.zig");
 pub const annot = @import("annot.zig");
 pub const outline = @import("outline.zig");
+pub const link = @import("link.zig");
 pub const form = @import("form.zig");
 pub const Object = object.Object;
 pub const Dict = object.Dict;
@@ -58,6 +59,7 @@ test {
     _ = @import("write.zig");
     _ = @import("annot.zig");
     _ = @import("outline.zig");
+    _ = @import("link.zig");
     _ = @import("form.zig");
     _ = @import("image.zig");
     _ = @import("ccitt.zig");

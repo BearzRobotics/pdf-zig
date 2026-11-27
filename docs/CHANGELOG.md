@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New `link.list`: the links of a page, with the page they go to, their URI or their
+  named action.
 - Pages with `/UserUnit` have their true size: `Page.displaySize` and `DisplayList.base`
   give points. `Page` has `user_unit`.
 - A page with a function-based or mesh shading (types 1 and 4 to 7), which is skipped,

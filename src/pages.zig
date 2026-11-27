@@ -166,6 +166,11 @@ pub const PageList = struct {
 
 fn rectOf(doc: *Document, o: ?Object) ?Rect {
     const arr = (doc.resolve(o orelse return null)).asArray() orelse return null;
+    return rectFrom(doc, arr);
+}
+
+/// The rectangle that the first four numbers of `arr` describe (7.9.5).
+pub fn rectFrom(doc: *Document, arr: []const Object) ?Rect {
     if (arr.len < 4) return null;
     var v: [4]f64 = undefined;
     for (0..4) |i| v[i] = doc.resolve(arr[i]).asNum() orelse return null;

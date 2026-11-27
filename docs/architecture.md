@@ -23,6 +23,7 @@
 | `display.zig` | The display list types and `Matrix` |
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
+| `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `image.zig` | Image samples to RGBA; masks; hand-off to a JPEG/JPX codec |
 | `ccitt.zig` | CCITT fax decoding (T.4, T.6), used for images and their masks |
 | `spans.zig` | Overlapping ranges (CMaps, CID widths) made disjoint, later definitions winning |
@@ -141,7 +142,7 @@ error, never treated as unencrypted.
 
 ## Text layout, outlines, writing, annotations and forms
 
-`text.zig` (`layout`), `outline.zig`, `write.zig`, `annot.zig` and `form.zig` sit on top of
+`text.zig` (`layout`), `outline.zig`, `link.zig`, `write.zig`, `annot.zig` and `form.zig` sit on top of
 the reader. Reading stays in the document arena; everything an edit creates lives in the
 `write.Update`'s own arena and is written once.
 

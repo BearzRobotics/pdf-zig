@@ -21,7 +21,7 @@ pub const max_items = 100_000;
 /// Most name-tree nodes examined to resolve one named destination, and to
 /// resolve all those of one outline.
 const max_lookup_nodes = 100_000;
-const max_outline_lookup_nodes = 4_000_000;
+pub const max_outline_lookup_nodes = 4_000_000;
 
 /// Where a bookmark or link goes.
 pub const Destination = struct {
@@ -98,17 +98,17 @@ pub fn destinationOf(a: Allocator, doc: *Document, list: pages.PageList, d: Dict
 }
 
 /// Page index by page object number.
-const PageIndex = std.AutoHashMapUnmanaged(u32, usize);
+pub const PageIndex = std.AutoHashMapUnmanaged(u32, usize);
 
 /// What resolving destinations may still spend, and what it can reuse.
-const Work = struct {
+pub const Work = struct {
     lookups: usize,
     text_left: usize = write.max_listed_bytes,
     page_of: ?*const PageIndex = null,
 };
 
 /// `destinationOf` within the limits of `work`.
-fn destinationWithin(doc: *Document, list: pages.PageList, d: Dict, work: *Work) ?Destination {
+pub fn destinationWithin(doc: *Document, list: pages.PageList, d: Dict, work: *Work) ?Destination {
     if (d.get("Dest")) |dest| return resolveDest(doc, list, dest, 0, work);
     const action = doc.getDict(d, "A") orelse return null;
     const kind = doc.getName(action, "S") orelse return null;
