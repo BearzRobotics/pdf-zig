@@ -45,9 +45,14 @@ pub const CMap = struct {
         var best: u8 = 0;
         for (self.spaces) |sp| {
             if (sp.bytes > s.len) continue;
-            var v: u32 = 0;
-            for (s[0..sp.bytes]) |b| v = (v << 8) | b;
-            if (v >= sp.lo and v <= sp.hi) return sp.bytes;
+            // Each byte lies within the range of the bytes at its place
+            // (9.7.6.2): <8140> <9FFC> does not take 82 20.
+            for (s[0..sp.bytes], 0..) |b, i| {
+                const shift: u5 = @intCast(8 * (sp.bytes - 1 - i));
+                const lo: u8 = @truncate(sp.lo >> shift);
+                const hi: u8 = @truncate(sp.hi >> shift);
+                if (b < lo or b > hi) break;
+            } else return sp.bytes;
             if (best == 0 or sp.bytes < best) best = sp.bytes;
         }
         // No range matched: skip the shortest code length (9.7.6.3).
@@ -436,4 +441,15 @@ test "an empty text entry in a CID map is not a CID" {
     defer arena.deinit();
     const m = try parse(arena.allocator(), "1 beginbfchar <41> <> endbfchar");
     try std.testing.expectEqual(@as(?u32, null), m.cid(0x41, 1));
+}
+
+test "code space ranges are matched byte by byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = try parse(arena.allocator(), "2 begincodespacerange <8140> <9FFC> <00> <80> endcodespacerange");
+    try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x81\x40", 2));
+    try std.testing.expectEqual(@as(u8, 2), m.codeLength("\x9f\xfc", 2));
+    // 0x8220 lies between the two numbers, but 0x20 is below 0x40.
+    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x82\x20", 2));
+    try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x41\x40", 2));
 }
