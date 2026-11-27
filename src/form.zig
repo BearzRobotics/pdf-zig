@@ -1368,3 +1368,98 @@ test "listing items that share one large object has a total bound" {
     for (try @import("outline.zig").read(a, &doc, pl)) |item| total += item.title.len;
     try testing.expect(total > 0 and total <= @import("write.zig").max_listed_bytes);
 }
+
+test "check boxes go off again, radio buttons switch, and separate widgets are drawn" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var doc = try Document.open(testing.allocator, try formFile(aa), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(aa, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    const agree = findField(all, "agree").?;
+    try setChecked(&upd, agree, 0, true);
+    try setChecked(&upd, agree, 0, false);
+    const box = upd.get(agree.num).asDict().?;
+    try testing.expectEqualStrings("Off", box.get("V").?.name);
+    try testing.expectEqualStrings("Off", box.get("AS").?.name);
+    const size = findField(all, "size").?;
+    try setChecked(&upd, size, 0, true);
+    try setChecked(&upd, size, 1, true);
+    try testing.expectEqualStrings("L", upd.get(size.num).asDict().?.get("V").?.name);
+    try testing.expectEqualStrings("Off", upd.get(9).asDict().?.get("AS").?.name);
+    try testing.expectEqualStrings("L", upd.get(10).asDict().?.get("AS").?.name);
+}
+
+test "appearances follow /DA, /Q and /DR, with separate widgets and masked passwords" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 6 0 R 7 0 R] /DR << /Font << /Ti 8 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        // A field whose widget is an object of its own; centred, blue, 9 point Times.
+        "<< /FT /Tx /T (centred) /DA (/Ti 9 Tf 0 0 1 rg) /Q 1 /Kids [5 0 R] >>",
+        "<< /Subtype /Widget /Parent 4 0 R /Rect [0 0 100 20] >>",
+        "<< /Subtype /Widget /FT /Tx /Ff 8192 /T (secret) /Rect [0 30 100 50] >>",
+        "<< /Subtype /Widget /FT /Sig /T (signed) /Rect [0 60 100 80] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setText(&upd, findField(all, "centred").?, "mid");
+    try testing.expect(!upd.changed.contains(6));
+    const ap = upd.get(upd.get(5).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    try testing.expect(std.mem.indexOf(u8, ap.data, "0 0 1 rg") != null);
+    try testing.expect(std.mem.indexOf(u8, ap.data, "/Ti 9.00 Tf") != null);
+    try testing.expectEqual(@as(u32, 8), ap.dict.get("Resources").?.dict.get("Font").?.dict.get("Ti").?.ref.num);
+    // Centred: the line starts near the middle of the 100 point box.
+    const before_td = ap.data[0..std.mem.indexOf(u8, ap.data, " Td").?];
+    const line = before_td[std.mem.lastIndexOfScalar(u8, before_td, '\n').? + 1 ..];
+    const x = try std.fmt.parseFloat(f64, line[0..std.mem.indexOfScalar(u8, line, ' ').?]);
+    try testing.expect(x > 35 and x < 50);
+    try setText(&upd, findField(all, "secret").?, "pass");
+    const masked = upd.get(upd.get(6).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    try testing.expect(std.mem.indexOf(u8, masked.data, "(****) Tj") != null);
+    // A real signature field is listed and refuses every kind of filling.
+    const signed = findField(all, "signed").?;
+    try testing.expectEqual(Kind.signature, signed.kind);
+    try testing.expectError(error.WrongKind, setText(&upd, signed, "x"));
+    try testing.expectError(error.WrongKind, setChecked(&upd, signed, 0, true));
+    try testing.expectError(error.WrongKind, setChoice(&upd, signed, "x"));
+}
+
+test "setNeedAppearances writes to a direct or an indirect /AcroForm" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_][2][]const u8{ .{ "<< /Fields [] >>", "null" }, .{ "4 0 R", "<< /Fields [] >>" } }) |case| {
+        const bytes = try tests.buildFile(arena.allocator(), &.{
+            try std.fmt.allocPrint(arena.allocator(), "<< /Type /Catalog /Pages 2 0 R /AcroForm {s} >>", .{case[0]}),
+            "<< /Type /Pages /Kids [3 0 R] >>",
+            "<< /Type /Page >>",
+            case[1],
+        });
+        var doc = try Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        var upd = try Update.init(testing.allocator, &doc);
+        defer upd.deinit();
+        try setNeedAppearances(&upd);
+        var out: Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        try upd.write(testing.allocator, &out.writer);
+        var doc2 = try Document.open(testing.allocator, out.written(), .{});
+        defer doc2.deinit();
+        const form = doc2.getDict(doc2.catalog().?, "AcroForm").?;
+        try testing.expect(form.get("NeedAppearances").?.boolean);
+        try testing.expect(form.has("Fields"));
+    }
+}

@@ -607,6 +607,9 @@ test "a file with a cross-reference stream gets a stream update" {
     var out: Io.Writer.Allocating = .init(a);
     defer out.deinit();
     try upd.write(a, &out.writer);
+    const added = out.written()[file.items.len..];
+    try testing.expect(std.mem.indexOf(u8, added, "/Type /XRef") != null);
+    try testing.expect(std.mem.indexOf(u8, added, "trailer") == null);
 
     try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try document.Document.open(a, out.written(), .{});
@@ -852,4 +855,38 @@ test "an update with nothing in it writes the file unchanged" {
     defer out.deinit();
     try upd.write(a, &out.writer);
     try testing.expectEqualStrings(bytes, out.written());
+}
+
+test "an encrypted file is refused for editing" {
+    // TEST-EDIT-03: a real encrypted file, opened without any repair.
+    var doc = try document.Document.open(testing.allocator, @embedFile("enc_aes_128.pdf"), .{});
+    defer doc.deinit();
+    try testing.expect(!doc.repaired and doc.crypt != null);
+    try testing.expectError(error.Encrypted, Update.init(testing.allocator, &doc));
+}
+
+test "dictionaries, streams, odd names and control bytes survive writing and reading" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{ "", "A B", "a/b", "(c)", "#d", "<e>", "f%g", "[h]", "\x01\x7f\xff" };
+    var entries: std.ArrayList(Entry) = .empty;
+    for (names) |n| try entries.append(a, .{ .key = n, .value = .{ .name = n } });
+    try entries.append(a, .{ .key = "S", .value = .{ .string = "\x00\r\n\t()\\\xfe" } });
+    try entries.append(a, .{ .key = "N", .value = .{ .integer = -42 } });
+    try entries.append(a, .{ .key = "R", .value = .{ .real = -0.000025 } });
+    var aw: Io.Writer.Allocating = .init(a);
+    // A stream's /Length is the writer's, whatever the dictionary said.
+    try entries.append(a, .{ .key = "Length", .value = .{ .integer = 999 } });
+    try writeObject(&aw.writer, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = "data\x00endstream" } });
+    var p = object.Parser.init(a, aw.written(), 0);
+    const dict = (try p.parseObject()).dict;
+    for (names, 0..) |n, i| {
+        try testing.expectEqualStrings(n, dict.entries[i].key);
+        try testing.expectEqualStrings(n, dict.entries[i].value.name);
+    }
+    try testing.expectEqualStrings("\x00\r\n\t()\\\xfe", dict.get("S").?.string);
+    try testing.expectEqual(@as(?i64, -42), dict.get("N").?.asInt());
+    try testing.expectEqual(@as(?f64, -0.000025), dict.get("R").?.asNum());
+    try testing.expectEqual(@as(?i64, "data\x00endstream".len), dict.get("Length").?.asInt());
 }

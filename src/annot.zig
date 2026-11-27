@@ -1026,3 +1026,88 @@ test "underlines and strike-outs lie inside the appearance's box" {
         }
     }
 }
+
+test "markup geometry: quads, drawn paths, and one of several removed" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var doc = try Document.open(a, try tests.page(aa, "0 g", "", &.{}, ""), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const page = pages.page(&doc, pl, 0).?;
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    // The page is 100 high: displayed y 40..52 is user y 48..60.
+    const rects = [_]text.Rect{.{ .x0 = 10, .y0 = 40, .x1 = 40, .y1 = 52 }};
+    const kinds = [_]Kind{ .highlight, .underline, .strikeout };
+    for (kinds, 0..) |kind, i| _ = try addMarkup(&upd, page, kind, &rects, .{ .date = "D:2026010203040" ++ [_]u8{'0' + @as(u8, @intCast(i))} });
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try upd.write(a, &out.writer);
+    var doc2 = try Document.open(a, out.written(), .{});
+    defer doc2.deinit();
+    const pl2 = try pages.PageList.build(&doc2);
+    const page2 = pages.page(&doc2, pl2, 0).?;
+    const found = try list(aa, &doc2, page2);
+    try testing.expectEqual(@as(usize, 3), found.len);
+    for (found, kinds) |f, kind| {
+        try testing.expectEqual(kind, f.kind);
+        try testing.expectEqualSlices(f64, &.{ 10, 60, 40, 60, 10, 48, 40, 48 }, f.quads);
+    }
+    try testing.expectEqualStrings("D:20260102030401", doc2.getObject(found[1].num).asDict().?.get("M").?.string);
+    var rend = interp.Renderer.init(&doc2, .{});
+    defer rend.deinit();
+    var dl = try rend.render(a, page2);
+    defer dl.deinit();
+    var lines: std.ArrayList(f64) = .empty;
+    var fill_ys: [2]f64 = .{ 1000, -1000 };
+    for (dl.commands) |c| switch (c) {
+        .stroke => |s| try lines.append(aa, s.ctm.apply(s.path[0].move.x, s.path[0].move.y).y),
+        .fill => |f| for (f.path) |seg| switch (seg) {
+            .move, .line => |p| {
+                const y = f.ctm.apply(p.x, p.y).y;
+                fill_ys = .{ @min(fill_ys[0], y), @max(fill_ys[1], y) };
+            },
+            else => {},
+        },
+        else => {},
+    };
+    // The highlight covers the quad; the underline is on its bottom, the
+    // strike-out through its middle.
+    try testing.expectApproxEqAbs(@as(f64, 48), fill_ys[0], 0.01);
+    try testing.expectApproxEqAbs(@as(f64, 60), fill_ys[1], 0.01);
+    try testing.expectEqual(@as(usize, 2), lines.items.len);
+    try testing.expectApproxEqAbs(@as(f64, 48), lines.items[0], 0.01);
+    try testing.expectApproxEqAbs(@as(f64, 54), lines.items[1], 0.01);
+
+    // Removing the middle one leaves the other two.
+    var upd2 = try Update.init(a, &doc2);
+    defer upd2.deinit();
+    try remove(&upd2, page2, found[1].num);
+    const left = upd2.get(page2.num).asDict().?.get("Annots").?.array;
+    try testing.expectEqual(@as(usize, 2), left.len);
+    try testing.expectEqual(found[0].num, left[0].ref.num);
+    try testing.expectEqual(found[2].num, left[1].ref.num);
+    try testing.expectError(error.NoSuchAnnotation, remove(&upd2, page2, found[1].num));
+}
+
+test "a text box wraps a long line to its width" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, ""), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const box = try addFreeText(&upd, pages.page(&doc, pl, 0).?, 5, 5, 60, 90, 10, .{ .contents = "several short words that cannot share one narrow line" });
+    const ap = upd.get(upd.get(box.num).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    try testing.expect(std.mem.count(u8, ap.data, " Tj") >= 4);
+    var lines = std.mem.splitSequence(u8, ap.data, " Tj");
+    while (lines.next()) |chunk| {
+        const open_at = std.mem.lastIndexOfScalar(u8, chunk, '(') orelse continue;
+        const close_at = std.mem.lastIndexOfScalar(u8, chunk, ')') orelse continue;
+        try testing.expect(forms.textWidth(chunk[open_at + 1 .. close_at], 10) <= 56);
+    }
+}

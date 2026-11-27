@@ -736,3 +736,61 @@ test "remove updates the counts of all ancestors" {
     try testing.expectEqual(@as(i64, 2), upd.get(4).asDict().?.get("Count").?.asInt().?);
     try testing.expectError(error.NoSuchItem, remove(&upd, 7));
 }
+
+test "reading: closed items, /FitH, the /Dests dictionary and a name tree with kids and limits" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R /Dests << /old [4 0 R /Fit] >> /Names << /Dests << /Kids [10 0 R 11 0 R] >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] >>",
+        "<< /Type /Page >>",
+        "<< /Type /Page >>",
+        "<< /First 6 0 R /Last 8 0 R >>",
+        "<< /Title (closed) /Parent 5 0 R /First 9 0 R /Last 9 0 R /Count -1 /Dest [4 0 R /FitH 70] /Next 7 0 R >>",
+        "<< /Title (by name) /Parent 5 0 R /Dest /old /Next 8 0 R >>",
+        "<< /Title (in tree) /Parent 5 0 R /Dest (peach) >>",
+        "<< /Title (child) /Parent 6 0 R >>",
+        // The wrong limits would hide the name; the right ones lead to it.
+        "<< /Limits [(a) (c)] /Names [(apple) [3 0 R /Fit] (peach) [3 0 R /Fit]] >>",
+        "<< /Limits [(m) (z)] /Names [(peach) [4 0 R /XYZ 1 2 0]] >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const items = try read(a, &doc, try pages.PageList.build(&doc));
+    try testing.expectEqual(@as(usize, 3), items.len);
+    try testing.expect(!items[0].open);
+    try testing.expectEqual(@as(usize, 1), items[0].children.len);
+    try testing.expectEqual(@as(?f64, 70), items[0].dest.?.y);
+    try testing.expect(items[0].dest.?.x == null);
+    try testing.expectEqual(@as(usize, 1), items[1].dest.?.page);
+    try testing.expectEqual(@as(usize, 1), items[2].dest.?.page);
+    try testing.expectEqual(@as(?f64, 2), items[2].dest.?.y);
+}
+
+test "removing the last item updates /Last and /Prev, and a closed parent stays closed" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try tests.buildFile(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] >>",
+        "<< /Type /Page >>",
+        "<< /First 5 0 R /Last 5 0 R /Count 1 >>",
+        "<< /Title (parent) /Parent 4 0 R /First 6 0 R /Last 8 0 R /Count -3 >>",
+        "<< /Title (a) /Parent 5 0 R /Next 7 0 R >>",
+        "<< /Title (b) /Parent 5 0 R /Prev 6 0 R /Next 8 0 R >>",
+        "<< /Title (c) /Parent 5 0 R /Prev 7 0 R >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try remove(&upd, 8);
+    const parent = upd.get(5).asDict().?;
+    try testing.expectEqual(@as(u32, 7), parent.get("Last").?.ref.num);
+    try testing.expect(upd.get(7).asDict().?.get("Next") == null);
+    try testing.expectEqual(@as(i64, -2), parent.get("Count").?.asInt().?);
+    try testing.expectEqual(@as(i64, 1), upd.get(4).asDict().?.get("Count").?.asInt().?);
+}
