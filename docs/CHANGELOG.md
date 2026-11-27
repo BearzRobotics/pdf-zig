@@ -8,6 +8,11 @@
   `NeedAppearances`, text and choice fields with a value are made again. The file is not
   changed. `interp.Options.generate_appearances` turns it off. Text extraction includes
   such fields' values. New module `appearance`.
+- Filling a list box now draws it, scrolled to show the selection, in place of removing
+  its appearance and setting `NeedAppearances`.
+- New `form.setChoices` (several entries of a multi-select list) and `form.reset`.
+  `form.Field` has `multi_select` and `selected`; `form.Error` has `NotMultiSelect`.
+- A filled comb field with a border colour has lines between its cells.
 - The `pdfsvg` example put the letters of a run too far apart.
 - `DisplayList.omissions` says what a page uses that is left out or only approximated.
   `incomplete` means what it did. New example `pdfsurvey`.

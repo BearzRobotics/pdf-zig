@@ -47,6 +47,7 @@ const ff_radio: u32 = 1 << 15;
 const ff_push_button: u32 = 1 << 16;
 const ff_combo: u32 = 1 << 17;
 const ff_edit: u32 = 1 << 18;
+const ff_multi_select: u32 = 1 << 21;
 const ff_file_select: u32 = 1 << 20;
 const ff_comb: u32 = 1 << 24;
 
@@ -87,6 +88,10 @@ pub const Field = struct {
     exports: []const []const u8,
     /// A combo box that also takes text that is not one of its choices.
     editable: bool,
+    /// A list box in which more than one choice can be selected.
+    multi_select: bool,
+    /// The export values selected in a choice field. `value` is the first.
+    selected: []const []const u8,
     widgets: []const Widget,
 };
 
@@ -193,9 +198,23 @@ const Walk = struct {
         } else try self.addWidget(&widgets, node);
 
         var value: []const u8 = "";
+        var selected: std.ArrayList([]const u8) = .empty;
         if (inh.v) |v| switch (doc.resolve(v)) {
-            .string => |s| value = try write.listedText(a, s, &self.left),
+            .string => |s| {
+                value = try write.listedText(a, s, &self.left);
+                if (kind == .combo or kind == .list) try selected.append(a, value);
+            },
             .name => |n| value = try a.dupe(u8, n),
+            // Several selected entries of a list box.
+            .array => |items| if (kind == .combo or kind == .list) {
+                for (items) |item| {
+                    if (self.left < 64) break;
+                    self.left -= 64;
+                    const s = doc.resolve(item);
+                    if (s == .string) try selected.append(a, try write.listedText(a, s.string, &self.left));
+                }
+                if (selected.items.len > 0) value = selected.items[0];
+            },
             else => {},
         };
 
@@ -242,6 +261,8 @@ const Walk = struct {
             .options = try options.toOwnedSlice(a),
             .exports = try exports.toOwnedSlice(a),
             .editable = ff & ff_edit != 0,
+            .multi_select = kind == .list and ff & ff_multi_select != 0,
+            .selected = try selected.toOwnedSlice(a),
             .widgets = try widgets.toOwnedSlice(a),
         });
         _ = d;
@@ -281,7 +302,7 @@ const Walk = struct {
 
 // ---- filling ---------------------------------------------------------------------------------------
 
-pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
+pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, NotMultiSelect, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
 
 /// A widget written directly inside another object cannot be rewritten, and
 /// would go on showing the old value.
@@ -397,29 +418,160 @@ pub fn setChecked(upd: *Update, field: Field, widget: usize, on: bool) Error!voi
 
 /// Picks `choice`, given as an export value or as display text, in a combo or
 /// list box; only an editable combo box takes anything else. `/V` gets the
-/// export value. `/I` (selected indices) is dropped so it cannot disagree.
+/// export value. In a list box it replaces the whole selection.
 pub fn setChoice(upd: *Update, field: Field, choice: []const u8) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .combo and field.kind != .list) return error.WrongKind;
     if (field.kind == .combo) return setText(upd, field, choice);
+    return setChoices(upd, field, &.{choice});
+}
+
+/// Selects exactly `choices` (export values or display texts) in a list box and
+/// draws it; none clears it. More than one needs `Field.multi_select`.
+pub fn setChoices(upd: *Update, field: Field, choices: []const []const u8) Error!void {
+    if (field.read_only) return error.ReadOnly;
+    if (field.kind != .list) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
+    try requireIndirectWidgets(field);
     const a = upd.allocator();
-    var value = choice;
-    if (optionIndex(field, choice)) |i| {
-        value = field.exports[i];
-    } else if (field.options.len > 0) return error.NotAnOption;
+
+    // The chosen entries by index, in order and each once. A list box without
+    // entries takes the text as it is.
+    var indices: std.ArrayList(usize) = .empty;
+    var values: std.ArrayList([]const u8) = .empty;
+    if (field.options.len > 0) {
+        const chosen = try a.alloc(bool, field.options.len);
+        @memset(chosen, false);
+        for (choices) |choice| chosen[optionIndex(field, choice) orelse return error.NotAnOption] = true;
+        for (chosen, 0..) |is_chosen, i| {
+            if (!is_chosen) continue;
+            try indices.append(a, i);
+            try values.append(a, field.exports[i]);
+        }
+    } else try values.appendSlice(a, choices);
+    if (values.items.len > 1 and !field.multi_select) return error.NotMultiSelect;
+
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
-    fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, value) });
-    fd = try write.dictWithout(a, fd, "I");
-    try upd.set(field.num, .{ .dict = fd });
-    // The old appearances show the old selection; none is generated here.
-    for (field.widgets) |w| {
-        if (w.num == 0) continue;
-        const wd = upd.get(w.num).asDict() orelse continue;
-        try upd.set(w.num, .{ .dict = try write.dictWithout(a, wd, "AP") });
+    const strings = try a.alloc(Object, values.items.len);
+    for (values.items, strings) |v, *out| out.* = .{ .string = try write.textString(a, v) };
+    fd = switch (strings.len) {
+        0 => try write.dictWithout(a, fd, "V"),
+        1 => try write.dictWith(a, fd, "V", strings[0]),
+        else => try write.dictWith(a, fd, "V", .{ .array = strings }),
+    };
+    // `/I`, the selected indices, tells apart entries with one export value
+    // (table 231); without several choices it could only disagree.
+    if (field.multi_select and indices.items.len > 0) {
+        const numbers = try a.alloc(Object, indices.items.len);
+        for (indices.items, numbers) |i, *out| out.* = .{ .integer = @intCast(i) };
+        fd = try write.dictWith(a, fd, "I", .{ .array = numbers });
+    } else fd = try write.dictWithout(a, fd, "I");
+
+    // The list is scrolled so that the first selected entry shows.
+    var top: usize = 0;
+    if (inheritedIn(upd, fd, "TI")) |v| top = std.math.cast(usize, v.asInt() orelse 0) orelse 0;
+    top = @min(top, field.options.len -| 1);
+    if (indices.items.len > 0 and field.widgets.len > 0) {
+        // What fits depends on the font size the field asks for, and a widget
+        // turned a quarter has its width for a height.
+        const size = (try findDefaultAppearance(a, upd.doc, fd, "")).size;
+        const widget = field.widgets[0];
+        const turn = if (upd.get(widget.num).asDict()) |wd| (try widgetStyle(upd.doc, a, wd)).rotate else 0;
+        const shown = listCapacity(if (turn == 90 or turn == 270) widget.rect.width() else widget.rect.height(), size);
+        const first = indices.items[0];
+        if (first < top or first >= top + shown) top = first;
     }
-    // A list box has no generated appearance: ask viewers to draw it.
-    try setNeedAppearances(upd);
+    fd = try write.dictWith(a, fd, "TI", .{ .integer = @intCast(top) });
+    try upd.set(field.num, .{ .dict = fd });
+
+    var rows: std.ArrayList(ListRow) = .empty;
+    var all: std.ArrayList(u8) = .empty;
+    var next: usize = 0;
+    for (field.options, 0..) |shown, i| {
+        while (next < indices.items.len and indices.items[next] < i) next += 1;
+        if (i < top or rows.items.len >= max_list_rows) continue;
+        const bytes = try toWinAnsi(a, shown);
+        try all.appendSlice(a, bytes);
+        try rows.append(a, .{ .text = bytes, .selected = next < indices.items.len and indices.items[next] == i });
+    }
+    const da = try defaultAppearance(upd, fd, all.items);
+    for (field.widgets) |w| {
+        if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
+        const wd = upd.get(w.num).asDict() orelse continue;
+        const ap = try upd.add(.{ .stream = try listForm(a, w.rect, try widgetStyle(upd.doc, a, wd), rows.items, da) });
+        // A merged field and widget is the dictionary written above.
+        try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
+    }
+}
+
+/// `key` of field `d` or of the fields above it, as the update has them.
+fn inheritedIn(upd: *Update, d: Dict, key: []const u8) ?Object {
+    var cur = d;
+    for (0..max_depth) |_| {
+        if (cur.get(key)) |v| {
+            const value = if (v == .ref) upd.get(v.ref.num) else v;
+            return if (value == .null) null else value;
+        }
+        const parent = cur.get("Parent") orelse return null;
+        cur = (if (parent == .ref) upd.get(parent.ref.num) else parent).asDict() orelse return null;
+    }
+    return null;
+}
+
+/// Gives a field its default value, `/DV`, or no value when it has none, as
+/// resetting a form does (12.7.5.3). Push buttons and signatures have nothing
+/// to reset.
+pub fn reset(upd: *Update, field: Field) Error!void {
+    if (field.read_only) return error.ReadOnly;
+    if (field.num == 0) return error.DirectObject;
+    try requireIndirectWidgets(field);
+    const a = upd.allocator();
+    var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
+    const default: Object = inheritedIn(upd, fd, "DV") orelse .null;
+    switch (field.kind) {
+        .text, .combo => {
+            const value: []const u8 = if (default == .string) try write.textToUtf8(a, default.string) else "";
+            var shown = value;
+            if (field.kind == .combo) if (optionIndex(field, value)) |i| {
+                shown = field.options[i];
+            };
+            try storeText(upd, field, value, shown);
+            if (default == .null) {
+                fd = upd.get(field.num).asDict() orelse return error.DirectObject;
+                try upd.set(field.num, .{ .dict = try write.dictWithout(a, fd, "V") });
+            }
+        },
+        .list => {
+            var choices: std.ArrayList([]const u8) = .empty;
+            const items: []const Object = if (default == .array) default.array else &.{default};
+            for (items) |item| {
+                const o = if (item == .ref) upd.get(item.ref.num) else item;
+                if (o != .string) continue;
+                const text = try write.textToUtf8(a, o.string);
+                // A default that is not an entry cannot be selected.
+                if (field.options.len > 0 and optionIndex(field, text) == null) continue;
+                if (choices.items.len == 1 and !field.multi_select) break;
+                try choices.append(a, text);
+            }
+            try setChoices(upd, field, choices.items);
+        },
+        .checkbox, .radio => {
+            const state: []const u8 = default.asName() orelse "Off";
+            fd = if (default == .null) try write.dictWithout(a, fd, "V") else try write.dictWith(a, fd, "V", .{ .name = try a.dupe(u8, state) });
+            for (field.widgets) |w| {
+                const on = !std.mem.eql(u8, state, "Off") and std.mem.eql(u8, w.on_state, state);
+                const shows: Object = .{ .name = try a.dupe(u8, if (on) state else "Off") };
+                if (w.num == field.num) {
+                    fd = try write.dictWith(a, fd, "AS", shows);
+                } else {
+                    const wd = upd.get(w.num).asDict() orelse continue;
+                    try upd.set(w.num, .{ .dict = try write.dictWith(a, wd, "AS", shows) });
+                }
+            }
+            try upd.set(field.num, .{ .dict = fd });
+        },
+        else => return error.WrongKind,
+    }
 }
 
 /// Sets `/NeedAppearances true` in the AcroForm dictionary.
@@ -777,10 +929,15 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
     var content: std.ArrayList(u8) = .empty;
     var font_name: std.Io.Writer.Allocating = .init(a);
     write.writeName(&font_name.writer, da.font_name) catch return error.OutOfMemory;
-    if (style.background) |paint_op| try content.print(a, "q {s} 0 0 {d:.2} {d:.2} re f Q\n", .{ paint_op, w, h });
-    if (style.border) |paint_op| if (style.border_width > 0) {
-        const bw = style.border_width;
-        try content.print(a, "q {s} {d:.2} w {d:.2} {d:.2} {d:.2} {d:.2} re S Q\n", .{ paint_op, bw, bw / 2, bw / 2, w - bw, h - bw });
+    try drawFrame(a, &content, style, w, h);
+    // The border's colour also separates the cells of a comb field.
+    if (layout.cells) |n| if (style.border) |paint_op| if (style.border_width > 0 and n <= max_comb_lines) {
+        try content.print(a, "q {s} {d:.2} w\n", .{ paint_op, style.border_width });
+        for (1..n) |i| {
+            const x = cell * @as(f64, @floatFromInt(i));
+            try content.print(a, "{d:.2} 0 m {d:.2} {d:.2} l S\n", .{ x, x, h });
+        }
+        try content.appendSlice(a, "Q\n");
     };
     try content.print(a, "/Tx BMC\nq\n{d:.2} {d:.2} {d:.2} {d:.2} re W n\nBT\n{s}\n{s} {d:.2} Tf\n", .{ pad / 2, pad / 2, w - pad, h - pad, da.color_ops, font_name.written(), size });
     const leading = size * 1.15;
@@ -819,6 +976,21 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
     }
     try content.appendSlice(a, "ET\nQ\nEMC\n");
 
+    return textAreaForm(a, w, h, style.rotate, content.items, da);
+}
+
+/// A widget's background and border, in the `w` by `h` of its content.
+fn drawFrame(a: Allocator, content: *std.ArrayList(u8), style: WidgetStyle, w: f64, h: f64) Allocator.Error!void {
+    if (style.background) |paint_op| try content.print(a, "q {s} 0 0 {d:.2} {d:.2} re f Q\n", .{ paint_op, w, h });
+    if (style.border) |paint_op| if (style.border_width > 0) {
+        const bw = style.border_width;
+        try content.print(a, "q {s} {d:.2} w {d:.2} {d:.2} {d:.2} {d:.2} re S Q\n", .{ paint_op, bw, bw / 2, bw / 2, w - bw, h - bw });
+    };
+}
+
+/// The form XObject of a widget that writes with `da`'s font, turned as the
+/// widget says.
+fn textAreaForm(a: Allocator, w: f64, h: f64, rotate: u16, content: []const u8, da: DefaultAppearance) Allocator.Error!object.Stream {
     const fonts = try write.makeDict(a, &.{.{ da.font_name, da.font }});
     const res = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
     const dict = try write.makeDict(a, &.{
@@ -826,7 +998,7 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
         .{ "Subtype", .{ .name = "Form" } },
         .{ "BBox", try write.numbers(a, &.{ 0, 0, w, h }) },
         // The turn; viewers fit the turned box onto the widget's rectangle.
-        .{ "Matrix", try write.numbers(a, &switch (style.rotate) {
+        .{ "Matrix", try write.numbers(a, &switch (rotate) {
             90 => [6]f64{ 0, 1, -1, 0, h, 0 },
             180 => [6]f64{ -1, 0, 0, -1, w, h },
             270 => [6]f64{ 0, -1, 1, 0, 0, w },
@@ -834,7 +1006,53 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
         }) },
         .{ "Resources", .{ .dict = res } },
     });
-    return .{ .dict = dict, .data = content.items };
+    return .{ .dict = dict, .data = content };
+}
+
+/// An entry of a list box as drawn, in WinAnsi.
+pub const ListRow = struct { text: []const u8, selected: bool };
+
+/// Most entries of a list box that are drawn.
+pub const max_list_rows = 500;
+/// Most cells of a comb field between which lines are drawn.
+const max_comb_lines = 1000;
+
+fn listSize(h: f64, da_size: f64) f64 {
+    return if (da_size > 0) da_size else std.math.clamp(h / 2, 4, 12);
+}
+
+/// How many entries show whole in a list box of height `h`, with the size its
+/// `/DA` gives (0 for an automatic one).
+fn listCapacity(h: f64, da_size: f64) usize {
+    const rows = @floor(@max(h - 2, 0) / (listSize(h, da_size) * 1.25));
+    return if (rows >= 1 and rows < 1e6) @intFromFloat(rows) else 1;
+}
+
+/// The appearance of a list box whose visible entries, from the top, are
+/// `rows`, as a form XObject allocated from `a`.
+pub fn listForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, rows: []const ListRow, da: DefaultAppearance) Allocator.Error!object.Stream {
+    const sideways = style.rotate == 90 or style.rotate == 270;
+    const w = if (sideways) rect.height() else rect.width();
+    const h = if (sideways) rect.width() else rect.height();
+    const size = listSize(h, da.size);
+    const leading = size * 1.25;
+    var content: std.ArrayList(u8) = .empty;
+    try drawFrame(a, &content, style, w, h);
+    var font_name: std.Io.Writer.Allocating = .init(a);
+    write.writeName(&font_name.writer, da.font_name) catch return error.OutOfMemory;
+    try content.print(a, "/Tx BMC\nq\n1 1 {d:.2} {d:.2} re W n\n", .{ @max(w - 2, 0), @max(h - 2, 0) });
+    var y = h - 1 - leading;
+    for (rows) |row| {
+        if (y <= -leading) break;
+        if (row.selected) try content.print(a, "q 0.6 0.757 0.855 rg 1 {d:.2} {d:.2} {d:.2} re f Q\n", .{ y, @max(w - 2, 0), leading });
+        try content.print(a, "BT {s} {s} {d:.2} Tf 3 {d:.2} Td ", .{ da.color_ops, font_name.written(), size, y + size * 0.3 });
+        var string: std.Io.Writer.Allocating = .init(a);
+        write.writeString(&string.writer, row.text) catch return error.OutOfMemory;
+        try content.print(a, "{s} Tj ET\n", .{string.written()});
+        y -= leading;
+    }
+    try content.appendSlice(a, "Q\nEMC\n");
+    return textAreaForm(a, w, h, style.rotate, content.items, da);
 }
 
 /// `wd` with `/AP << /N ref >>`.
@@ -1166,6 +1384,13 @@ test "choice fields: export values are stored, display text is shown" {
             try testing.expect(d.get("I") == null);
         }
     }
+    // A list box is drawn with its entries, so every viewer shows the choice.
+    const drawn = upd.get(upd.get(4).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    // It is one row high, so it is scrolled to the selected entry.
+    for ([_][]const u8{ "(Sweden) Tj", "0.6 0.757 0.855 rg" }) |want| {
+        try testing.expect(std.mem.indexOf(u8, drawn.data, want) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, drawn.data, "(Norway) Tj") == null);
     // The combo shows what the user picked.
     const ap = upd.get(upd.get(5).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
     try testing.expect(std.mem.indexOf(u8, ap.data, "(Sweden) Tj") != null);
@@ -1428,9 +1653,146 @@ test "widgets that cannot be updated are reported, and keep their place" {
     const before = upd.changed.count();
     try testing.expectError(error.DirectObject, setText(&upd, findField(all, "direct").?, "x"));
     try testing.expectEqual(before, upd.changed.count());
-    // A list box loses the appearance that showed its old selection.
+    // A list box's old appearance is replaced by one showing the new selection.
     try setChoice(&upd, findField(all, "list").?, "b");
-    try testing.expect(upd.get(8).asDict().?.get("AP") == null);
+    try testing.expect(upd.get(8).asDict().?.get("AP").?.dict.get("N").?.ref.num != 9);
+}
+
+/// Writes `upd` and opens the result. Everything lives in `a`, an arena.
+fn reopened(a: Allocator, upd: *Update) !struct { doc: *Document, fields: []const Field, text: []const u8 } {
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+    const doc = try a.create(Document);
+    doc.* = try Document.open(a, out.written(), .{});
+    const pl = try pages.PageList.build(doc);
+    var renderer = @import("interp.zig").Renderer.init(doc, .{ .generate_appearances = false });
+    var dl = try renderer.render(a, pages.page(doc, pl, 0).?);
+    return .{ .doc = doc, .fields = try fields(a, doc, pl), .text = try @import("text.zig").extract(a, &dl, .reading) };
+}
+
+test "list boxes take several choices, are drawn, and scroll to the first" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Room for three rows of eight entries; multi-select is bit 22.
+    const list = "<< /Type /Annot /Subtype /Widget /FT /Ch /T ({s}) /Ff {d} /Rect [10 10 190 55] /Opt [(a) (b) (c) (d) (e) (f) [(g7) (gee)] (h)] >>";
+    var doc = try Document.open(testing.allocator, try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>",
+        try std.fmt.allocPrint(a, list, .{ "many", 1 << 21 }),
+        try std.fmt.allocPrint(a, list, .{ "single", 0 }),
+    }), .{});
+    defer doc.deinit();
+    const all = try fields(a, &doc, try pages.PageList.build(&doc));
+    const many = findField(all, "many").?;
+    try testing.expect(many.multi_select and !findField(all, "single").?.multi_select);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try testing.expectError(error.NotMultiSelect, setChoices(&upd, findField(all, "single").?, &.{ "a", "b" }));
+    try testing.expectError(error.NotAnOption, setChoices(&upd, many, &.{ "a", "z" }));
+    try testing.expectError(error.WrongKind, setChoices(&upd, Field{ .num = 4, .name = "", .kind = .text, .value = "", .read_only = false, .required = false, .multiline = false, .password = false, .max_len = null, .comb = false, .options = &.{}, .exports = &.{}, .editable = false, .multi_select = false, .selected = &.{}, .widgets = &.{} }, &.{"a"}));
+    try testing.expectEqual(@as(usize, 0), upd.changed.count());
+
+    // Given out of order and twice, by text and by export value.
+    try setChoices(&upd, many, &.{ "gee", "f", "g7" });
+    var saved = try reopened(a, &upd);
+    const after = findField(saved.fields, "many").?;
+    try testing.expectEqual(@as(usize, 2), after.selected.len);
+    try testing.expectEqualStrings("f", after.selected[0]);
+    try testing.expectEqualStrings("g7", after.selected[1]);
+    try testing.expectEqualStrings("f", after.value);
+    const d = saved.doc.getObject(4).asDict().?;
+    try testing.expectEqual(@as(i64, 5), saved.doc.getArray(d, "I").?[0].integer);
+    try testing.expectEqual(@as(i64, 6), saved.doc.getArray(d, "I").?[1].integer);
+    // "f" was out of sight, so the list starts there.
+    try testing.expectEqual(@as(i64, 5), saved.doc.getInt(d, "TI").?);
+    try testing.expectEqualStrings("f\ngee\nh\n", saved.text);
+
+    // No choice clears it.
+    try setChoices(&upd, many, &.{});
+    saved = try reopened(a, &upd);
+    try testing.expectEqual(@as(usize, 0), findField(saved.fields, "many").?.selected.len);
+    try testing.expect(saved.doc.getObject(4).asDict().?.get("V") == null);
+    try testing.expect(saved.doc.getObject(4).asDict().?.get("I") == null);
+}
+
+test "a list scrolls only when the selection would not show at the field's font size" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 60 units high: four rows at 10 points, three at the automatic size of 12.
+    // Turned a quarter, the 60 units are the width.
+    const list = "<< /Type /Annot /Subtype /Widget /FT /Ch /T ({s}) /Rect [{s}] {s} /Opt [(a) (b) (c) (d) (e)] >>";
+    var doc = try Document.open(testing.allocator, try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+        try std.fmt.allocPrint(a, list, .{ "sized", "0 0 100 60", "/DA (/Helv 10 Tf 0 g)" }),
+        try std.fmt.allocPrint(a, list, .{ "auto", "0 0 100 60", "" }),
+        try std.fmt.allocPrint(a, list, .{ "turned", "0 0 60 100", "/DA (/Helv 10 Tf 0 g) /MK << /R 90 >>" }),
+    }), .{});
+    defer doc.deinit();
+    const all = try fields(a, &doc, try pages.PageList.build(&doc));
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    for ([_]struct { []const u8, i64 }{ .{ "sized", 0 }, .{ "auto", 3 }, .{ "turned", 0 } }) |c| {
+        const field = findField(all, c[0]).?;
+        try setChoice(&upd, field, "d");
+        try testing.expectEqual(c[1], upd.get(field.num).asDict().?.get("TI").?.integer);
+    }
+}
+
+test "reset gives each kind of field its default value, or none" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const widget = "/Type /Annot /Subtype /Widget /Rect [10 {d} 190 {d}]";
+    var doc = try Document.open(testing.allocator, try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R 5 0 R 8 0 R] >>",
+        try std.fmt.allocPrint(a, "<< " ++ widget ++ " /FT /Tx /T (text) /V (changed) /DV (standard) >>", .{ 10, 30 }),
+        try std.fmt.allocPrint(a, "<< " ++ widget ++ " /FT /Tx /T (blank) /V (typed) >>", .{ 40, 60 }),
+        "<< /FT /Btn /T (box) /V /Off /DV /Yes /AS /Off /Subtype /Widget /Rect [0 0 9 9] /AP << /N << /Yes null /Off null >> >> >>",
+        "<< /FT /Ch /Ff 2097152 /T (list) /V (c) /DV [(a) (nowhere) (b)] /Subtype /Widget /Rect [0 0 90 90] /Opt [(a) (b) (c)] >>",
+        try std.fmt.allocPrint(a, "<< " ++ widget ++ " /FT /Ch /Ff 131072 /T (combo) /V (y) /DV (x) /Opt [[(x) (Ex)] [(y) (Why)]] >>", .{ 70, 90 }),
+        "<< /FT /Btn /Ff 65536 /T (push) >>",
+    }), .{});
+    defer doc.deinit();
+    const all = try fields(a, &doc, try pages.PageList.build(&doc));
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try testing.expectError(error.WrongKind, reset(&upd, findField(all, "push").?));
+    for ([_][]const u8{ "text", "blank", "box", "list", "combo" }) |name| try reset(&upd, findField(all, name).?);
+    const saved = try reopened(a, &upd);
+    try testing.expectEqualStrings("standard", findField(saved.fields, "text").?.value);
+    try testing.expectEqualStrings("", findField(saved.fields, "blank").?.value);
+    try testing.expect(saved.doc.getObject(5).asDict().?.get("V") == null);
+    try testing.expect(findField(saved.fields, "box").?.widgets[0].on);
+    try testing.expectEqualStrings("Yes", findField(saved.fields, "box").?.value);
+    try testing.expectEqual(@as(usize, 2), findField(saved.fields, "list").?.selected.len);
+    try testing.expectEqualStrings("x", findField(saved.fields, "combo").?.value);
+    // The page draws the new values: the old ones are gone.
+    try testing.expectEqualStrings("Ex\nstandard\n", saved.text);
+}
+
+test "a comb field with a border colour has lines between its cells" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rect: pages.Rect = .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 20 };
+    const da: DefaultAppearance = .{ .font = helvetica };
+    const lined = try textForm(a, rect, .{ .border = "0 G" }, "12", .{ .cells = 4 }, da);
+    for ([_][]const u8{ "25.00 0 m 25.00 20.00 l S", "50.00 0 m", "75.00 0 m" }) |want| try testing.expect(std.mem.indexOf(u8, lined.data, want) != null);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, lined.data, " l S"));
+    for ([_]WidgetStyle{ .{}, .{ .border = "0 G", .border_width = 0 } }) |style| {
+        const plain = try textForm(a, rect, style, "12", .{ .cells = 4 }, da);
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, plain.data, " l S"));
+    }
 }
 
 test "toWinAnsi returns memory the caller can free, also when it fails" {

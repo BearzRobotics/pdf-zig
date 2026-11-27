@@ -26,8 +26,6 @@ const Content = std.ArrayList(u8);
 const max_numbers = 1 << 16;
 /// Most bytes of text drawn in one annotation.
 const max_text = 1 << 14;
-/// Most rows of a list box that are drawn.
-const max_rows = 500;
 
 const ff_multiline: u32 = 1 << 12;
 const ff_password: u32 = 1 << 13;
@@ -293,6 +291,9 @@ fn widgetAppearance(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect) All
         }, da);
     }
 
+    // Not a combo box: a list box.
+    if (std.mem.eql(u8, field.type, "Ch")) return try listBox(a, doc, d, rect, style, field);
+
     var out: Content = .empty;
     if (style.background) |paint| try out.print(a, "q {s} 0 0 {d:.2} {d:.2} re f Q\n", .{ paint, w, h });
     const radio = std.mem.eql(u8, field.type, "Btn") and field.flags & (ff_radio | ff_push_button) == ff_radio;
@@ -305,9 +306,7 @@ fn widgetAppearance(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect) All
         try out.appendSlice(a, "S Q\n");
     };
 
-    if (std.mem.eql(u8, field.type, "Ch")) {
-        try listRows(a, doc, &out, field, w, h);
-    } else if (std.mem.eql(u8, field.type, "Btn")) {
+    if (std.mem.eql(u8, field.type, "Btn")) {
         if (field.flags & ff_push_button != 0) {
             const mk = doc.getDict(d, "MK");
             const caption = if (mk) |m| try textOf(a, doc, m.get("CA") orelse .null) else "";
@@ -380,40 +379,33 @@ fn optionStrings(a: Allocator, doc: *Document, option: Object) Allocator.Error!s
 }
 
 fn shownOption(a: Allocator, doc: *Document, options: []const Object, value: []const u8) Allocator.Error!?[]const u8 {
-    for (options[0..@min(options.len, max_rows)]) |option| {
+    for (options[0..@min(options.len, form.max_list_rows)]) |option| {
         const pair = try optionStrings(a, doc, option);
         if (std.mem.eql(u8, pair[0], value)) return pair[1];
     }
     return null;
 }
 
-/// The rows of a list box from its top index, the selected ones highlighted.
-fn listRows(a: Allocator, doc: *Document, out: *Content, field: Field, w: f64, h: f64) Allocator.Error!void {
-    const size: f64 = std.math.clamp(h / 2, 4, 12);
-    const leading = size * 1.25;
+/// A list box from its top index, the selected entries marked.
+fn listBox(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect, style: form.WidgetStyle, field: Field) Allocator.Error!Stream {
     var chosen: std.ArrayList([]const u8) = .empty;
     if (field.value == .array) {
-        for (field.value.array[0..@min(field.value.array.len, max_rows)]) |v| try chosen.append(a, try textOf(a, doc, v));
+        for (field.value.array[0..@min(field.value.array.len, form.max_list_rows)]) |v| try chosen.append(a, try textOf(a, doc, v));
     } else if (field.value != .null) try chosen.append(a, try textOf(a, doc, field.value));
 
-    try out.print(a, "q 1 1 {d:.2} {d:.2} re W n\n", .{ @max(w - 2, 0), @max(h - 2, 0) });
-    var y = h - 1 - leading;
+    var rows: std.ArrayList(form.ListRow) = .empty;
+    var all: std.ArrayList(u8) = .empty;
     var i = @min(field.top, field.options.len);
-    var drawn: usize = 0;
-    while (i < field.options.len and y > -leading and drawn < max_rows) : ({
-        i += 1;
-        drawn += 1;
-        y -= leading;
-    }) {
+    while (i < field.options.len and rows.items.len < form.max_list_rows and all.items.len < max_text) : (i += 1) {
         const pair = try optionStrings(a, doc, field.options[i]);
-        for (chosen.items) |value| {
-            if (!std.mem.eql(u8, value, pair[0])) continue;
-            try out.print(a, "0.6 0.757 0.855 rg 1 {d:.2} {d:.2} {d:.2} re f\n", .{ y, @max(w - 2, 0), leading });
+        var selected = false;
+        for (chosen.items) |value| if (std.mem.eql(u8, value, pair[0])) {
+            selected = true;
             break;
-        }
-        try out.print(a, "0 g BT /Helv {d:.2} Tf 3 {d:.2} Td ", .{ size, y + size * 0.3 });
-        try putString(a, out, try form.toWinAnsi(a, pair[1]));
-        try out.appendSlice(a, " Tj ET\n");
+        };
+        const text = try form.toWinAnsi(a, pair[1]);
+        try all.appendSlice(a, text);
+        try rows.append(a, .{ .text = text, .selected = selected });
     }
-    try out.appendSlice(a, "Q\n");
+    return form.listForm(a, rect, style, rows.items, try form.findDefaultAppearance(a, doc, d, all.items));
 }

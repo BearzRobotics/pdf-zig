@@ -67,14 +67,15 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 | `annot` | reads annotations; adds highlights, underlines (straight or squiggly), strike-outs, notes, ink and text boxes with appearance streams; edits and removes them |
 | `form` | finds AcroForm fields (groups, check boxes, radio groups, choices); fills text, check box, radio, combo and list fields |
 
-Form limits: a filled text field gets a new appearance with the widget's background,
-border and rotation. It uses the font `/DA` names if that font can write the text,
-else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text). A comb
-field gets one character per cell (without dividing lines). A widget's pressed appearance
-is dropped. The value
-of a password field is not stored in the file. A choice field stores the option's export
-value, and only an editable combo box takes other text. Signature fields are listed, not
-filled; XFA forms are not read; no scripts run.
+Form limits: a filled text field or list box gets a new appearance with the widget's
+background, border and rotation. It uses the font `/DA` names if that font can write the
+text, else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text).
+A comb field gets one character per cell, with dividing lines if it has a border colour.
+A filled widget keeps only its normal appearance: an old pressed one would show the old
+value. The value of a password field is not stored in the file. A choice field stores the
+option's export value, and only an editable combo box takes other text. `setChoices`
+selects several entries where the list allows it, and `reset` gives a field its default
+value. Signature fields are listed, not filled; XFA forms are not read; no scripts run.
 
 ## New documents: extract, reorder, merge
 

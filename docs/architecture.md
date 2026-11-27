@@ -217,5 +217,5 @@ the reader. Reading stays in the document arena; everything an edit creates live
   of its own (an array object may be shared), outline edits find items by walking the tree,
   and a reference that does not lead where it should is never written through.
 - **Appearance streams.** Highlights draw with the Multiply blend mode; notes, text boxes and
-  filled text fields have their own streams, so any reader shows them. `NeedAppearances` is
-  set only for list boxes, which have no generated appearance (their old one is removed).
+  filled text fields have their own streams, so any reader shows them. List boxes are
+  drawn too.

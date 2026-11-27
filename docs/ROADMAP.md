@@ -69,9 +69,10 @@ this sample, ahead of forms. The viewer may already decode it itself: its code r
 
 ## Stage 1: forms
 
-**Progress:** appearances made while rendering are done (decision 0004). Open: writing a
-list box's appearance when it is filled, comb dividers, the pressed appearance, multiple
-selection, reset, flatten, and the font items.
+**Progress:** done are appearances made while rendering (decision 0004), list box
+appearances when filled, comb dividers, multiple selection and reset. Open: flatten and
+the font items. The pressed appearance stays dropped from filled fields on purpose: kept,
+it would show the old value while the field is pressed.
 
 | Item | Size | Viewer work |
 |---|---|---|
