@@ -689,3 +689,42 @@ test "a colour space that names a resource, or sits in an inline image, is not s
     try testing.expectEqual(@as(f32, 0), fills[1].g); // red
     try testing.expect(bases[0] == .gray and bases[1] == .rgb);
 }
+
+test "limits: glyphs, path segments and commands are counted for the whole page" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const form = struct {
+        fn make(al: Allocator, body: []const u8) ![]const u8 {
+            return std.fmt.allocPrint(al, "<< /Subtype /Form /BBox [0 0 9 9] /Length {d} >>\nstream\n{s}\nendstream", .{ body.len, body });
+        }
+    }.make;
+    const dos: [50][]const u8 = @splat("/F Do");
+    const many = try std.mem.join(a, " ", &dos);
+    const letters: [100]u8 = @splat('a');
+    const text_page = try page(a, many, "/XObject << /F 5 0 R >>", &.{
+        try form(a, try std.fmt.allocPrint(a, "BT /H 10 Tf ({s}) Tj ET", .{&letters})),
+    }, "");
+    const lines: [100][]const u8 = @splat("1 1 l");
+    const path_page = try page(a, many, "/XObject << /F 5 0 R >>", &.{
+        try form(a, try std.fmt.allocPrint(a, "0 0 m {s} S", .{try std.mem.join(a, " ", &lines)})),
+    }, "");
+    // Fifty colours make fifty cells of fifty fills each.
+    var content: std.ArrayList(u8) = .empty;
+    try content.appendSlice(a, "/CS cs ");
+    for (0..50) |i| try content.print(a, "0.{d:0>2} 0 0 /P scn 0 0 1 1 re f ", .{i * 2});
+    const fills: [50][]const u8 = @splat("0 0 1 1 re f");
+    const cell = try std.mem.join(a, " ", &fills);
+    const tiled = try page(a, content.items, "/ColorSpace << /CS [/Pattern /DeviceRGB] >> /Pattern << /P 5 0 R >>", &.{
+        try std.fmt.allocPrint(a, "<< /PatternType 1 /PaintType 2 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Length {d} >>\nstream\n{s}\nendstream", .{ cell.len, cell }),
+    }, "");
+    // The text page needs the font in the form's inherited resources.
+    const with_font = try std.mem.replaceOwned(u8, a, text_page, "/XObject << /F 5 0 R >>", "/XObject << /F 5 0 R >> /Font << /H << /Subtype /Type1 /BaseFont /Helvetica >> >>");
+
+    _ = try renderCost(with_font, .{});
+    _ = try renderCost(path_page, .{});
+    _ = try renderCost(tiled, .{});
+    try testing.expectError(error.LimitExceeded, renderCost(with_font, .{ .max_glyphs = 1000 }));
+    try testing.expectError(error.LimitExceeded, renderCost(path_page, .{ .max_path_segments = 1000 }));
+    try testing.expectError(error.LimitExceeded, renderCost(tiled, .{ .max_commands = 1000 }));
+}

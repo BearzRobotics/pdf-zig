@@ -25,6 +25,9 @@ operation rather than per nesting level, and is far above what real files need.
   cell or Type 3 glyph. Each distinct stream is decoded once per page and kept
   until the page is done. A page over the limit gives `error.LimitExceeded`.
 
+- **Output** (`interp.Options.max_commands`, `max_glyphs`,
+  `max_path_segments`): counted once for the page, pattern cells included. A
+  limit reached inside a cell fails the page.
 - **Filter chains** (`filters.zig`): at most 16 filters, and the stages
   together may produce about twice `max_stream_bytes`.
 - **Page contents** (`pages.zig`): for a `/Contents` array,

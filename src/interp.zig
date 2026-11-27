@@ -31,8 +31,12 @@ const Point = display.Point;
 pub const Options = struct {
     /// Most operators executed for one page (including forms and patterns).
     max_ops: usize = 8_000_000,
-    /// Most commands in one display list.
+    /// Most commands for one page, those of pattern cells included.
     max_commands: usize = 4_000_000,
+    /// Most glyphs and path segments in the commands of one page. A repeated
+    /// form can produce any number of them with few commands.
+    max_glyphs: usize = 4_000_000,
+    max_path_segments: usize = 8_000_000,
     /// Most bytes of content interpreted for one page. A form, pattern cell or
     /// Type 3 glyph counts every time it is run, so this bounds repeated use of
     /// streams that execute few or no operators.
@@ -61,6 +65,9 @@ pub const Renderer = struct {
     /// data is. The values live in `scratch`.
     decoded: std.AutoHashMapUnmanaged(StreamKey, []const u8) = .empty,
 
+    /// What the current page's display list and pattern cells hold so far.
+    produced: struct { commands: usize = 0, glyphs: usize = 0, segments: usize = 0 } = .{},
+
     const StreamKey = struct { ptr: usize, len: usize };
 
     pub fn init(doc: *Document, options: Options) Renderer {
@@ -85,6 +92,7 @@ pub const Renderer = struct {
         // only has to live as long as the list it is used for.
         if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.arena.child_allocator);
         self.decoded = .empty;
+        self.produced = .{};
         defer {
             self.decoded = .empty;
             _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
@@ -338,7 +346,8 @@ const Run = struct {
             .save, .restore => {},
             else => return,
         };
-        if (self.commands.items.len >= self.r.options.max_commands) return error.LimitExceeded;
+        if (self.r.produced.commands >= self.r.options.max_commands) return error.LimitExceeded;
+        self.r.produced.commands += 1;
         try self.commands.append(self.a, c);
     }
 
@@ -578,10 +587,11 @@ const Run = struct {
         try self.path.append(self.a, s);
     }
 
-    fn takePath(self: *Run) Error!display.Path {
-        const p = try self.a.dupe(display.Seg, self.path.items);
-        self.path.clearRetainingCapacity();
-        return p;
+    /// Counts and copies the current path into the list.
+    fn keepPath(self: *Run) Error!display.Path {
+        if (self.path.items.len > self.r.options.max_path_segments -| self.r.produced.segments) return error.LimitExceeded;
+        self.r.produced.segments += self.path.items.len;
+        return self.a.dupe(display.Seg, self.path.items);
     }
 
     fn paint(self: *Run, do_fill: bool, do_stroke: bool, rule: display.FillRule, close: bool) Error!void {
@@ -592,7 +602,9 @@ const Run = struct {
         if (!self.r.options.graphics) return;
         if (close and self.path.items.len > 0) try self.addSeg(.close);
         if (self.path.items.len == 0) return;
-        const p = try self.a.dupe(display.Seg, self.path.items);
+        // A hidden path that does not clip leaves nothing in the list.
+        if (self.hidden_depth > 0 and self.pending_clip == null) return;
+        const p = try self.keepPath();
         if (do_fill) try self.emit(.{ .fill = .{ .path = p, .rule = rule, .paint = self.gs.fill.paint, .alpha = self.gs.fill_alpha, .ctm = self.gs.ctm, .blend = self.gs.blend } });
         if (do_stroke) try self.emit(.{ .stroke = .{ .path = p, .style = self.gs.line, .paint = self.gs.stroke.paint, .alpha = self.gs.stroke_alpha, .ctm = self.gs.ctm, .blend = self.gs.blend } });
         if (self.pending_clip) |cr| try self.emit(.{ .clip = .{ .path = p, .rule = cr, .ctm = self.gs.ctm } });
@@ -722,10 +734,7 @@ const Run = struct {
         }
         const res = doc_.getDict(pd, "Resources") orelse self.resources;
         const data = self.contentData(po.stream) catch "";
-        sub.interpret(data, res, .identity) catch |err| switch (err) {
-            error.LimitExceeded => {},
-            else => |e| return e,
-        };
+        try sub.interpret(data, res, .identity);
         self.ops = sub.ops;
         self.content_bytes = sub.content_bytes;
         cell.commands = sub.commands.items;
@@ -863,6 +872,8 @@ const Run = struct {
             .string => |s| {
                 tmp.clearRetainingCapacity();
                 try f.glyphs(self.a, s, &tmp);
+                if (tmp.items.len > self.r.options.max_glyphs -| self.r.produced.glyphs) return error.LimitExceeded;
+                self.r.produced.glyphs += tmp.items.len;
                 for (tmp.items) |g| {
                     try glyphs.append(self.a, .{ .code = g.code, .cid = g.cid, .x = x, .advance = g.advance, .text = g.text });
                     x += (g.advance * size + self.gs.tc + (if (g.is_space) self.gs.tw else 0)) * self.gs.th;
