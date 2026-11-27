@@ -453,3 +453,35 @@ test "code space ranges are matched byte by byte" {
     try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x82\x20", 2));
     try std.testing.expectEqual(@as(u8, 1), m.codeLength("\x41\x40", 2));
 }
+
+test "random programs made of real operators are parsed and looked up safely" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const words = [_][]const u8{ "begincodespacerange", "endcodespacerange", "beginbfchar", "endbfchar", "beginbfrange", "endbfrange", "begincidchar", "endcidchar", "begincidrange", "endcidrange", "usecmap", "[", "]", "<>", "<00>", "<FF>", "<0000>", "<FFFF>", "<00000000>", "<FFFFFFFF>", "<D800>", "<DFFF0041>", "0", "65535", "-1", "99999999999999999999", "/Name", "(" };
+    var prng = std.Random.DefaultPrng.init(21);
+    const rnd = prng.random();
+    var src: std.ArrayList(u8) = .empty;
+    var mapped: usize = 0;
+    for (0..3000) |_| {
+        src.clearRetainingCapacity();
+        for (0..rnd.uintLessThan(usize, 40)) |_| {
+            // Mostly operands, so that complete entries are common.
+            if (rnd.boolean()) {
+                try src.print(a, "<{x:0>2}{x:0>2}> ", .{ rnd.int(u8) % 3, rnd.int(u8) });
+            } else try src.print(a, "{s} ", .{words[rnd.uintLessThan(usize, words.len)]});
+        }
+        const m = try parse(a, src.items);
+        for ([_]u32{ 0, 1, 0x41, 0xFF, 0x100, 0xFFFF, 0xFFFFFFFF, rnd.int(u32), rnd.int(u8) }) |code| {
+            for (1..5) |bytes| {
+                _ = m.cid(code, @intCast(bytes));
+                var out: std.ArrayList(u8) = .empty;
+                mapped += @intFromBool(try m.unicode(a, code, @intCast(bytes), &out));
+                try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
+            }
+        }
+        _ = m.codeLength("\x01\x02\x03\x04", 2);
+    }
+    // The programs do define something.
+    try std.testing.expect(mapped > 100);
+}

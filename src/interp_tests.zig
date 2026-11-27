@@ -1459,3 +1459,57 @@ test "graphics state dictionaries, patterns, radial shadings and annotation stat
     };
     try testing.expectEqual(@as(usize, 1), annotation_squares);
 }
+
+/// The fill colour of a Separation space whose tint function is `body`,
+/// at tint 0.5, over DeviceRGB.
+fn tinted(a: Allocator, body: []const u8) !pdf.color.Rgb {
+    const r = try render(try page(a, "/C cs 0.5 sc 0 0 1 1 re f", "/ColorSpace << /C [/Separation /S /DeviceRGB 5 0 R] >>", &.{body}, ""));
+    defer done(r);
+    return r.list.commands[0].fill.paint.color;
+}
+
+test "sampled, exponential and calculator functions loaded from a file, clipped to /Range" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Two samples of three outputs: (0, 0, 0) and (255, 128, 0).
+    const sampled = try tinted(a, "<< /FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [2] /BitsPerSample 8 /Filter /AHx /Length 13 >>\nstream\n000000FF8000>\nendstream");
+    try testing.expectApproxEqAbs(@as(f32, 0.5), sampled.r, 0.003);
+    try testing.expectApproxEqAbs(@as(f32, 0.251), sampled.g, 0.003);
+    try testing.expectEqual(@as(f32, 0), sampled.b);
+    const clipped = try tinted(a, "<< /FunctionType 2 /Domain [0 1] /Range [0 0.25 0.75 1 0 1] /C0 [1 0 0.5] /C1 [1 0 0.5] /N 1 >>");
+    try testing.expectEqual(@as(f32, 0.25), clipped.r);
+    try testing.expectEqual(@as(f32, 0.75), clipped.g);
+    try testing.expectEqual(@as(f32, 0.5), clipped.b);
+    const program = "{ dup 0.5 mul exch dup }";
+    const calculated = try tinted(a, try std.fmt.allocPrint(a, "<< /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1] /Length {d} >>\nstream\n{s}\nendstream", .{ program.len, program }));
+    try testing.expectEqual(@as(f32, 0.25), calculated.r);
+    try testing.expectEqual(@as(f32, 0.5), calculated.g);
+}
+
+test "fonts: a Type 3 matrix, /MissingWidth, and an embedded code to CID map" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cmap_text = "1 begincodespacerange <00> <FF> endcodespacerange 1 begincidrange <41> <42> 10 endcidrange";
+    const r = try render(try page(a, "BT /T 10 Tf (a) Tj /M 10 Tf (AB) Tj /C 10 Tf (AB) Tj ET", "/Font << /T 5 0 R /M 6 0 R /C 7 0 R >>", &.{
+        "<< /Type /Font /Subtype /Type3 /FontMatrix [0.01 0 0 0.01 0 0] /FontBBox [0 0 100 100] /CharProcs << >> /Encoding << /Differences [97 /a] >> /FirstChar 97 /Widths [50] >>",
+        "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 65 /Widths [700] /FontDescriptor << /MissingWidth 250 >> >>",
+        "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding 8 0 R /DescendantFonts [<< /Subtype /CIDFontType2 /W [10 [100 200]] >>] >>",
+        try std.fmt.allocPrint(a, "<< /Type /CMap /Length {d} >>\nstream\n{s}\nendstream", .{ cmap_text.len, cmap_text }),
+    }, ""));
+    defer done(r);
+    var runs: [3]display.Text = undefined;
+    var n: usize = 0;
+    for (r.list.commands) |c| if (c == .text) {
+        runs[n] = c.text;
+        n += 1;
+    };
+    // 50 glyph units under a matrix of 0.01 are half an em.
+    try testing.expectApproxEqAbs(@as(f64, 0.5), runs[0].glyphs[0].advance, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.7), runs[1].glyphs[0].advance, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), runs[1].glyphs[1].advance, 1e-12);
+    try testing.expectEqual(@as(u32, 10), runs[2].glyphs[0].cid);
+    try testing.expectEqual(@as(u32, 11), runs[2].glyphs[1].cid);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), runs[2].glyphs[1].advance, 1e-12);
+}

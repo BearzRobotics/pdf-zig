@@ -442,3 +442,53 @@ test "without a row count no blank row is added after the end of the data" {
     const out = try decode(a, data, .{ .k = -1, .columns = 8 }, 1 << 10);
     try std.testing.expectEqualSlices(u8, &.{ 0xC7, 0xC7 }, out);
 }
+
+test "Group 4: pass mode skips a run of the reference line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Row 1: ..#..... (horizontal: 2 white, 1 black; then V0 to the end).
+    // Row 2 is white: pass (0001) over the black pixel, then V0 to the end.
+    const data = try packBits(a, "001" ++ "0111" ++ "010" ++ "1" ++ "0001" ++ "1");
+    const out = try decode(a, data, .{ .k = -1, .columns = 8, .rows = 2 }, 1 << 10);
+    try std.testing.expectEqualStrings("..#.....", try pixels(a, out, 8, 0));
+    try std.testing.expectEqualStrings("........", try pixels(a, out, 8, 1));
+}
+
+test "byte-aligned rows without end-of-line codes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ..###... is ten bits; each row starts on a byte.
+    const row = "0111" ++ "10" ++ "1000" ++ "000000";
+    const out = try decode(a, try packBits(a, row ++ row), .{ .k = 0, .columns = 8, .rows = 2, .byte_align = true }, 1 << 10);
+    try std.testing.expectEqualSlices(u8, &.{ 0xC7, 0xC7 }, out);
+}
+
+test "run-length tables: every code, against Ghostscript's encoder" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cols = 5300;
+    var runs: std.ArrayList(u32) = .empty;
+    for (0..64) |r| try runs.append(a, @intCast(r));
+    for (1..41) |m| try runs.append(a, @intCast(64 * m));
+    for (1..41) |m| try runs.append(a, @intCast(64 * m + 5));
+    const out = try decode(a, @embedFile("fax_runs.bin"), .{ .k = 0, .columns = cols, .rows = @intCast(runs.items.len) }, 1 << 20);
+    const stride = (cols + 7) / 8;
+    for (runs.items, 0..) |r, row| {
+        const got = try pixels(a, out[row * stride ..][0..stride], cols, 0);
+        for (got, 0..) |pixel, x| try std.testing.expectEqual(@as(u8, if (x >= r and x < 2 * r) '#' else '.'), pixel);
+    }
+}
+
+test "no run-length code is the start of another" {
+    for ([_][]const Entry{ &white_table, &black_table }) |table| {
+        for (table, 0..) |x, i| for (table, 0..) |y, j| {
+            const x_len: u5 = @intCast(x.key >> 16);
+            const y_len: u5 = @intCast(y.key >> 16);
+            if (i == j or x_len > y_len) continue;
+            try std.testing.expect((y.key & 0xFFFF) >> (y_len - x_len) != x.key & 0xFFFF);
+        };
+    }
+}

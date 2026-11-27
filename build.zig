@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
 
     // CCITT fax samples (Ghostscript tiffg3/tiffg32d/tiffg4 output wrapped in a PDF) and the
     // bitmap Ghostscript renders for the same page; see test/fixtures/README.md.
-    for ([_][]const u8{ "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm", "lzw_libtiff.bin" }) |name| {
+    for ([_][]const u8{ "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm", "lzw_libtiff.bin", "fax_runs.bin" }) |name| {
         mod.addAnonymousImport(name, .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}", .{name})) });
     }
 

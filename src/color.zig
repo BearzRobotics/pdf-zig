@@ -334,6 +334,28 @@ fn parseNew(doc: *Document, obj: Object, resources: ?Dict, depth: u8, owned: boo
     }
 }
 
+test "an out-of-range channel is clamped in every position" {
+    const nan = std.math.nan(f64);
+    for (0..3) |channel| {
+        for ([_]f64{ nan, -5, 5 }) |bad| {
+            var c = [3]f64{ 0.5, 0.5, 0.5 };
+            c[channel] = bad;
+            const got = (Space{ .rgb = {} }).toRgb(&c);
+            for ([_]f32{ got.r, got.g, got.b }) |v| try std.testing.expect(v >= 0 and v <= 1);
+        }
+    }
+}
+
+test "Lab a* and b* move the colour" {
+    const lab: Space = .{ .lab = .{ .white = .{ 0.9642, 1, 0.8249 }, .range = .{ -128, 127, -128, 127 } } };
+    const red = lab.toRgb(&.{ 50, 80, 0 });
+    const green = lab.toRgb(&.{ 50, -80, 0 });
+    const yellow = lab.toRgb(&.{ 70, 0, 80 });
+    const blue = lab.toRgb(&.{ 40, 0, -80 });
+    try std.testing.expect(red.r > red.g + 0.3 and green.g > green.r + 0.3);
+    try std.testing.expect(yellow.r > yellow.b + 0.3 and blue.b > blue.r + 0.3);
+}
+
 test "device spaces and conversion" {
     try std.testing.expectEqual(@as(u8, 3), (Space{ .rgb = {} }).components());
     const c = (Space{ .cmyk = {} }).toRgb(&.{ 0, 0, 0, 1 }); // pure K is a soft black, #231F20

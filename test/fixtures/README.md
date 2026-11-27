@@ -34,3 +34,8 @@ The owner password of all of them is `o`.
 Ghostscript `-sDEVICE=tiffg3 / tiffg32d / tiffg4` output wrapped by `scripts/tiff2pdf-ccitt.py`.
 `fax_ref.pbm` is Ghostscript's `pbmraw` render of the same PostScript page; the decoder must
 reproduce it exactly (all three, verified 0 of 518,400 pixels differ).
+
+`fax_runs.bin` is Ghostscript's `CCITTFaxEncode` (`/K 0`, 5300 columns) of 144
+rows, row *i* being `r` white pixels, `r` black ones and white to the end, for
+`r` in 0..63, every multiple of 64 up to 2560 and each of those plus 5. It
+checks the run-length code tables against an independent encoder.

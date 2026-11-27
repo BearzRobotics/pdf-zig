@@ -128,7 +128,8 @@ test "filters are applied; JPEG data is handed to the caller" {
     const bytes = try it.page(a, "q 10 0 0 10 0 0 cm /Im0 Do Q", "/XObject << /Im0 5 0 R >>", &.{try imageBody(a, "/Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode", "\xff\xd8JPEGDATA")}, "");
     const r = try it.render(bytes);
     defer it.done(r);
-    for (r.list.commands) |c| if (c == .image) {
+    {
+        const c: pdf.display.Command = .{ .image = try onlyImage(r.list) };
         const res = try pdf.image.decode(&r.doc, a, c.image);
         try testing.expectEqualStrings("DCTDecode", res.codec.name);
         try testing.expectEqualStrings("\xff\xd8JPEGDATA", res.codec.data);
@@ -136,7 +137,7 @@ test "filters are applied; JPEG data is handed to the caller" {
         const px2 = try pdf.image.fromSamples(&r.doc, a, c.image, &[_]u8{ 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0 }, 2, 2, 3);
         try testing.expectEqual(@as(u8, 255), px2.rgba[0]);
         try testing.expectEqual(@as(u8, 255), px2.rgba[3]);
-    };
+    }
 }
 
 test "short data and absurd sizes are handled" {
@@ -152,7 +153,7 @@ test "short data and absurd sizes are handled" {
     const bytes = try it.page(a, "q 10 0 0 10 0 0 cm /Im0 Do Q", "/XObject << /Im0 5 0 R >>", &.{try imageBody(a, "/Width 100000 /Height 100000 /ColorSpace /DeviceGray /BitsPerComponent 8", "x")}, "");
     const r = try it.render(bytes);
     defer it.done(r);
-    for (r.list.commands) |c| if (c == .image) try testing.expectError(error.TooBig, pdf.image.decode(&r.doc, a, c.image));
+    try testing.expectError(error.TooBig, pdf.image.decode(&r.doc, a, try onlyImage(r.list)));
 }
 
 test "inline images stay valid after other pages are rendered (the scratch arena is reused)" {
@@ -193,10 +194,8 @@ test "inline images stay valid after other pages are rendered (the scratch arena
     defer l1.deinit();
     var l2 = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 1).?);
     defer l2.deinit();
-    for (l1.commands) |c| if (c == .image) {
-        const px = (try pdf.image.decode(&doc, a, c.image)).pixels;
-        try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255, 0, 0, 255, 255 }, px.rgba);
-    };
+    const px = (try pdf.image.decode(&doc, a, try onlyImage(l1))).pixels;
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255, 0, 0, 255, 255 }, px.rgba);
 }
 
 test "CCITT G3 1D, G3 2D and G4 match the bitmap Ghostscript rendered" {
@@ -381,4 +380,51 @@ test "a mask that needs the caller's codec is reported and can be applied" {
     try testing.expect(done_px.pending_mask == null);
     try testing.expectEqual(@as(u8, 0x40), done_px.rgba[3]);
     try testing.expectEqual(@as(u8, 0xff), done_px.rgba[7]);
+}
+
+/// The one image of a display list; none, or several, fail the test.
+fn onlyImage(list: pdf.display.DisplayList) !pdf.display.Image {
+    var found: ?pdf.display.Image = null;
+    for (list.commands) |c| if (c == .image) {
+        try testing.expect(found == null);
+        found = c.image;
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+test "fax rows wider than the image are repacked to its width" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Two rows of ..###... in Group 4; the image is 16 wide, then 3 wide.
+    const data = "\x2e\xbc";
+    const eight = try decodeFirst(a, &.{try imageBody(a, "/Width 8 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 >>", data)}, "");
+    const narrow = try decodeFirst(a, &.{try imageBody(a, "/Width 3 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 >>", data)}, "");
+    for (0..2) |y| for (0..3) |x| try testing.expectEqual(eight.rgba[(y * 8 + x) * 4], narrow.rgba[(y * 3 + x) * 4]);
+    try testing.expect(eight.rgba[(1 * 8) * 4] != eight.rgba[(1 * 8 + 2) * 4]);
+    // /BlackIs1 inverts the picture.
+    const inverted = try decodeFirst(a, &.{try imageBody(a, "/Width 8 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 /BlackIs1 true >>", data)}, "");
+    for (0..16) |i| try testing.expectEqual(255 - eight.rgba[i * 4], inverted.rgba[i * 4]);
+}
+
+test "ICCBased follows /N, and masks given as streams apply, inverted ones too" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const profile = "<< /N 4 /Length 0 >>\nstream\n\nendstream";
+    const cmyk = try decodeFirst(a, &.{ try imageBody(a, "/Width 2 /Height 1 /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8", "\x00\x00\x00\x00\x00\x00\x00\xff"), profile }, "");
+    try testing.expect(cmyk.rgba[0] == 255 and cmyk.rgba[4] < 60);
+    // A stencil mask stream: 0 paints, 1 masks out.
+    const stencil = try decodeFirst(a, &.{
+        try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Mask 6 0 R", "\x40\x80"),
+        try imageBody(a, "/Width 2 /Height 1 /ImageMask true", "\x40"),
+    }, "");
+    try testing.expectEqual(@as(u8, 255), stencil.rgba[3]);
+    try testing.expectEqual(@as(u8, 0), stencil.rgba[7]);
+    const soft = try decodeFirst(a, &.{
+        try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R", "\x40\x80"),
+        try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Decode [1 0]", "\x00\x40"),
+    }, "");
+    try testing.expectEqual(@as(u8, 255), soft.rgba[3]);
+    try testing.expectEqual(@as(u8, 255 - 0x40), soft.rgba[7]);
 }
