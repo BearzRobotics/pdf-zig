@@ -82,7 +82,9 @@ pub const Renderer = struct {
         list.height = size.h;
         list.base = baseMatrix(p);
 
-        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(gpa);
+        // Kept between pages, so it comes from the document's allocator: `gpa`
+        // only has to live as long as the list it is used for.
+        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.arena.child_allocator);
         self.decoded = .empty;
         defer {
             self.decoded = .empty;

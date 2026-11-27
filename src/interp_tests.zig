@@ -477,17 +477,18 @@ test "huge, infinite and negative operands of J, j and Tr" {
 }
 
 /// Renders the first page of `bytes` and returns how many bytes were requested
-/// from the allocator while doing it.
+/// from the allocators (the document's and the list's) while doing it.
 fn renderCost(bytes: []const u8, options: pdf.interp.Options) !usize {
-    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var doc = try pdf.Document.open(counting.allocator(), bytes, .{});
     defer doc.deinit();
     const pl = try pdf.pages.PageList.build(&doc);
-    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const before = counting.allocated_bytes;
     var rend = pdf.Renderer.init(&doc, options);
     defer rend.deinit();
     var dl = try rend.render(counting.allocator(), pdf.pages.page(&doc, pl, 0).?);
     dl.deinit();
-    return counting.allocated_bytes;
+    return counting.allocated_bytes - before;
 }
 
 test "a form or Type 3 glyph used many times is decoded once and counted every time" {
@@ -595,4 +596,28 @@ test "Type 3: every glyph of a run is placed by its own offset" {
         n += 1;
     };
     try testing.expectEqual(want.len, n);
+}
+
+test "the renderer keeps nothing of the allocator a page was rendered with" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fills: [200][]const u8 = @splat("0 0 1 1 re f");
+    const bytes = try page(a, try std.mem.join(a, " ", &fills), "", &.{}, "");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    const p = pdf.pages.page(&doc, pl, 0).?;
+    var rend = pdf.Renderer.init(&doc, .{});
+    defer rend.deinit();
+    // An allocator that lives only for the first page, and must get everything back.
+    var first: std.heap.DebugAllocator(.{}) = .init;
+    {
+        var dl = try rend.render(first.allocator(), p);
+        dl.deinit();
+    }
+    try testing.expectEqual(std.heap.Check.ok, first.deinit());
+    var dl = try rend.render(testing.allocator, p);
+    defer dl.deinit();
+    try testing.expectEqual(@as(usize, 200), dl.commands.len);
 }
