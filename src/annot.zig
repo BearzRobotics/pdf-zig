@@ -541,7 +541,18 @@ fn redrawFreeText(upd: *Update, d: Dict, contents: []const u8) Error!Dict {
     return write.dictWith(a, d, "AP", .{ .dict = ap_dict });
 }
 
-/// Removes annotation `num` from the page. The object stays in the file but
+/// Whether `popup` is the popup window of annotation `num`.
+fn isPopupOf(upd: *Update, popup: u32, num: u32) bool {
+    const d = upd.get(popup).asDict() orelse return false;
+    const subtype = upd.doc.getName(d, "Subtype") orelse return false;
+    if (!std.mem.eql(u8, subtype, "Popup")) return false;
+    if (d.get("Parent")) |parent| if (parent == .ref and parent.ref.num == num) return true;
+    const owner = upd.get(num).asDict() orelse return false;
+    const named = owner.get("Popup") orelse return false;
+    return named == .ref and named.ref.num == popup;
+}
+
+/// Removes annotation `num` and its popup from the page. The object stays in the file but
 /// nothing refers to it any more.
 pub fn remove(upd: *Update, page: pages.Page, num: u32) Error!void {
     if (page.num == 0) return error.DirectPage;
@@ -557,6 +568,7 @@ pub fn remove(upd: *Update, page: pages.Page, num: u32) Error!void {
             found = true;
             continue;
         }
+        if (it == .ref and isPopupOf(upd, it.ref.num, num)) continue;
         try kept.append(a, it);
     }
     if (!found) return error.NoSuchAnnotation;
@@ -978,4 +990,26 @@ test "setContents changes only annotations" {
     // pretends to be an annotation, and nothing at all.
     for ([_]u32{ 1, 2, 3, 4, 5, 99 }) |num| try testing.expectError(error.NoSuchAnnotation, setContents(&upd, num, "x", null));
     try testing.expectEqual(@as(usize, 0), upd.changed.count());
+}
+
+test "removing an annotation removes its popup too" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const bytes = try tests.page(arena.allocator(), "0 g", "", &.{
+        "<< /Subtype /Text /Rect [0 0 9 9] /Popup 6 0 R >>",
+        "<< /Subtype /Popup /Rect [0 0 9 9] /Parent 5 0 R >>",
+        // A popup that only its own /Parent links.
+        "<< /Subtype /Popup /Rect [0 0 9 9] /Parent 5 0 R >>",
+        "<< /Subtype /Text /Rect [0 0 9 9] >>",
+    }, "/Annots [5 0 R 6 0 R 7 0 R 8 0 R]");
+    var doc = try Document.open(a, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    try remove(&upd, pages.page(&doc, pl, 0).?, 5);
+    const left = upd.get(3).asDict().?.get("Annots").?.array;
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqual(@as(u32, 8), left[0].ref.num);
 }
