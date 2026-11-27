@@ -486,13 +486,36 @@ fn attachToPage(upd: *Update, page: pages.Page, annot: Ref) Error!void {
     try upd.set(page.num, .{ .dict = try write.dictWith(a, page_dict, "Annots", .{ .array = grown }) });
 }
 
-/// Changes the text of annotation `num` (its `/Contents`).
+/// Changes the text of annotation `num` (its `/Contents`). A text box gets a
+/// new appearance in Helvetica with the size and colour of its `/DA`; any
+/// other styling its old appearance had is not kept.
 pub fn setContents(upd: *Update, num: u32, contents: []const u8, date: ?[]const u8) Error!void {
     const a = upd.allocator();
     var d = upd.get(num).asDict() orelse return error.NoSuchAnnotation;
     d = try write.dictWith(a, d, "Contents", .{ .string = try write.textString(a, contents) });
     if (date) |m| d = try write.dictWith(a, d, "M", .{ .string = try a.dupe(u8, m) });
+    // Rich text, which some viewers prefer, would still say the old thing.
+    d = try write.dictWithout(a, d, "RC");
+    // A text box shows its contents, so its appearance is made again.
+    if (upd.doc.getName(d, "Subtype")) |subtype| if (std.mem.eql(u8, subtype, "FreeText")) {
+        d = try redrawFreeText(upd, d, contents);
+    };
     try upd.set(num, .{ .dict = d });
+}
+
+/// `d` with a new appearance showing `contents`, from its `/Rect`, `/DA` and
+/// `/Rotate`.
+fn redrawFreeText(upd: *Update, d: Dict, contents: []const u8) Error!Dict {
+    const a = upd.allocator();
+    const doc = upd.doc;
+    const r = rectOf(doc, d, "Rect") orelse return error.BadGeometry;
+    const da_text = if (doc.get(d, "DA")) |v| (if (v == .string) v.string else "") else "";
+    const da = try forms.parseDa(a, da_text);
+    const turn = @mod(doc.getInt(d, "Rotate") orelse 0, 360);
+    const rotate: u16 = if (turn == 90 or turn == 180 or turn == 270) @intCast(turn) else 0;
+    const made = try freeTextAppearance(upd, .{ r.x0, r.y0, r.x1, r.y1 }, rotate, if (da.size > 0) da.size else 12, da.color_ops, contents);
+    const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = made.form } }});
+    return write.dictWith(a, d, "AP", .{ .dict = ap_dict });
 }
 
 /// Removes annotation `num` from the page. The object stays in the file but
@@ -813,5 +836,47 @@ test "a text box is upright and in place on rotated pages" {
         const last = lay.boxes[lay.boxes.len - 1].rect;
         try testing.expect(first.x0 > 10 and first.x0 < 15 and first.y0 > 18 and first.y1 < 36);
         try testing.expect(last.x0 > first.x1 and last.x1 < 100 and @abs(last.y0 - first.y0) < 0.5);
+    }
+}
+
+test "setContents redraws a text box and drops rich text" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    for ([_]u16{ 0, 90 }) |rotate| {
+        const bytes = try tests.page(aa, "", "", &.{}, try std.fmt.allocPrint(aa, "/Rotate {d}", .{rotate}));
+        var doc = try Document.open(a, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        const box = try addFreeText(&upd, pages.page(&doc, pl, 0).?, 10, 20, 90, 40, 10, .{ .contents = "OLD TEXT", .color = .{ 1, 0, 0 } });
+        var d = upd.get(box.num).asDict().?;
+        d = try write.dictWith(upd.allocator(), d, "RC", .{ .string = "<body>OLD TEXT</body>" });
+        try upd.set(box.num, .{ .dict = d });
+        try setContents(&upd, box.num, "NEW WORDS", null);
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        var doc2 = try Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        try testing.expect(doc2.getObject(box.num).asDict().?.get("RC") == null);
+        const pl2 = try pages.PageList.build(&doc2);
+        var rend = interp.Renderer.init(&doc2, .{});
+        defer rend.deinit();
+        var dl = try rend.render(a, pages.page(&doc2, pl2, 0).?);
+        defer dl.deinit();
+        var lay = try text.layout(a, &dl);
+        defer lay.deinit(a);
+        try testing.expectEqualStrings("NEW WORDS", std.mem.trim(u8, lay.text, "\n"));
+        const first = lay.boxes[0].rect;
+        try testing.expect(first.x0 > 10 and first.x0 < 15 and first.y1 < 36);
+        // Size and colour are kept.
+        for (dl.commands) |c| if (c == .text) {
+            try testing.expectEqual(@as(f64, 10), c.text.size);
+            try testing.expectEqual(@as(f32, 1), c.text.fill.color.r);
+            try testing.expectEqual(@as(f32, 0), c.text.fill.color.g);
+        };
     }
 }

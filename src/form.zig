@@ -361,6 +361,62 @@ const DefaultAppearance = struct {
     font: Ref,
 };
 
+/// What a default appearance string (12.7.3.3) says.
+pub const ParsedDa = struct {
+    font_name: []const u8 = "Helv",
+    /// 0 asks for a size chosen to fit.
+    size: f64 = 0,
+    /// The operator that sets the fill colour, `0 g` if the string has none.
+    color_ops: []const u8 = "0 g",
+};
+
+/// Reads the font, size and fill colour of a `/DA` string. Allocated from `a`.
+pub fn parseDa(a: Allocator, da_text: []const u8) Allocator.Error!ParsedDa {
+    var out: ParsedDa = .{};
+    var color: std.ArrayList(u8) = .empty;
+    var nums: [4][]const u8 = undefined;
+    var n_nums: usize = 0;
+    var it = std.mem.tokenizeAny(u8, da_text, " \t\r\n");
+    var prev_name: []const u8 = "";
+    var prev_size: []const u8 = "";
+    while (it.next()) |tok| {
+        if (tok[0] == '/') {
+            prev_name = tok[1..];
+            n_nums = 0;
+        } else if (std.fmt.parseFloat(f64, tok)) |_| {
+            if (n_nums < nums.len) {
+                nums[n_nums] = tok;
+                n_nums += 1;
+            } else {
+                // More than four numbers in a row: keep the last four.
+                nums[0] = nums[1];
+                nums[1] = nums[2];
+                nums[2] = nums[3];
+                nums[3] = tok;
+            }
+            prev_size = tok;
+        } else |_| {
+            if (std.mem.eql(u8, tok, "Tf")) {
+                out.font_name = prev_name;
+                out.size = std.fmt.parseFloat(f64, prev_size) catch 0;
+            } else if (std.mem.eql(u8, tok, "g") and n_nums >= 1) {
+                color.clearRetainingCapacity();
+                try color.print(a, "{s} g", .{nums[n_nums - 1]});
+            } else if (std.mem.eql(u8, tok, "rg") and n_nums >= 3) {
+                color.clearRetainingCapacity();
+                try color.print(a, "{s} {s} {s} rg", .{ nums[n_nums - 3], nums[n_nums - 2], nums[n_nums - 1] });
+            } else if (std.mem.eql(u8, tok, "k") and n_nums >= 4) {
+                color.clearRetainingCapacity();
+                try color.print(a, "{s} {s} {s} {s} k", .{ nums[0], nums[1], nums[2], nums[3] });
+            }
+            n_nums = 0;
+        }
+    }
+    if (color.items.len > 0) out.color_ops = color.items;
+    out.font_name = try a.dupe(u8, out.font_name);
+    return out;
+}
+
 /// Whether a field's appearance can write the WinAnsi `bytes` with this font:
 /// a font of one byte per character that has each of them where WinAnsi has
 /// it. An embedded subset may lack glyphs, and the symbol fonts have no text.
@@ -414,48 +470,8 @@ fn defaultAppearance(upd: *Update, fd: Dict, bytes: []const u8) Error!DefaultApp
         if (!found_q) quad = doc.getInt(f, "Q") orelse 0;
     }
 
-    var out: DefaultAppearance = .{ .font = undefined, .quad = quad };
-    var color: std.ArrayList(u8) = .empty;
-    var nums: [4][]const u8 = undefined;
-    var n_nums: usize = 0;
-    var it = std.mem.tokenizeAny(u8, da_text, " \t\r\n");
-    var prev_name: []const u8 = "";
-    var prev_size: []const u8 = "";
-    while (it.next()) |tok| {
-        if (tok[0] == '/') {
-            prev_name = tok[1..];
-            n_nums = 0;
-        } else if (std.fmt.parseFloat(f64, tok)) |_| {
-            if (n_nums < nums.len) {
-                nums[n_nums] = tok;
-                n_nums += 1;
-            } else {
-                // More than four numbers in a row: keep the last four.
-                nums[0] = nums[1];
-                nums[1] = nums[2];
-                nums[2] = nums[3];
-                nums[3] = tok;
-            }
-            prev_size = tok;
-        } else |_| {
-            if (std.mem.eql(u8, tok, "Tf")) {
-                out.font_name = prev_name;
-                out.size = std.fmt.parseFloat(f64, prev_size) catch 0;
-            } else if (std.mem.eql(u8, tok, "g") and n_nums >= 1) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} g", .{nums[n_nums - 1]});
-            } else if (std.mem.eql(u8, tok, "rg") and n_nums >= 3) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} {s} {s} rg", .{ nums[n_nums - 3], nums[n_nums - 2], nums[n_nums - 1] });
-            } else if (std.mem.eql(u8, tok, "k") and n_nums >= 4) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} {s} {s} {s} k", .{ nums[0], nums[1], nums[2], nums[3] });
-            }
-            n_nums = 0;
-        }
-    }
-    if (color.items.len > 0) out.color_ops = color.items;
-    out.font_name = try a.dupe(u8, out.font_name);
+    const parsed = try parseDa(a, da_text);
+    var out: DefaultAppearance = .{ .font = undefined, .quad = quad, .font_name = parsed.font_name, .size = parsed.size, .color_ops = parsed.color_ops };
 
     // The font: the one /DA names in the form's default resources if it can
     // write the text, else a new Helvetica.
