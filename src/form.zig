@@ -331,8 +331,9 @@ fn optionIndex(field: Field, choice: []const u8) ?usize {
 fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) Error!void {
     const a = upd.allocator();
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
-    // A password is never put in the file (12.7.4.3), where an incremental
-    // update would keep it for good. Only its masked appearance is written.
+    // A password is never put in the file, where an incremental update would
+    // keep it for good: the note on this flag in table 228 (12.7.4.3) says
+    // readers should never store it. Only its masked appearance is written.
     fd = if (field.password) try write.dictWithout(a, fd, "V") else try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, value) });
     // Selected indices would disagree with the new value.
     fd = try write.dictWithout(a, fd, "I");

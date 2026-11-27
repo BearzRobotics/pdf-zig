@@ -123,7 +123,8 @@ test "R2 with a password, R5, V4 RC4 and clear metadata, and object streams" {
 }
 
 test "a non-ASCII password given as UTF-8 opens R3 and R4 files" {
-    // The files' password is "päss€•" in PDFDocEncoding (7.6.3.3).
+    // The files' password is "päss€•" in PDFDocEncoding, which Adobe's
+    // ExtensionLevel 3 supplement to ISO 32000 asks for (algorithm 3.2).
     for ([_][]const u8{ @embedFile("enc_rc4_r3_pdfdoc_pw.pdf"), @embedFile("enc_aes_128_pdfdoc_pw.pdf") }) |bytes| {
         try check(bytes, "p\u{e4}ss\u{20ac}\u{2022}");
         // Bytes already in the file's encoding keep working.

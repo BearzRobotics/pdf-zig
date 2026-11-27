@@ -138,7 +138,7 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-/// White-space characters (7.2.3, table 1).
+/// White-space characters (7.2.2, table 1).
 pub fn isWhite(c: u8) bool {
     return switch (c) {
         0, 9, 10, 12, 13, 32 => true,
@@ -146,7 +146,7 @@ pub fn isWhite(c: u8) bool {
     };
 }
 
-/// Delimiter characters (7.2.3, table 2).
+/// Delimiter characters (7.2.2, table 2).
 pub fn isDelim(c: u8) bool {
     return switch (c) {
         '(', ')', '<', '>', '[', ']', '{', '}', '/', '%' => true,
@@ -179,7 +179,7 @@ pub const Parser = struct {
         return if (self.pos < self.src.len) self.src[self.pos] else null;
     }
 
-    /// Skips white space and comments (7.2.4).
+    /// Skips white space and comments (7.2.2, 7.2.3).
     pub fn skipWs(self: *Parser) void {
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
