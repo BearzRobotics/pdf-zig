@@ -46,11 +46,14 @@ pub fn main(init: std.process.Init) !u8 {
     _ = try pdf.annot.addMarkup(&upd, page, .highlight, rects.items, .{ .contents = "marked by pdfmark", .author = "pdf-zig", .color = .{ 1, 0.9, 0 } });
     _ = try pdf.annot.addNote(&upd, page, rects.items[0].x1 + 4, rects.items[0].y0, .{ .contents = "a note", .author = "pdf-zig" });
 
-    var out_file = try std.Io.Dir.cwd().createFile(io, args[2], .{});
-    defer out_file.close(io);
+    // Written beside the target and then renamed over it, so that a failure
+    // leaves what was there, the input included if it is the target.
+    var out_file = try std.Io.Dir.cwd().createFileAtomic(io, args[2], .{ .replace = true });
+    defer out_file.deinit(io);
     var wbuf: [65536]u8 = undefined;
-    var writer = out_file.writer(io, &wbuf);
+    var writer = out_file.file.writer(io, &wbuf);
     try upd.write(gpa, &writer.interface);
     try writer.interface.flush();
+    try out_file.replace(io);
     return 0;
 }
