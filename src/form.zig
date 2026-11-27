@@ -23,6 +23,7 @@ const document = @import("document.zig");
 const pages = @import("pages.zig");
 const encoding = @import("encoding.zig");
 const font_mod = @import("font.zig");
+const content_mod = @import("content.zig");
 const std14 = @import("std14.zig");
 const write = @import("write.zig");
 
@@ -423,47 +424,30 @@ pub const ParsedDa = struct {
 /// Reads the font, size and fill colour of a `/DA` string. Allocated from `a`.
 pub fn parseDa(a: Allocator, da_text: []const u8) Allocator.Error!ParsedDa {
     var out: ParsedDa = .{};
-    var color: std.ArrayList(u8) = .empty;
-    var nums: [4][]const u8 = undefined;
-    var n_nums: usize = 0;
-    var it = std.mem.tokenizeAny(u8, da_text, " \t\r\n");
-    var prev_name: []const u8 = "";
-    var prev_size: []const u8 = "";
-    while (it.next()) |tok| {
-        if (tok[0] == '/') {
-            prev_name = tok[1..];
-            n_nums = 0;
-        } else if (std.fmt.parseFloat(f64, tok)) |_| {
-            if (n_nums < nums.len) {
-                nums[n_nums] = tok;
-                n_nums += 1;
-            } else {
-                // More than four numbers in a row: keep the last four.
-                nums[0] = nums[1];
-                nums[1] = nums[2];
-                nums[2] = nums[3];
-                nums[3] = tok;
-            }
-            prev_size = tok;
-        } else |_| {
-            if (std.mem.eql(u8, tok, "Tf")) {
-                out.font_name = prev_name;
-                out.size = std.fmt.parseFloat(f64, prev_size) catch 0;
-            } else if (std.mem.eql(u8, tok, "g") and n_nums >= 1) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} g", .{nums[n_nums - 1]});
-            } else if (std.mem.eql(u8, tok, "rg") and n_nums >= 3) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} {s} {s} rg", .{ nums[n_nums - 3], nums[n_nums - 2], nums[n_nums - 1] });
-            } else if (std.mem.eql(u8, tok, "k") and n_nums >= 4) {
-                color.clearRetainingCapacity();
-                try color.print(a, "{s} {s} {s} {s} k", .{ nums[0], nums[1], nums[2], nums[3] });
-            }
-            n_nums = 0;
+    // The string is a piece of content stream, and is read as one: only the
+    // values taken from it, checked, are written out again.
+    var scanner = content_mod.Scanner.init(a, da_text);
+    while (try scanner.next()) |op| {
+        const n = op.operands.len;
+        if (std.mem.eql(u8, op.name, "Tf")) {
+            if (n < 2) continue;
+            out.font_name = try a.dupe(u8, op.operands[n - 2].asName() orelse continue);
+            const size = op.operands[n - 1].asNum() orelse 0;
+            out.size = if (size > 0 and size <= 10_000) size else 0;
+            continue;
+        }
+        const components: usize = if (std.mem.eql(u8, op.name, "g")) 1 else if (std.mem.eql(u8, op.name, "rg")) 3 else if (std.mem.eql(u8, op.name, "k")) 4 else continue;
+        if (n < components) continue;
+        var text: std.ArrayList(u8) = .empty;
+        for (op.operands[n - components ..]) |operand| {
+            const v = operand.asNum() orelse break;
+            if (!std.math.isFinite(v)) break;
+            try text.print(a, "{d} ", .{std.math.clamp(v, 0, 1)});
+        } else {
+            try text.appendSlice(a, op.name);
+            out.color_ops = text.items;
         }
     }
-    if (color.items.len > 0) out.color_ops = color.items;
-    out.font_name = try a.dupe(u8, out.font_name);
     return out;
 }
 
@@ -646,7 +630,9 @@ fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: 
     }
 
     var content: std.ArrayList(u8) = .empty;
-    try content.print(a, "/Tx BMC\nq\n{d:.2} {d:.2} {d:.2} {d:.2} re W n\nBT\n{s}\n/{s} {d:.2} Tf\n", .{ pad / 2, pad / 2, w - pad, h - pad, da.color_ops, da.font_name, size });
+    var font_name: std.Io.Writer.Allocating = .init(a);
+    write.writeName(&font_name.writer, da.font_name) catch return error.OutOfMemory;
+    try content.print(a, "/Tx BMC\nq\n{d:.2} {d:.2} {d:.2} {d:.2} re W n\nBT\n{s}\n{s} {d:.2} Tf\n", .{ pad / 2, pad / 2, w - pad, h - pad, da.color_ops, font_name.written(), size });
     const leading = size * 1.15;
     // The first baseline: vertically centred for one line, from the top for several.
     var y: f64 = if (multiline) h - pad - size else (h - size) / 2 + size * 0.22;
@@ -1019,4 +1005,57 @@ test "choice fields: export values are stored, display text is shown" {
     try setText(&upd, findField(all, "editable").?, "Atlantis");
     try testing.expectEqualStrings("Atlantis", upd.get(6).asDict().?.get("V").?.string);
     try testing.expect(upd.get(6).asDict().?.get("I") == null);
+}
+
+test "a /DA string cannot put operators or bad numbers into an appearance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Form feed and NUL are white space, so the "name" ends at the first one.
+    const injected = try parseDa(a, "/X\x0c0\x000\x0c200\x0c200\x0cre\x0cf 12 Tf 0 g");
+    // Read as content, the Tf is left without a font: the defaults apply.
+    try testing.expectEqualStrings("Helv", injected.font_name);
+    try testing.expectEqual(@as(f64, 0), injected.size);
+    try testing.expectEqualStrings("0 g", injected.color_ops);
+    const huge: [400]u8 = @splat('9');
+    const bad = try parseDa(a, try std.fmt.allocPrint(a, "/Helv {s} Tf {s} g", .{ &huge, &huge }));
+    try testing.expectEqual(@as(f64, 0), bad.size);
+    try testing.expectEqualStrings("0 g", bad.color_ops);
+    for ([_][]const u8{ "/Helv 1e999 Tf nan g", "/Helv 0x10 Tf inf inf inf rg", "/Helv -5 Tf" }) |da| {
+        const p = try parseDa(a, da);
+        try testing.expect(p.size == 0);
+        try testing.expectEqualStrings("0 g", p.color_ops);
+    }
+    const ordinary = try parseDa(a, "0.5 0 1 rg /Arial#20Bold 9.5 Tf");
+    try testing.expectEqualStrings("Arial Bold", ordinary.font_name);
+    try testing.expectEqual(@as(f64, 9.5), ordinary.size);
+    try testing.expectEqualStrings("0.5 0 1 rg", ordinary.color_ops);
+    const cmyk = try parseDa(a, "/F 8 Tf 0 0 0 2 k");
+    try testing.expectEqualStrings("0 0 0 1 k", cmyk.color_ops);
+    // The name is escaped again where it is written, and matches its resource.
+    const got = try fillWithFont(a, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", "x");
+    try testing.expect(got.used_form_font);
+}
+
+test "a font name needing escapes is found and written correctly" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try tests.buildFile(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /DR << /Font << /Arial#20Bold 5 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) /Rect [10 10 190 30] /DA (/Arial#20Bold 12 Tf 0 g) >>",
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Arial >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(arena.allocator(), &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setText(&upd, all[0], "hi");
+    const ap = upd.get(upd.get(4).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    try testing.expect(std.mem.indexOf(u8, ap.data, "/Arial#20Bold 12.00 Tf") != null);
+    try testing.expectEqual(@as(u32, 5), ap.dict.get("Resources").?.dict.get("Font").?.dict.get("Arial Bold").?.ref.num);
 }
