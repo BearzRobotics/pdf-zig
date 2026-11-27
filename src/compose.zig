@@ -232,7 +232,8 @@ pub const Builder = struct {
                 try annots.append(copy.a, .{ .source = item.ref.num, .num = gop.value_ptr.*, .page = page_num });
             }
         }
-        var work: outline.Work = .{ .lookups = outline.max_outline_lookup_nodes };
+        var work: outline.Work = .{ .index_allocator = self.gpa };
+        defer work.deinit();
         for (annots.items) |an| {
             _ = scratch.reset(.retain_capacity);
             const d = doc.getObject(an.source).asDict() orelse Dict{};
@@ -413,9 +414,6 @@ fn putObject(w: *Io.Writer, num: u32, o: Object) error{OutOfMemory}!void {
     w.writeAll("\nendobj\n") catch return error.OutOfMemory;
 }
 
-/// Name-tree nodes each annotation adds to what looking up destinations may visit.
-const lookups_per_annotation = 256;
-
 /// In `Copy.map`: an object that is not copied, so references to it are null.
 const excluded = 0;
 
@@ -529,9 +527,6 @@ const Copy = struct {
     /// what the new document can honour.
     fn annotation(self: *Copy, a: Allocator, d: Dict, page_num: u32, work: *outline.Work) Error!Dict {
         const doc = self.doc;
-        // The budget for looking names up grows with the number of annotations,
-        // so that a long document does not run out of it partway.
-        work.lookups +|= lookups_per_annotation;
         const widget = std.mem.eql(u8, doc.getName(d, "Subtype") orelse "", "Widget");
         // A widget's `/Parent` is its field, whose other widgets may be on
         // pages left out; there is no form in the new document yet.

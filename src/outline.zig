@@ -21,7 +21,10 @@ pub const max_items = 100_000;
 /// Most name-tree nodes examined to resolve one named destination, and to
 /// resolve all those of one outline.
 const max_lookup_nodes = 100_000;
-pub const max_outline_lookup_nodes = 4_000_000;
+const max_outline_lookup_nodes = 4_000_000;
+/// After this many nodes and names have been examined one lookup at a time,
+/// the names are indexed, once, for the rest of the work.
+const index_after = 1 << 18;
 
 /// Where a bookmark or link goes.
 pub const Destination = struct {
@@ -56,7 +59,8 @@ pub fn read(a: Allocator, doc: *Document, list: pages.PageList) Allocator.Error!
         const gop = try page_of.getOrPut(a, e.num);
         if (!gop.found_existing) gop.value_ptr.* = i;
     }
-    var work: Work = .{ .lookups = max_outline_lookup_nodes, .page_of = &page_of };
+    var work: Work = .{ .page_of = &page_of, .index_allocator = doc.arena.child_allocator };
+    defer work.deinit();
     return children(a, doc, list, root, 0, &budget, &seen, &work);
 }
 
@@ -102,9 +106,73 @@ pub const PageIndex = std.AutoHashMapUnmanaged(u32, usize);
 
 /// What resolving destinations may still spend, and what it can reuse.
 pub const Work = struct {
-    lookups: usize,
+    lookups: usize = max_outline_lookup_nodes,
     text_left: usize = write.max_listed_bytes,
     page_of: ?*const PageIndex = null,
+    /// With an allocator, work on many names is done through an index: looking
+    /// each up in turn takes time in proportion to names times lookups.
+    index_allocator: ?Allocator = null,
+    index: ?NameIndex = null,
+    /// Nodes and names examined by lookups so far.
+    examined: usize = 0,
+
+    pub fn deinit(self: *Work) void {
+        if (self.index) |*index| index.deinit(self.index_allocator.?);
+        self.index = null;
+    }
+};
+
+/// Every named destination of a document.
+const NameIndex = struct {
+    /// The catalog's `/Dests` dictionary, for names.
+    dests: std.StringHashMapUnmanaged(Object) = .empty,
+    /// The `/Names /Dests` tree.
+    tree: std.StringHashMapUnmanaged(Object) = .empty,
+
+    fn deinit(self: *NameIndex, a: Allocator) void {
+        self.dests.deinit(a);
+        self.tree.deinit(a);
+    }
+
+    /// The first definition of a name counts, as when looking one up.
+    fn build(a: Allocator, doc: *Document) Allocator.Error!NameIndex {
+        var self: NameIndex = .{};
+        errdefer self.deinit(a);
+        const cat = doc.catalog() orelse return self;
+        if (doc.getDict(cat, "Dests")) |dests| for (dests.entries) |e| {
+            const gop = try self.dests.getOrPut(a, e.key);
+            if (!gop.found_existing) gop.value_ptr.* = e.value;
+        };
+        const names = doc.getDict(cat, "Names") orelse return self;
+        const root = doc.getDict(names, "Dests") orelse return self;
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer seen.deinit(a);
+        // Nodes and pairs together: shared arrays can repeat either.
+        var budget: usize = max_outline_lookup_nodes;
+        try self.add(a, doc, root, 0, &seen, &budget);
+        return self;
+    }
+
+    fn add(self: *NameIndex, a: Allocator, doc: *Document, node: Dict, depth: usize, seen: *std.AutoHashMapUnmanaged(u32, void), budget: *usize) Allocator.Error!void {
+        if (depth > 16 or budget.* == 0) return;
+        budget.* -= 1;
+        if (doc.getArray(node, "Names")) |pairs| {
+            var i: usize = 0;
+            while (i + 1 < pairs.len and budget.* > 0) : (i += 2) {
+                budget.* -= 1;
+                const k = doc.resolve(pairs[i]);
+                if (k != .string) continue;
+                const gop = try self.tree.getOrPut(a, k.string);
+                if (!gop.found_existing) gop.value_ptr.* = pairs[i + 1];
+            }
+        }
+        if (doc.getArray(node, "Kids")) |kids| for (kids) |kid| {
+            if (budget.* == 0) break;
+            if (kid == .ref and (try seen.getOrPut(a, kid.ref.num)).found_existing) continue;
+            const kd = doc.resolve(kid).asDict() orelse continue;
+            try self.add(a, doc, kd, depth + 1, seen, budget);
+        };
+    }
 };
 
 /// `destinationOf` within the limits of `work`.
@@ -129,20 +197,43 @@ pub fn destinationArray(doc: *Document, dest: Object, depth: usize, work: *Work)
         .array => |arr| return arr,
         .dict => |d| return destinationArray(doc, d.get("D") orelse return null, depth + 1, work),
         .name, .string => |key| {
-            // A named destination: the catalog's /Dests dictionary, then the /Names /Dests tree.
-            const cat = doc.catalog() orelse return null;
-            if (o == .name) if (doc.getDict(cat, "Dests")) |dests| if (dests.get(key)) |v| return destinationArray(doc, v, depth + 1, work);
-            if (doc.getDict(cat, "Names")) |names| if (doc.getDict(names, "Dests")) |tree| {
-                var this: usize = @min(max_lookup_nodes, work.lookups);
-                const allowed = this;
-                const hit = lookupTree(doc, tree, key, 0, &this);
-                work.lookups -= allowed - this;
-                if (hit) |v| return destinationArray(doc, v, depth + 1, work);
-            };
-            return null;
+            const v = namedValue(doc, key, o == .name, work) orelse return null;
+            return destinationArray(doc, v, depth + 1, work);
         },
         else => return null,
     }
+}
+
+/// What the named destination `key` is defined as: in the catalog's `/Dests`
+/// dictionary (for a name), else in the `/Names /Dests` tree.
+fn namedValue(doc: *Document, key: []const u8, is_name: bool, work: *Work) ?Object {
+    if (work.index == null and work.examined >= index_after) {
+        if (work.index_allocator) |a| {
+            // Without memory for it, names go on being looked up one by one,
+            // and the failure is reported by the caller's `checkMemory`.
+            work.index = NameIndex.build(a, doc) catch |err| failed: {
+                doc.noteError(err);
+                break :failed null;
+            };
+        }
+    }
+    if (work.index) |*index| {
+        if (is_name) if (index.dests.get(key)) |v| return v;
+        return index.tree.get(key);
+    }
+    const cat = doc.catalog() orelse return null;
+    if (is_name) if (doc.getDict(cat, "Dests")) |dests| {
+        work.examined +|= dests.entries.len;
+        if (dests.get(key)) |v| return v;
+    };
+    const names = doc.getDict(cat, "Names") orelse return null;
+    const tree = doc.getDict(names, "Dests") orelse return null;
+    var this: usize = @min(max_lookup_nodes, work.lookups);
+    const allowed = this;
+    const hit = lookupTree(doc, tree, key, 0, &this, &work.examined);
+    work.lookups -= allowed - this;
+    work.examined +|= allowed - this;
+    return hit;
 }
 
 fn fromArray(doc: *Document, list: pages.PageList, arr: []const Object, work: *const Work) ?Destination {
@@ -170,13 +261,14 @@ fn fromArray(doc: *Document, list: pages.PageList, arr: []const Object, work: *c
 }
 
 /// Looks `key` up in a name tree (7.9.6).
-fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize, budget: *usize) ?Object {
+fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize, budget: *usize, examined: *usize) ?Object {
     // Depth alone allows (kids per node)^16 visits when nodes repeat.
     if (depth > 16 or budget.* == 0) return null;
     budget.* -= 1;
     if (doc.getArray(node, "Names")) |pairs| {
         var i: usize = 0;
         while (i + 1 < pairs.len) : (i += 2) {
+            examined.* +|= 1;
             const k = doc.resolve(pairs[i]);
             if (k == .string and std.mem.eql(u8, k.string, key)) return pairs[i + 1];
         }
@@ -193,7 +285,7 @@ fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize, budget:
                 continue;
             }
         };
-        if (lookupTree(doc, kd, key, depth + 1, budget)) |v| return v;
+        if (lookupTree(doc, kd, key, depth + 1, budget, examined)) |v| return v;
     };
     return null;
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reading bookmarks no longer takes time in proportion to bookmarks times named
+  destinations on files built to make it so; `link.list` and `compose` share the fix.
 - New `compose.Builder`: makes a new document from blank pages and pages of other
   documents, to create, delete, reorder, merge, split and rotate pages. Bookmarks and
   fillable forms are not carried over yet. New example `pdfpages`.

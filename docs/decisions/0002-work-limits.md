@@ -14,6 +14,9 @@ or the stack.
 Each limit counts the quantity that actually costs something, over the whole
 operation rather than per nesting level, and is far above what real files need.
 
+- **Named destinations** (`outline.zig`): looking names up one at a time costs names
+  times lookups. After 2^18 nodes and names have been examined for one listing or import,
+  the names are indexed once.
 - **Load depth** (`document.zig`): at most 32 objects are read from inside one
   another (indirect `/Length`, object streams). Deeper reads give null for that
   chain only and are not cached, so results do not depend on access order.

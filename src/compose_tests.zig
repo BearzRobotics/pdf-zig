@@ -399,3 +399,63 @@ test "pages that share large direct objects stay within the size limit" {
     try testing.expect(counting.allocated_bytes < 1 << 20);
     try testing.expectEqual(@as(usize, 0), b.pageCount());
 }
+
+/// Two pages; page 1 has `links` links to the name `last`, which `tree` holds.
+fn namedLinks(a: Allocator, links: usize, tree: []const []const u8) ![]const u8 {
+    var annots: std.ArrayList(u8) = .empty;
+    for (0..links) |_| try annots.appendSlice(a, "<< /Subtype /Link /Rect [0 0 1 1] /Dest (last) >> ");
+    var bodies: std.ArrayList([]const u8) = .empty;
+    try bodies.append(a, "<< /Type /Catalog /Pages 2 0 R /Names << /Dests 5 0 R >> >>");
+    try bodies.append(a, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 9 9] >>");
+    try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Page /Parent 2 0 R /Annots [{s}] >>", .{annots.items}));
+    try bodies.append(a, "<< /Type /Page /Parent 2 0 R >>");
+    try bodies.appendSlice(a, tree);
+    return file(a, bodies.items);
+}
+
+fn expectNamedLinks(a: Allocator, bytes: []const u8, links: usize) !void {
+    var doc = try pdf.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{ 0, 1 }, .{});
+    var out = try reopen(a, try written(a, &b));
+    const items = out.doc.getArray(out.page(0).dict, "Annots").?;
+    try testing.expectEqual(links, items.len);
+    for (items) |item| try testing.expect(out.doc.resolve(item).asDict().?.has("Dest"));
+}
+
+test "every link by name is kept, however badly the name tree is built" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 2000 leaves in a row without /Limits: finding the last takes 2000 steps,
+    // and 3000 links to it six million.
+    var kids: std.ArrayList(u8) = .empty;
+    for (0..2000) |i| try kids.print(a, "<< /Names [(k{d}) [3 0 R /Fit]] >> ", .{i});
+    const tree = try std.fmt.allocPrint(a, "<< /Kids [{s}<< /Names [(last) [4 0 R /Fit]] >>] >>", .{kids.items});
+    try expectNamedLinks(a, try namedLinks(a, 3000, &.{tree}), 3000);
+}
+
+test "an attachment encrypted in a way that is not read is not copied as noise" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |own_filter| {
+        var doc = try pdf.Document.open(a, @embedFile("enc_aes_128.pdf"), .{});
+        defer doc.deinit();
+        const kept = doc.arena.allocator();
+        // No fixture has an attachment, so the page's contents are made to
+        // call themselves one.
+        const list = try pdf.pages.PageList.build(&doc);
+        const num = pdf.pages.page(&doc, list, 0).?.dict.get("Contents").?.ref.num;
+        var contents = doc.getObject(num).stream;
+        contents.dict = try pdf.write.dictWith(kept, contents.dict, "Type", .{ .name = "EmbeddedFile" });
+        try doc.cache.put(kept, num, .{ .stream = contents });
+        if (own_filter) doc.encrypt_dict = try pdf.write.dictWith(kept, doc.encrypt_dict, "EFF", .{ .name = "Identity" });
+        var b = Builder.init(testing.allocator, .{});
+        defer b.deinit();
+        const result = b.importPages(&doc, &.{0}, .{ .allow_decrypted_output = true });
+        if (own_filter) try testing.expectError(error.UnsupportedFilter, result) else try result;
+    }
+}

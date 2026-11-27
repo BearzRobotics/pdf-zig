@@ -50,7 +50,8 @@ pub fn list(a: Allocator, doc: *Document, page_list: pages.PageList, page: pages
     var page_of: outline.PageIndex = .empty;
     defer page_of.deinit(a);
     var indexed = false;
-    var work: outline.Work = .{ .lookups = outline.max_outline_lookup_nodes, .page_of = &page_of };
+    var work: outline.Work = .{ .page_of = &page_of, .index_allocator = doc.arena.child_allocator };
+    defer work.deinit();
     var out: std.ArrayList(Link) = .empty;
     errdefer out.deinit(a);
     for (items) |item| {
