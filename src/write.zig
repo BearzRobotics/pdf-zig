@@ -443,6 +443,7 @@ test "an update adds an object and changes another; the original bytes stay" {
     try upd.write(a, &out.writer);
     try testing.expect(std.mem.startsWith(u8, out.written(), bytes));
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try document.Document.open(a, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);
@@ -488,6 +489,7 @@ test "a file with a cross-reference stream gets a stream update" {
     defer out.deinit();
     try upd.write(a, &out.writer);
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try document.Document.open(a, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);

@@ -687,6 +687,7 @@ test "filling a text field, a check box and a radio group, then reading and draw
     defer out.deinit();
     try upd.write(testing.allocator, &out.writer);
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try Document.open(testing.allocator, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);

@@ -30,6 +30,33 @@ pub fn page(a: Allocator, content: []const u8, resources: []const u8, extra: []c
     return out.items;
 }
 
+/// Checks that the cross-reference data of a written file is right by itself:
+/// every in-use entry points at the header `N G obj` of its object, and loading
+/// all of them needs no repair. (Reading alone would hide a wrong offset: the
+/// library repairs the file on first use of the bad entry.)
+pub fn expectSoundFile(bytes: []const u8) !void {
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var it = doc.xref.iterator();
+    while (it.next()) |kv| switch (kv.value_ptr.*) {
+        .free => {},
+        .in_use => |e| {
+            var buf: [48]u8 = undefined;
+            const header = try std.fmt.bufPrint(&buf, "{d} {d} obj", .{ kv.key_ptr.*, e.gen });
+            const at = doc.base + @as(usize, @intCast(e.offset));
+            try testing.expect(at < bytes.len);
+            try testing.expectEqualStrings(header, bytes[at..@min(bytes.len, at + header.len)]);
+        },
+        .compressed => {},
+    };
+    var nums = doc.xref.keyIterator();
+    var list: std.ArrayList(u32) = .empty;
+    defer list.deinit(testing.allocator);
+    while (nums.next()) |k| try list.append(testing.allocator, k.*);
+    for (list.items) |n| _ = doc.getObject(n);
+    try testing.expect(!doc.repaired);
+}
+
 pub const Rendered = struct {
     doc: pdf.Document,
     rend: pdf.Renderer,

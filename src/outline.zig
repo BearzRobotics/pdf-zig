@@ -339,6 +339,7 @@ test "bookmarks can be added to a document without an outline, and removed" {
     defer out.deinit();
     try upd.write(a, &out.writer);
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try Document.open(a, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);
@@ -357,6 +358,7 @@ test "bookmarks can be added to a document without an outline, and removed" {
     var out2: std.Io.Writer.Allocating = .init(a);
     defer out2.deinit();
     try upd2.write(a, &out2.writer);
+    try @import("interp_tests.zig").expectSoundFile(out2.written());
     var doc3 = try Document.open(a, out2.written(), .{});
     defer doc3.deinit();
     const pl3 = try pages.PageList.build(&doc3);
@@ -372,6 +374,7 @@ test "bookmarks can be added to a document without an outline, and removed" {
     var out3: std.Io.Writer.Allocating = .init(a);
     defer out3.deinit();
     try upd3.write(a, &out3.writer);
+    try @import("interp_tests.zig").expectSoundFile(out3.written());
     var doc4 = try Document.open(a, out3.written(), .{});
     defer doc4.deinit();
     const pl4 = try pages.PageList.build(&doc4);
@@ -385,6 +388,7 @@ test "bookmarks can be added to a document without an outline, and removed" {
     var out4: std.Io.Writer.Allocating = .init(a);
     defer out4.deinit();
     try upd4.write(a, &out4.writer);
+    try @import("interp_tests.zig").expectSoundFile(out4.written());
     var doc5 = try Document.open(a, out4.written(), .{});
     defer doc5.deinit();
     const pl5 = try pages.PageList.build(&doc5);

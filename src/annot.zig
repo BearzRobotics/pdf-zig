@@ -515,6 +515,7 @@ test "a highlight is written, read back and drawn" {
     defer out.deinit();
     try roundTrip(a, &upd, &out);
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try Document.open(a, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);
@@ -569,6 +570,7 @@ test "a note, then its text edited, then removed" {
     try upd.write(a, &out.writer);
 
     // Second revision on top of the first: edit the text.
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try Document.open(a, out.written(), .{});
     defer doc2.deinit();
     const pl2 = try pages.PageList.build(&doc2);
@@ -580,6 +582,7 @@ test "a note, then its text edited, then removed" {
     defer out2.deinit();
     try upd2.write(a, &out2.writer);
 
+    try @import("interp_tests.zig").expectSoundFile(out2.written());
     var doc3 = try Document.open(a, out2.written(), .{});
     defer doc3.deinit();
     const pl3 = try pages.PageList.build(&doc3);
@@ -598,6 +601,7 @@ test "a note, then its text edited, then removed" {
     var out3: Io.Writer.Allocating = .init(a);
     defer out3.deinit();
     try upd3.write(a, &out3.writer);
+    try @import("interp_tests.zig").expectSoundFile(out3.written());
     var doc4 = try Document.open(a, out3.written(), .{});
     defer doc4.deinit();
     const pl4 = try pages.PageList.build(&doc4);
@@ -629,6 +633,7 @@ test "ink and a text box are written, read back and drawn" {
     defer out.deinit();
     try roundTrip(a, &upd, &out);
 
+    try @import("interp_tests.zig").expectSoundFile(out.written());
     var doc2 = try Document.open(a, out.written(), .{});
     defer doc2.deinit();
     try testing.expect(!doc2.repaired);
