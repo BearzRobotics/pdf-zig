@@ -72,7 +72,7 @@ pub const CMap = struct {
     /// CID of `code` (a CID map), or null.
     pub fn cid(self: CMap, code: u32, bytes: u8) ?u32 {
         const r = self.find(code, bytes) orelse return null;
-        return r.dst[0] + (code - r.lo);
+        return @as(u32, r.dst[0]) +| (code - r.lo);
     }
 
     /// Appends the Unicode text of `code` (a ToUnicode map) as UTF-8 to `out`.
@@ -82,7 +82,8 @@ pub const CMap = struct {
         var units: [16]u16 = undefined;
         const n = @min(r.dst.len, units.len);
         @memcpy(units[0..n], r.dst[0..n]);
-        if (n > 0) units[n - 1] +%= @intCast(code - r.lo);
+        // The offset is added to the last UTF-16 unit, which wraps.
+        if (n > 0) units[n - 1] +%= @truncate(code - r.lo);
         var it = std.unicode.Utf16LeIterator.init(units[0..n]);
         while (it.nextCodepoint() catch return false) |cp| {
             var buf: [4]u8 = undefined;
@@ -151,7 +152,7 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
                         const code = hexValue(pending[0].string);
                         try ranges.append(a, .{ .lo = code, .hi = code, .bytes = @intCast(pending[0].string.len), .dst = try utf16Of(a, pending[1].string) });
                     },
-                    .bfrange => if (pending[0] == .string and pending[1] == .string and pending[0].string.len <= 4) {
+                    .bfrange => if (pending[0] == .string and pending[1] == .string and pending[0].string.len <= 4 and pending[1].string.len <= 4) {
                         const lo = hexValue(pending[0].string);
                         const hi = hexValue(pending[1].string);
                         const bytes: u8 = @intCast(pending[0].string.len);
@@ -170,7 +171,7 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
                         dst[0] = @intCast(std.math.clamp(pending[1].integer, 0, 65535));
                         try ranges.append(a, .{ .lo = code, .hi = code, .bytes = @intCast(pending[0].string.len), .dst = dst });
                     },
-                    .cidrange => if (pending[0] == .string and pending[1] == .string and pending[2] == .integer and pending[0].string.len <= 4) {
+                    .cidrange => if (pending[0] == .string and pending[1] == .string and pending[2] == .integer and pending[0].string.len <= 4 and pending[1].string.len <= 4) {
                         const dst = try a.alloc(u16, 1);
                         dst[0] = @intCast(std.math.clamp(pending[2].integer, 0, 65535));
                         try ranges.append(a, .{ .lo = hexValue(pending[0].string), .hi = hexValue(pending[1].string), .bytes = @intCast(pending[0].string.len), .dst = dst });
@@ -285,4 +286,20 @@ test "later definitions override earlier ones; damaged text is tolerated" {
         out.clearRetainingCapacity();
         _ = try mm.unicode(a, 1, 1, &out);
     }
+}
+
+test "ranges wider than their destination type do not overflow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cids = try parse(a, "1 begincidrange <00000000> <FFFFFFFF> 65535 endcidrange");
+    try std.testing.expectEqual(@as(?u32, 65535), cids.cid(0, 4));
+    try std.testing.expectEqual(@as(?u32, 0xFFFFFFFF), cids.cid(0xFFFFFFFF, 4));
+    const text = try parse(a, "1 beginbfrange <000000> <FFFFFF> <0041> endbfrange");
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try text.unicode(a, 0x010000, 3, &out)); // wraps within one UTF-16 unit
+    try std.testing.expectEqualStrings("A", out.items);
+    // An upper bound longer than the lower one is not a range.
+    const bad = try parse(a, "1 beginbfrange <0041> <FF00000041> <0041> endbfrange 1 begincidrange <0041> <FF00000041> 7 endcidrange");
+    try std.testing.expectEqual(@as(usize, 0), bad.ranges.len);
 }
