@@ -42,6 +42,31 @@ page operations, **XL** several times that.
 `/usr/share` is mostly TeX manuals and understates scans, office files and forms, so the
 survey also runs on a sample of the maintainer's collection.
 
+### What the survey found (2026-11-27)
+
+A random sample of 2,000 files from the maintainer's collection of books, at most 30 pages
+of each, so rare things are undercounted. Books say little about forms and signatures.
+No file crashed, timed out or had a page that failed to render; 1,994 opened. Of the rest,
+four need a password or an unread security handler and two are damaged files that Poppler
+does not open either.
+
+| Found | Files |
+|---|---|
+| Pages that are scans | 43% (31% have a text layer; the two can overlap) |
+| JPEG, JPX, CCITT images | 32%, 28%, 19% |
+| **JBIG2 images** | **13%**: pdf-zig cannot decode them |
+| Overprint set | 13% (it rarely changes what a screen shows) |
+| Text without known Unicode | 9% |
+| A form | 5% |
+| An annotation or field without an appearance | 3% |
+| Transparency groups that matter, soft masks, `/Matte` | 4%, 3%, 1% |
+| Signed | under 1% (15 files, all `adbe.pkcs7.detached`) |
+| Text clipping, vertical text, mesh shadings, XFA | under 0.5% each |
+
+**What it means for the order:** JBIG2 is the most common thing pdf-zig cannot show in
+this sample, ahead of forms. The viewer may already decode it itself: its code read
+`/JBIG2Globals` when last looked at (whether it decodes JBIG2 was not checked).
+
 ## Stage 1: forms
 
 | Item | Size | Viewer work |

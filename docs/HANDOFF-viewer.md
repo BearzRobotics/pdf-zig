@@ -94,6 +94,13 @@ The viewer needs to add these. None needs new drawing code.
   user agrees that the new file will have **no password**.
 - Form fields from merged files may be renamed (`name_2`).
 
+### JBIG2
+
+A survey found JBIG2 images in 13% of a sample of books. pdf-zig does not decode them
+yet (`docs/ROADMAP.md`, stage 4). `src/pdfrender/render.zig` read `/JBIG2Globals` at
+`161b555`, so the viewer may handle them already: check with a scanned file, and keep
+whatever it does until pdf-zig can decode them.
+
 ## 4. Display list changes: drawing work
 
 New kinds of drawing show only when the viewer draws them. `drawCommands` in
