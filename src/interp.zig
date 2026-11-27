@@ -139,13 +139,15 @@ pub const Renderer = struct {
     /// True if the optional-content entry `oc` (an OCG or OCMD) hides content.
     fn hidden(self: *Renderer, oc: Object) bool {
         self.loadOcgs();
-        if (self.ocg_off.count() == 0) return false;
         const doc = self.doc;
         if (oc == .ref) if (self.ocg_off.contains(oc.ref.num)) return true;
         const d = doc.resolve(oc).asDict() orelse return false;
         const ty = doc.getName(d, "Type") orelse return false;
         if (!std.mem.eql(u8, ty, "OCMD")) return false;
-        const groups = d.get("OCGs") orelse return false;
+        var groups = d.get("OCGs") orelse return false;
+        // `/OCGs` is one group or an array of them, either of which may be
+        // given by reference.
+        if (doc.resolve(groups) == .array) groups = doc.resolve(groups);
         var any_on = false;
         var any_off = false;
         var all_on = true;

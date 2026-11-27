@@ -846,3 +846,46 @@ test "a clip set inside hidden optional content still applies" {
     for (want, r.list.commands) |w, c| try testing.expectEqual(w, std.meta.activeTag(c));
     try testing.expectEqual(@as(f64, 100), r.list.commands[2].fill.path[1].line.x);
 }
+
+/// A page whose content draws a square under the optional-content entry /X,
+/// object 7. Group 5 is on; group 6 is off.
+fn ocPage(a: Allocator, entry: []const u8, content: []const u8, extra: []const []const u8) ![]u8 {
+    var objects: std.ArrayList([]const u8) = .empty;
+    try objects.appendSlice(a, &.{ "<< /Type /OCG /Name (on) >>", "<< /Type /OCG /Name (off) >>", entry });
+    try objects.appendSlice(a, extra);
+    const bytes = try page(a, content, "/Properties << /X 7 0 R /Off 6 0 R >> /XObject << /Fm 8 0 R >>", objects.items, "");
+    return std.mem.replaceOwned(u8, a, bytes, "/Type /Catalog /Pages 2 0 R", "/Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /OFF [6 0 R] >> >>");
+}
+
+test "optional content membership: every policy, direct and indirect /OCGs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { ocgs: []const u8, policy: []const u8, visible: bool }{
+        .{ .ocgs = "[5 0 R]", .policy = "AllOff", .visible = false },
+        .{ .ocgs = "[5 0 R]", .policy = "AnyOff", .visible = false },
+        .{ .ocgs = "[5 0 R]", .policy = "AllOn", .visible = true },
+        .{ .ocgs = "[6 0 R]", .policy = "AllOff", .visible = true },
+        .{ .ocgs = "[5 0 R 6 0 R]", .policy = "AnyOn", .visible = true },
+        .{ .ocgs = "[5 0 R 6 0 R]", .policy = "AllOn", .visible = false },
+        .{ .ocgs = "[5 0 R 6 0 R]", .policy = "AnyOff", .visible = true },
+        .{ .ocgs = "5 0 R", .policy = "AnyOn", .visible = true },
+        .{ .ocgs = "6 0 R", .policy = "AnyOn", .visible = false },
+        // An indirect array of groups.
+        .{ .ocgs = "8 0 R", .policy = "AnyOn", .visible = false },
+        // No groups at all: no effect.
+        .{ .ocgs = "[]", .policy = "AllOff", .visible = true },
+    };
+    for (cases) |c| {
+        const entry = try std.fmt.allocPrint(a, "<< /Type /OCMD /P /{s} /OCGs {s} >>", .{ c.policy, c.ocgs });
+        const r = try render(try ocPage(a, entry, "/OC /X BDC 0 0 1 1 re f EMC", &.{"[6 0 R]"}));
+        defer done(r);
+        try testing.expectEqual(@as(usize, @intFromBool(c.visible)), countKind(r.list, .fill));
+    }
+    // With no group off at all, the policies still apply.
+    const bytes = try ocPage(a, "<< /Type /OCMD /P /AllOff /OCGs [5 0 R] >>", "/OC /X BDC 0 0 1 1 re f EMC", &.{});
+    const none_off = try std.mem.replaceOwned(u8, a, bytes, "/OFF [6 0 R]", "/OFF [       ]");
+    const r = try render(none_off);
+    defer done(r);
+    try testing.expectEqual(@as(usize, 0), countKind(r.list, .fill));
+}
