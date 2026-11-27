@@ -592,3 +592,60 @@ test "the size limit holds for the last bytes of the ASCII filters" {
     try std.testing.expectError(error.TooLarge, decode(arena.allocator(), "9jqo^BlbD~>", &.{.{ .name = "A85" }}, 5));
     try std.testing.expectError(error.TooLarge, decode(arena.allocator(), "41424>", &.{.{ .name = "AHx" }}, 2));
 }
+
+test "LZWDecode: data from libtiff, with wider codes and a cleared table" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The input libtiff was given: see test/fixtures/README.md.
+    const want = try a.alloc(u8, 60_000);
+    var x: u64 = 1;
+    for (want, 0..) |*byte, i| {
+        x = (x * 1103515245 + 12345) & 0x7fffffff;
+        byte.* = @intCast(if ((i / 3000) % 2 == 0) (x >> 16) % 17 else i % 251);
+    }
+    const r = try decode(a, @embedFile("lzw_libtiff.bin"), &.{.{ .name = "LZWDecode" }}, 1 << 20);
+    try std.testing.expectEqualSlices(u8, want, r.data);
+    try std.testing.expectError(error.TooLarge, decode(a, @embedFile("lzw_libtiff.bin"), &.{.{ .name = "LZW" }}, 59_999));
+}
+
+test "every filter keeps to the size limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { []const u8, []const u8, usize }{
+        .{ "AHx", "414243>", 3 },
+        .{ "A85", "9jqo^~>", 4 },
+        .{ "RL", "\xfex\x80", 3 },
+        .{ "LZW", &.{ 0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01 }, 10 },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c[2], (try decode(a, c[1], &.{.{ .name = c[0] }}, c[2])).data.len);
+        try std.testing.expectError(error.TooLarge, decode(a, c[1], &.{.{ .name = c[0] }}, c[2] - 1));
+    }
+}
+
+test "PNG Paeth chooses each neighbour, and the TIFF predictor on 16 bits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Above row 10 50 12; Paeth row: picks above, then left, then upper left.
+    const rows = [_]u8{ 0, 10, 50, 12, 4, 1, 2, 3 };
+    const got = try predict(a, &rows, try pngParms(a, 3), 100);
+    // 11 = above(10)+1. Then left 11, above 50, corner 10: p = 51, above, 52.
+    // Then left 52, above 12, corner 50: p = 14, above, 15.
+    try std.testing.expectEqualSlices(u8, &.{ 10, 50, 12, 11, 52, 15 }, got);
+    // Above 0 0 0 after a first byte 100: left wins.
+    const left = try predict(a, &.{ 0, 100, 100, 100, 4, 5, 1, 1 }, try pngParms(a, 3), 100);
+    try std.testing.expectEqualSlices(u8, &.{ 105, 106, 107 }, left[3..]);
+    // Upper left wins: left 20, above 0, corner 10 gives p = 10.
+    const corner = try predict(a, &.{ 0, 10, 0, 4, 10, 1 }, try pngParms(a, 2), 100);
+    try std.testing.expectEqualSlices(u8, &.{ 20, 11 }, corner[2..]);
+    const entries = [_]object.Entry{
+        .{ .key = "Predictor", .value = .{ .integer = 2 } },
+        .{ .key = "BitsPerComponent", .value = .{ .integer = 16 } },
+        .{ .key = "Columns", .value = .{ .integer = 3 } },
+    };
+    const wide = try predict(a, &.{ 0x00, 0xFF, 0x00, 0x01, 0x01, 0x00 }, .{ .entries = &entries }, 100);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xFF, 0x01, 0x00, 0x02, 0x00 }, wide);
+}

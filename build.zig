@@ -93,13 +93,17 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(pdfimg);
 
     // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
-    for ([_][]const u8{ "plain", "enc_rc4_40", "enc_rc4_128", "enc_aes_128", "enc_aes_256", "enc_aes_256_pw", "enc_rc4_128_pw" }) |name| {
+    for ([_][]const u8{
+        "plain",          "enc_rc4_40",         "enc_rc4_128",   "enc_aes_128",          "enc_aes_256",
+        "enc_aes_256_pw", "enc_rc4_128_pw",     "enc_rc4_40_pw", "enc_rc4_v4_clearmeta", "enc_aes_128_clearmeta",
+        "enc_aes_256_r5", "enc_aes_128_objstm",
+    }) |name| {
         mod.addAnonymousImport(b.fmt("{s}.pdf", .{name}), .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}.pdf", .{name})) });
     }
 
     // CCITT fax samples (Ghostscript tiffg3/tiffg32d/tiffg4 output wrapped in a PDF) and the
     // bitmap Ghostscript renders for the same page; see test/fixtures/README.md.
-    for ([_][]const u8{ "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm" }) |name| {
+    for ([_][]const u8{ "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm", "lzw_libtiff.bin" }) |name| {
         mod.addAnonymousImport(name, .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}", .{name})) });
     }
 

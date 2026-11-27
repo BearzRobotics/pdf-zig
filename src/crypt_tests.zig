@@ -102,3 +102,22 @@ test "AES-256 files follow /StmF and /StrF" {
     try testing.expectEqual(pdf.crypt.Method.none, doc.crypt.?.string_method);
     try testing.expectEqual(pdf.crypt.Method.aes256, doc.crypt.?.stream_method);
 }
+
+test "R2 with a password, R5, V4 RC4 and clear metadata, and object streams" {
+    const r2 = @embedFile("enc_rc4_40_pw.pdf");
+    // A wrong password must not open an R2 file.
+    try testing.expectError(error.PasswordRequired, pdf.Document.open(testing.allocator, r2, .{}));
+    try testing.expectError(error.PasswordRequired, pdf.Document.open(testing.allocator, r2, .{ .password = "wrong" }));
+    try check(r2, "pw");
+    try check(@embedFile("enc_aes_256_r5.pdf"), "");
+    try check(@embedFile("enc_aes_128_objstm.pdf"), "");
+    for ([_][]const u8{ @embedFile("enc_rc4_v4_clearmeta.pdf"), @embedFile("enc_aes_128_clearmeta.pdf") }) |bytes| {
+        try check(bytes, "");
+        // With /EncryptMetadata false the metadata stream is left as it is.
+        var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        try testing.expect(!doc.crypt.?.encrypt_metadata);
+        const metadata = doc.get(doc.catalog().?, "Metadata").?.stream;
+        try testing.expectEqualStrings("<x:xmpmeta>clear metadata</x:xmpmeta>", try doc.streamData(metadata));
+    }
+}

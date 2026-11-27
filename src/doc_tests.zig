@@ -67,6 +67,22 @@ test "streams: direct length, wrong length, indirect length" {
     try testing.expectEqualStrings("loop", doc.getObject(7).stream.data);
 }
 
+test "streams: a correct /Length keeps data that contains endstream" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [] /Count 0 >>",
+        "<< /Length 18 >>\nstream\nbefore endstream x\nendstream",
+        "<< /Length 5 0 R >>\nstream\nbefore endstream x\nendstream",
+        "18",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expectEqualStrings("before endstream x", doc.getObject(3).stream.data);
+    try testing.expectEqualStrings("before endstream x", doc.getObject(4).stream.data);
+}
+
 test "incremental update: the newest version of an object wins" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -100,6 +116,9 @@ test "a loop in the /Prev chain ends" {
     var doc = try pdf.Document.open(testing.allocator, patched, .{});
     defer doc.deinit();
     try testing.expect(doc.catalog() != null);
+    // The loop is noticed. Without that, the chain would run into
+    // max_sections and the file would be repaired.
+    try testing.expect(!doc.repaired);
 }
 
 test "cross-reference stream and object stream" {
@@ -898,4 +917,211 @@ test "filter names: canonical in the result, damage not skipped, /F not a filter
     try testing.expectEqualStrings("DCTDecode", image.rest[0].name);
     try testing.expectError(error.UnsupportedFilter, doc.decodeStream(doc.getObject(5).stream));
     try testing.expectEqualStrings("ab", try doc.streamData(doc.getObject(6).stream));
+}
+
+test "a wrong offset found on first use repairs the file then" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try arena.allocator().dupe(u8, try build(arena.allocator(), &simple));
+    // Object 3, which opening does not read.
+    const table = std.mem.lastIndexOf(u8, bytes, "xref\n0 4\n").? + "xref\n0 4\n".len;
+    @memcpy(bytes[table + 3 * 20 ..][0..10], "0000000011");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expect(!doc.repaired);
+    try testing.expectEqualStrings("Page", doc.getName(doc.getObject(3).asDict().?, "Type").?);
+    try testing.expect(doc.repaired);
+}
+
+test "objects that need themselves to be read end as null or by endstream" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [] /Count 0 >>",
+        // Its own length, and two that are each other's.
+        "<< /Length 3 0 R >>\nstream\nself\nendstream",
+        "<< /Length 5 0 R >>\nstream\none\nendstream",
+        "<< /Length 4 0 R >>\nstream\ntwo\nendstream",
+        "<< /Type /ObjStm /N 1 /First 4 /Length 6 0 R >>\nstream\n7 0 5\nendstream",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expectEqualStrings("self", doc.getObject(3).stream.data);
+    try testing.expectEqualStrings("one", doc.getObject(4).stream.data);
+    try testing.expectEqualStrings("two", doc.getObject(5).stream.data);
+    try testing.expect(doc.getObject(6) == .stream);
+}
+
+test "a page box is clipped to the media box on every side" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try build(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] >>",
+        "<< /Type /Page /MediaBox [10 20 300 400] /CropBox [-50 -60 5000 5000] >>",
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const crop = pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?.crop_box;
+    try testing.expectEqual(pdf.pages.Rect{ .x0 = 10, .y0 = 20, .x1 = 300, .y1 = 400 }, crop);
+}
+
+test "limits: max_objects, max_sections and the reader's size limit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try build(a, &simple);
+    {
+        var doc = try pdf.Document.open(testing.allocator, bytes, .{ .max_objects = 3 });
+        defer doc.deinit();
+        try testing.expect(doc.xref.get(3) == null);
+        try testing.expect(doc.getObject(3) == .null);
+    }
+    {
+        // A /Prev chain longer than max_sections is given up and the file scanned.
+        const at = std.mem.lastIndexOf(u8, bytes, "xref\n0 4").?;
+        var chained: std.ArrayList(u8) = .empty;
+        try chained.appendSlice(a, bytes);
+        var previous = at;
+        for (0..5) |_| {
+            const here = chained.items.len;
+            try chained.print(a, "xref\n0 0\ntrailer\n<< /Root 1 0 R /Prev {d} >>\nstartxref\n{d}\n%%EOF\n", .{ previous, here });
+            previous = here;
+        }
+        var short = try pdf.Document.open(testing.allocator, chained.items, .{ .max_sections = 3 });
+        defer short.deinit();
+        try testing.expect(short.repaired);
+        var enough = try pdf.Document.open(testing.allocator, chained.items, .{ .max_sections = 6 });
+        defer enough.deinit();
+        try testing.expect(!enough.repaired);
+    }
+    var reader: std.Io.Reader = .fixed(bytes);
+    try testing.expectError(error.InputTooLarge, pdf.Document.openReader(testing.allocator, &reader, .{ .max_bytes = 20 }));
+}
+
+test "cross-reference stream with /Index, several subsections and a Flate predictor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "%PDF-1.5\n");
+    var offsets: [10]usize = @splat(0);
+    for ([_]struct { usize, []const u8 }{ .{ 1, "<< /Type /Catalog /Pages 2 0 R >>" }, .{ 2, "<< /Type /Pages /Kids [] >>" }, .{ 8, "(eight)" } }) |b| {
+        offsets[b[0]] = out.items.len;
+        try out.print(a, "{d} 0 obj\n{s}\nendobj\n", .{ b[0], b[1] });
+    }
+    const here = out.items.len;
+    // Rows of W [1 2 1] for objects 1, 2, 8 and 9, as PNG "Up" differences.
+    var rows: [4][4]u8 = undefined;
+    for ([_]usize{ offsets[1], offsets[2], offsets[8], here }, 0..) |at, i| rows[i] = .{ 1, @intCast(at >> 8), @intCast(at & 255), 0 };
+    var plain: std.ArrayList(u8) = .empty;
+    var above: [4]u8 = @splat(0);
+    for (rows) |row| {
+        try plain.append(a, 2);
+        for (row, above) |byte, up| try plain.append(a, byte -% up);
+        above = row;
+    }
+    // A zlib stream of one stored block.
+    var packed_rows: std.ArrayList(u8) = .empty;
+    const n: u16 = @intCast(plain.items.len);
+    try packed_rows.appendSlice(a, &.{ 0x78, 0x01, 0x01, @intCast(n & 255), @intCast(n >> 8), @intCast(~n & 255), @intCast(~n >> 8) });
+    try packed_rows.appendSlice(a, plain.items);
+    try out.print(a, "9 0 obj\n<< /Type /XRef /Size 10 /Index [1 2 8 2] /W [1 2 1] /Root 1 0 R /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 4 >> /Length {d} >>\nstream\n", .{packed_rows.items.len});
+    try out.appendSlice(a, packed_rows.items);
+    try out.print(a, "\nendstream\nendobj\nstartxref\n{d}\n%%EOF\n", .{here});
+    var doc = try pdf.Document.open(testing.allocator, out.items, .{});
+    defer doc.deinit();
+    try testing.expectEqualStrings("eight", doc.getObject(8).string);
+    try testing.expectEqualStrings("Pages", doc.getName(doc.getObject(2).asDict().?, "Type").?);
+    try testing.expect(!doc.repaired);
+    try testing.expect(doc.xref.get(3) == null);
+}
+
+test "an object stream with a wrong index in the table is searched by number" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try looseFile(arena.allocator(), "4 0 obj\n<< /Type /ObjStm /N 2 /First 8 /Length 19 >>\nstream\n5 0 6 4 (a) (second)\nendstream\nendobj\n");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try doc.xref.put(doc.arena.allocator(), 6, .{ .compressed = .{ .stream_num = 4, .index = 0 } });
+    try testing.expectEqualStrings("second", doc.getObject(6).string);
+}
+
+/// Replaces a few tokens of `file` with ones that damage rarely produces by
+/// flipping bytes: huge and negative numbers, other references, keywords out of
+/// place, deep nesting.
+fn mutateTokens(a: Allocator, rnd: std.Random, file: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, file);
+    const nasty = [_][]const u8{
+        "-1",                   "0",                          "4294967295",       "4294967296", "9223372036854775807",
+        "-9223372036854775808", "99999999999999999999999999", "1e9",              "-0.0",       "null",
+        "1 0 R",                "2 0 R",                      "3 0 R",            "4 0 R",      "999999 0 R",
+        "<< >>",                "[]",                         "[[[[[[[[[[[[[[[[", "(",          "<<",
+        "obj",                  "endobj",                     "stream",           "endstream",  "xref",
+        "trailer",              "/Length",                    "/Kids",            "/Root",      "/Type /ObjStm",
+    };
+    for (0..rnd.intRangeAtMost(usize, 1, 4)) |_| {
+        if (out.items.len < 2) break;
+        // A run of characters between white space.
+        var start = rnd.uintLessThan(usize, out.items.len);
+        while (start > 0 and !std.ascii.isWhitespace(out.items[start - 1])) start -= 1;
+        var end = start;
+        while (end < out.items.len and !std.ascii.isWhitespace(out.items[end])) end += 1;
+        try out.replaceRange(a, start, end - start, nasty[rnd.uintLessThan(usize, nasty.len)]);
+    }
+    return out.items;
+}
+
+test "token-level mutations: opening and rendering every page never crashes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const classic = try build(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R /AcroForm << /Fields [9 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] /Rotate 90 >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [9 0 R] /Resources << /Font << /F 5 0 R >> /XObject << /X 6 0 R >> /ColorSpace << /C [/Indexed /DeviceRGB 1 <000000FFFFFF>] >> /Pattern << /P 7 0 R >> >> >>",
+        "<< /Length 80 >>\nstream\nq /C cs 1 sc 0 0 9 9 re f /Pattern cs /P scn 0 0 9 9 re f BT /F 9 Tf (hi) Tj ET /X Do Q\nendstream",
+        "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /W [1 [500 600] 5 9 700] >>] /ToUnicode 10 0 R >>",
+        "<< /Subtype /Form /BBox [0 0 9 9] /Matrix [1 0 0 1 0 0] /Length 14 >>\nstream\n0 0 1 1 re f\n\nendstream",
+        "<< /PatternType 1 /PaintType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Length 12 >>\nstream\n0 0 1 1 re f\nendstream",
+        "<< /First 9 0 R /Last 9 0 R /Count 1 >>",
+        "<< /Subtype /Widget /FT /Tx /T (f) /Title (t) /Parent 8 0 R /Rect [0 0 50 20] /DA (/F 9 Tf 0 g) /V (v) >>",
+        "<< /Length 60 >>\nstream\n1 beginbfrange <0000> <00FF> <0041> endbfrange endcmap     \nendstream",
+    });
+    const sources = [_][]const u8{ classic, @embedFile("enc_aes_128_objstm.pdf"), @embedFile("enc_aes_256_r5.pdf") };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rnd = prng.random();
+    // Small limits keep a mutation that makes real work from taking long.
+    const options: pdf.document.Options = .{ .max_stream_bytes = 1 << 20, .max_retained_bytes = 8 << 20, .max_objects = 10_000 };
+    for (0..1500) |i| {
+        var round = std.heap.ArenaAllocator.init(testing.allocator);
+        defer round.deinit();
+        const damaged = try mutateTokens(round.allocator(), rnd, sources[i % sources.len]);
+        var doc = pdf.Document.open(testing.allocator, damaged, options) catch continue;
+        defer doc.deinit();
+        const list = try pdf.pages.PageList.build(&doc);
+        var rend = pdf.Renderer.init(&doc, .{ .max_ops = 100_000, .max_content_bytes = 1 << 20, .max_commands = 100_000 });
+        defer rend.deinit();
+        for (0..@min(list.entries.len, 4)) |n| {
+            const page = pdf.pages.page(&doc, list, n) orelse continue;
+            var dl = rend.render(testing.allocator, page) catch continue;
+            defer dl.deinit();
+            var lay = try pdf.text.layout(testing.allocator, &dl);
+            lay.deinit(testing.allocator);
+            _ = try pdf.annot.list(round.allocator(), &doc, page);
+        }
+        _ = try pdf.outline.read(round.allocator(), &doc, list);
+        const fields = try pdf.form.fields(round.allocator(), &doc, list);
+        // And editing what was read.
+        var upd = pdf.write.Update.init(testing.allocator, &doc) catch continue;
+        defer upd.deinit();
+        if (list.entries.len > 0) _ = pdf.annot.addNote(&upd, pdf.pages.page(&doc, list, 0).?, 1, 1, .{}) catch {};
+        for (fields) |f| pdf.form.setText(&upd, f, "x") catch {};
+        if (list.entries.len > 0) _ = pdf.outline.add(&upd, list.entries[0].num, "x", null) catch {};
+        var written: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer written.deinit();
+        upd.write(testing.allocator, &written.writer) catch {};
+    }
 }

@@ -597,3 +597,23 @@ test "very long reals are read, not rejected" {
         try std.testing.expect(p.atEnd());
     }
 }
+
+test "random token soup never crashes the parser" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pieces = [_][]const u8{ "<<", ">>", "[", "]", "(", ")", "<", ">", "/", "#", "%", "R", "0", "-", "+", ".", "9999999999999999999999", "true", "null", "obj", " ", "\n", "\\", "a", "\x00", "\xff" };
+    var prng = std.Random.DefaultPrng.init(12);
+    const rnd = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..20_000) |_| {
+        buf.clearRetainingCapacity();
+        for (0..rnd.uintLessThan(usize, 24)) |_| try buf.appendSlice(a, pieces[rnd.uintLessThan(usize, pieces.len)]);
+        var p = Parser.init(a, buf.items, 0);
+        while (!p.atEnd()) {
+            const before = p.pos;
+            _ = p.parseObject() catch {};
+            if (p.pos <= before) p.pos = before + 1;
+        }
+    }
+}
