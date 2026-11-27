@@ -216,13 +216,66 @@ pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) Edit
     return item;
 }
 
+/// Where an item sits in the tree, found by walking down from the root.
+const Location = struct {
+    /// The item or root that has the item as a child.
+    parent: object.Ref,
+    prev: ?object.Ref,
+    item: object.Ref,
+    next: ?object.Ref,
+};
+
+/// Whether `d` can be an outline item: it has a title and is not typed as one
+/// of the other things a damaged or hostile `/First` or `/Next` might name.
+fn isItem(d: Dict) bool {
+    if (d.get("Type")) |t| if (t.asName()) |name| {
+        for ([_][]const u8{ "Catalog", "Pages", "Page", "Annot" }) |other| {
+            if (std.mem.eql(u8, name, other)) return false;
+        }
+    };
+    return d.has("Title");
+}
+
+/// The item that `o` refers to, if it is one that has not been met before.
+fn itemAt(upd: *write.Update, o: ?Object, seen: *std.AutoHashMapUnmanaged(u32, void)) Allocator.Error!?object.Ref {
+    const ref = refOf(o) orelse return null;
+    if (seen.contains(ref.num) or seen.count() >= max_items) return null;
+    const d = upd.get(ref.num).asDict() orelse return null;
+    if (!isItem(d)) return null;
+    try seen.put(upd.allocator(), ref.num, {});
+    return ref;
+}
+
+/// Finds item `num` among the descendants of `parent`, as `read` would list them.
+fn locate(upd: *write.Update, parent: object.Ref, num: u32, depth: usize, seen: *std.AutoHashMapUnmanaged(u32, void)) Allocator.Error!?Location {
+    if (depth >= max_depth) return null;
+    const pd = upd.get(parent.num).asDict() orelse return null;
+    var prev: ?object.Ref = null;
+    var cursor = try itemAt(upd, pd.get("First"), seen);
+    while (cursor) |item| {
+        const d = upd.get(item.num).asDict() orelse break;
+        if (item.num == num) {
+            // Looked up before the walk goes on, so a /Next that loops back is not taken.
+            return .{ .parent = parent, .prev = prev, .item = item, .next = try itemAt(upd, d.get("Next"), seen) };
+        }
+        if (try locate(upd, item, num, depth + 1, seen)) |found| return found;
+        prev = item;
+        cursor = try itemAt(upd, d.get("Next"), seen);
+    }
+    return null;
+}
+
 /// Removes outline item `num` and everything below it from the tree.
 pub fn remove(upd: *write.Update, num: u32) EditError!void {
     const a = upd.allocator();
-    const d = upd.get(num).asDict() orelse return error.NoSuchItem;
-    const parent_ref = refOf(d.get("Parent")) orelse return error.NoSuchItem;
-    const prev = refOf(d.get("Prev"));
-    const next = refOf(d.get("Next"));
+    const root_ref = refOf(upd.doc.trailer.get("Root")) orelse return error.NoCatalog;
+    const cat = upd.get(root_ref.num).asDict() orelse return error.NoCatalog;
+    const outlines = refOf(cat.get("Outlines")) orelse return error.NoSuchItem;
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    try seen.put(a, outlines.num, {});
+    const at = try locate(upd, outlines, num, 0, &seen) orelse return error.NoSuchItem;
+    const prev = at.prev;
+    const next = at.next;
 
     if (prev) |p| {
         const pd = upd.get(p.num).asDict() orelse return error.NoSuchItem;
@@ -232,10 +285,10 @@ pub fn remove(upd: *write.Update, num: u32) EditError!void {
         const nd = upd.get(n.num).asDict() orelse return error.NoSuchItem;
         try upd.set(n.num, .{ .dict = if (prev) |p| try write.dictWith(a, nd, "Prev", .{ .ref = p }) else try write.dictWithout(a, nd, "Prev") });
     }
-    var parent = upd.get(parent_ref.num).asDict() orelse return error.NoSuchItem;
+    var parent = upd.get(at.parent.num).asDict() orelse return error.NoSuchItem;
     if (prev == null) parent = if (next) |n| try write.dictWith(a, parent, "First", .{ .ref = n }) else try write.dictWithout(a, parent, "First");
     if (next == null) parent = if (prev) |p| try write.dictWith(a, parent, "Last", .{ .ref = p }) else try write.dictWithout(a, parent, "Last");
-    try upd.set(parent_ref.num, .{ .dict = try recount(upd, parent) });
+    try upd.set(at.parent.num, .{ .dict = try recount(upd, parent) });
 }
 
 /// `d` with `/Count` set from its children: the number of visible descendants
@@ -395,4 +448,54 @@ test "bookmarks can be added to a document without an outline, and removed" {
     items = try read(aa, &doc5, pl5);
     try testing.expectEqual(@as(usize, 1), items.len);
     try testing.expectEqualStrings("three", items[0].title);
+}
+
+test "remove refuses objects that are not items of the outline" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // A crafted /First names the page. Object 6 looks like an item but is not in the tree.
+    const bytes = try tests.buildFile(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+        "<< /First 3 0 R /Last 3 0 R >>",
+        "<< /T (a form field) /Parent 4 0 R >>",
+        "<< /Title (stray) /Parent 2 0 R >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 0, 99 }) |num| try testing.expectError(error.NoSuchItem, remove(&upd, num));
+    try testing.expectEqual(@as(usize, 0), upd.changed.count());
+}
+
+test "remove takes the parent and the previous item from the tree, not from the item" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // Items 5, 6, 7. Item 6 lies about its /Prev and /Parent.
+    const bytes = try tests.buildFile(aa, &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+        "<< /Type /Outlines /First 5 0 R /Last 7 0 R /Count 3 >>",
+        "<< /Title (one) /Parent 4 0 R /Next 6 0 R >>",
+        "<< /Title (two) /Parent 2 0 R /Prev 3 0 R /Next 7 0 R >>",
+        "<< /Title (three) /Parent 4 0 R /Prev 6 0 R >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try remove(&upd, 6);
+    try testing.expect(!upd.changed.contains(2));
+    try testing.expect(!upd.changed.contains(3));
+    try testing.expectEqual(@as(u32, 7), upd.get(5).asDict().?.get("Next").?.ref.num);
+    try testing.expectEqual(@as(u32, 5), upd.get(7).asDict().?.get("Prev").?.ref.num);
+    try testing.expectEqual(@as(?i64, 2), upd.get(4).asDict().?.get("Count").?.asInt());
+    // It is gone: a second call must not find it.
+    try testing.expectError(error.NoSuchItem, remove(&upd, 6));
 }

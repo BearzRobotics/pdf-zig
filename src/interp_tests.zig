@@ -74,6 +74,22 @@ fn expectRefs(doc: *pdf.Document, o: pdf.Object) !void {
     }
 }
 
+/// A file from object bodies (objects 1, 2, ...; object 1 is the catalog).
+pub fn buildFile(a: Allocator, bodies: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "%PDF-1.7\n");
+    const offsets = try a.alloc(usize, bodies.len);
+    for (bodies, 0..) |b, i| {
+        offsets[i] = out.items.len;
+        try out.print(a, "{d} 0 obj\n{s}\nendobj\n", .{ i + 1, b });
+    }
+    const xref_at = out.items.len;
+    try out.print(a, "xref\n0 {d}\n0000000000 65535 f \n", .{bodies.len + 1});
+    for (offsets) |o| try out.print(a, "{d:0>10} 00000 n \n", .{o});
+    try out.print(a, "trailer\n<< /Size {d} /Root 1 0 R >>\nstartxref\n{d}\n%%EOF\n", .{ bodies.len + 1, xref_at });
+    return out.items;
+}
+
 pub const Rendered = struct {
     doc: pdf.Document,
     rend: pdf.Renderer,
