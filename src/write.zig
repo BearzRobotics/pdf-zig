@@ -260,6 +260,22 @@ pub const Update = struct {
         return .{ .num = num };
     }
 
+    /// The generation object `num` has in the file. New objects and objects
+    /// stored in object streams have generation 0.
+    fn generation(self: *const Update, num: u32) u16 {
+        const entry = self.doc.xref.get(num) orelse return 0;
+        return switch (entry) {
+            .in_use => |e| e.gen,
+            .free, .compressed => 0,
+        };
+    }
+
+    /// The reference to object `num`. Use this to refer to an existing object:
+    /// a reference with the wrong generation means null (7.3.10).
+    pub fn refTo(self: *const Update, num: u32) Ref {
+        return .{ .num = num, .gen = self.generation(num) };
+    }
+
     /// Replaces the value of existing object `num`.
     pub fn set(self: *Update, num: u32, o: Object) Allocator.Error!void {
         try self.changed.put(self.allocator(), num, o);
@@ -292,7 +308,7 @@ pub const Update = struct {
 
         for (nums, 0..) |num, i| {
             offsets[i] = file_len + sw.end;
-            sw.print("{d} 0 obj\n", .{num}) catch return error.WriteFailed;
+            sw.print("{d} {d} obj\n", .{ num, self.generation(num) }) catch return error.WriteFailed;
             writeObject(sw, self.changed.get(num).?) catch return error.WriteFailed;
             sw.writeAll("\nendobj\n") catch return error.WriteFailed;
         }
@@ -324,7 +340,7 @@ pub const Update = struct {
             var j = i + 1;
             while (j < nums.len and nums[j] == nums[j - 1] + 1) j += 1;
             sw.print("{d} {d}\n", .{ nums[i], j - i }) catch return error.WriteFailed;
-            for (i..j) |k| sw.print("{d:0>10} 00000 n \n", .{offsets[k]}) catch return error.WriteFailed;
+            for (i..j) |k| sw.print("{d:0>10} {d:0>5} n \n", .{ offsets[k], self.generation(nums[k]) }) catch return error.WriteFailed;
             i = j;
         }
         var entries: std.ArrayList(Entry) = .empty;
@@ -361,7 +377,8 @@ pub const Update = struct {
             try index.append(a, .{ .integer = @intCast(j - i) });
             for (i..j) |k| {
                 const off: u32 = @intCast(all_offsets.items[k]);
-                try data.appendSlice(a, &.{ 1, @intCast(off >> 24), @intCast((off >> 16) & 0xFF), @intCast((off >> 8) & 0xFF), @intCast(off & 0xFF), 0, 0 });
+                const gen = self.generation(all_nums.items[k]);
+                try data.appendSlice(a, &.{ 1, @intCast(off >> 24), @intCast((off >> 16) & 0xFF), @intCast((off >> 8) & 0xFF), @intCast(off & 0xFF), @intCast(gen >> 8), @intCast(gen & 0xFF) });
             }
             i = j;
         }
@@ -510,4 +527,43 @@ test "encrypted and repaired files are refused" {
     defer doc.deinit();
     try testing.expect(doc.repaired);
     try testing.expectError(error.Repaired, Update.init(a, &doc));
+}
+
+test "rewritten objects keep their generation, in tables and in new references" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // Catalog `1 2`, page `3 1`.
+    var file: std.ArrayList(u8) = .empty;
+    try file.appendSlice(aa, "%PDF-1.7\n");
+    const bodies = [_][]const u8{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 1 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+    };
+    const gens = [_]u16{ 2, 0, 1 };
+    var offs: [bodies.len]usize = undefined;
+    for (bodies, gens, 0..) |b, g, i| {
+        offs[i] = file.items.len;
+        try file.print(aa, "{d} {d} obj\n{s}\nendobj\n", .{ i + 1, g, b });
+    }
+    const at = file.items.len;
+    try file.appendSlice(aa, "xref\n0 4\n0000000000 65535 f \n");
+    for (offs, gens) |o, g| try file.print(aa, "{d:0>10} {d:0>5} n \n", .{ o, g });
+    try file.print(aa, "trailer\n<< /Size 4 /Root 1 2 R >>\nstartxref\n{d}\n%%EOF\n", .{at});
+    try tests.expectSoundFile(file.items);
+
+    var doc = try document.Document.open(a, file.items, .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    // Rewrites the catalog (no outline yet) and refers to the page in a new destination.
+    _ = try @import("outline.zig").add(&upd, 3, "here", null);
+    try upd.set(3, upd.get(3));
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try upd.write(a, &out.writer);
+    try tests.expectSoundFile(out.written());
+    try testing.expect(std.mem.indexOf(u8, out.written()[file.items.len..], "[3 1 R /XYZ") != null);
 }

@@ -171,7 +171,7 @@ pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) Edit
     var cat = upd.get(root_ref.num).asDict() orelse return error.NoCatalog;
 
     const dest = try a.dupe(Object, &.{
-        .{ .ref = .{ .num = page_num } },
+        .{ .ref = upd.refTo(page_num) },
         .{ .name = "XYZ" },
         .null,
         if (top) |t| Object{ .real = t } else .null,

@@ -53,8 +53,25 @@ pub fn expectSoundFile(bytes: []const u8) !void {
     var list: std.ArrayList(u32) = .empty;
     defer list.deinit(testing.allocator);
     while (nums.next()) |k| try list.append(testing.allocator, k.*);
-    for (list.items) |n| _ = doc.getObject(n);
+    try expectRefs(&doc, .{ .dict = doc.trailer });
+    for (list.items) |n| try expectRefs(&doc, doc.getObject(n));
     try testing.expect(!doc.repaired);
+}
+
+/// Every reference to an object in use carries that object's generation; with
+/// any other generation it means null to a conforming reader (7.3.10).
+fn expectRefs(doc: *pdf.Document, o: pdf.Object) !void {
+    switch (o) {
+        .ref => |r| if (doc.xref.get(r.num)) |e| switch (e) {
+            .free => {},
+            .in_use => |u| try testing.expectEqual(u.gen, r.gen),
+            .compressed => try testing.expectEqual(@as(u16, 0), r.gen),
+        },
+        .array => |arr| for (arr) |item| try expectRefs(doc, item),
+        .dict => |d| for (d.entries) |e| try expectRefs(doc, e.value),
+        .stream => |s| try expectRefs(doc, .{ .dict = s.dict }),
+        else => {},
+    }
 }
 
 pub const Rendered = struct {
