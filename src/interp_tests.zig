@@ -621,3 +621,71 @@ test "the renderer keeps nothing of the allocator a page was rendered with" {
     defer dl.deinit();
     try testing.expectEqual(@as(usize, 200), dl.commands.len);
 }
+
+test "repeated operators and re-rendering do not grow the document" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A hex stream of 50,000 bytes, used as a calculator program, a ToUnicode
+    // map and a palette.
+    const hex = try a.alloc(u8, 100_000);
+    for (hex, 0..) |*c, i| c.* = if (i % 2 == 0) '2' else '0';
+    const program = try std.fmt.allocPrint(a, "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Filter /AHx /Length {d} >>\nstream\n{s}7B7D>\nendstream", .{ hex.len + 5, hex });
+    const blob = try std.fmt.allocPrint(a, "<< /Filter /AHx /Length {d} >>\nstream\n{s}>\nendstream", .{ hex.len + 1, hex });
+    const image = "<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed /DeviceGray 1 6 0 R] /Length 1 >>\nstream\n\x00\nendstream";
+    const resources = "/ColorSpace << /Ref 7 0 R /Direct [/Separation /x /DeviceGray 5 0 R] >> " ++
+        "/Font << /D << /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >> >> " ++
+        "/Shading << /Sh << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] >> >> >> " ++
+        "/XObject << /Im 8 0 R >>";
+    const once = "/Ref cs /Direct cs /D 1 Tf /Sh sh /Im Do ";
+    const many: [300][]const u8 = @splat(once);
+    const bytes = try page(a, try std.mem.concat(a, u8, &many), resources, &.{ program, blob, "[/Separation /x /DeviceGray 5 0 R]", image }, "");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    const p = pdf.pages.page(&doc, pl, 0).?;
+    const before = doc.arena.queryCapacity();
+    var after_first: usize = 0;
+    for (0..10) |i| {
+        var rend = pdf.Renderer.init(&doc, .{});
+        defer rend.deinit();
+        var dl = try rend.render(testing.allocator, p);
+        dl.deinit();
+        if (i == 0) after_first = doc.arena.queryCapacity();
+    }
+    try testing.expect(after_first - before < 2 << 20);
+    try testing.expect(doc.arena.queryCapacity() - after_first < 64 << 10);
+}
+
+test "a colour space that names a resource, or sits in an inline image, is not shared" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The same indirect array, whose base is a name each form defines differently.
+    const form = "<< /Subtype /Form /BBox [0 0 9 9] /Resources << /ColorSpace << /Base /{s} /I 7 0 R >> >> /Length 25 >>\nstream\n/I cs 0 sc 0 0 1 1 re f \n\nendstream";
+    const bytes = try page(a, "/A Do /B Do BI /W 1 /H 1 /BPC 8 /CS [/I /G 0 <FF>] ID x\nEI BI /W 1 /H 1 /BPC 8 /CS [/I /RGB 0 <FF0000>] ID x\nEI", "/XObject << /A 5 0 R /B 6 0 R >>", &.{
+        try std.fmt.allocPrint(a, form, .{"DeviceGray"}),
+        try std.fmt.allocPrint(a, form, .{"DeviceRGB"}),
+        "[/Indexed /Base 0 <FF0000>]",
+    }, "");
+    const r = try render(bytes);
+    defer done(r);
+    var fills: [2]pdf.color.Rgb = undefined;
+    var bases: [2]std.meta.Tag(pdf.color.Space) = undefined;
+    var nf: usize = 0;
+    var ni: usize = 0;
+    for (r.list.commands) |c| switch (c) {
+        .fill => |f| {
+            fills[nf] = f.paint.color;
+            nf += 1;
+        },
+        .image => |im| {
+            bases[ni] = std.meta.activeTag(im.space.indexed.base.*);
+            ni += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(f32, 1), fills[0].g); // gray 1.0: white
+    try testing.expectEqual(@as(f32, 0), fills[1].g); // red
+    try testing.expect(bases[0] == .gray and bases[1] == .rgb);
+}

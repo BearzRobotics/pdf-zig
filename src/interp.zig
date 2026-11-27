@@ -47,11 +47,10 @@ pub const Options = struct {
 
 pub const Error = Allocator.Error || doc_mod.Error || error{LimitExceeded};
 
-/// Renders pages of one document. Fonts are cached across pages.
+/// Renders pages of one document. Fonts are cached in the document.
 pub const Renderer = struct {
     doc: *Document,
     options: Options,
-    fonts: std.AutoHashMapUnmanaged(u32, *const font_mod.Font) = .empty,
     /// Object numbers of optional content groups that are off in the default configuration.
     ocg_off: std.AutoHashMapUnmanaged(u32, void) = .empty,
     ocg_loaded: bool = false,
@@ -164,17 +163,19 @@ pub const Renderer = struct {
         return !visible;
     }
 
+    /// `dict_obj` must be part of the document (from a resource dictionary).
     fn font(self: *Renderer, dict_obj: Object) Allocator.Error!?*const font_mod.Font {
         const doc = self.doc;
         const num: u32 = if (dict_obj == .ref) dict_obj.ref.num else 0;
-        if (num != 0) if (self.fonts.get(num)) |f| return f;
+        const key = Document.cacheKey(dict_obj, true);
+        if (key) |k| if (doc.fonts.get(k)) |f| return f;
         const d = doc.resolve(dict_obj).asDict() orelse return null;
         const a = doc.arena.allocator();
         const f = try a.create(font_mod.Font);
         const oom_before = doc.oom_events;
         f.* = try font_mod.Font.load(doc, d, num);
         try doc.checkMemory(oom_before);
-        if (num != 0) try self.fonts.put(a, num, f);
+        if (key) |k| try doc.fonts.put(a, k, f);
         return f;
     }
 };
@@ -756,7 +757,7 @@ const Run = struct {
         const sd = obj.asDict() orelse return null;
         const st = doc_.getInt(sd, "ShadingType") orelse return null;
         if (st != 2 and st != 3) return null;
-        const space = try color.parse(doc_, sd.get("ColorSpace") orelse return null, self.resources, 0);
+        const space = try color.parseOwned(doc_, sd.get("ColorSpace") orelse return null, self.resources, 0);
         const coords_arr = doc_.getArray(sd, "Coords") orelse return null;
         const need: usize = if (st == 2) 4 else 6;
         if (coords_arr.len < need) return null;
@@ -777,13 +778,13 @@ const Run = struct {
         var funcs: std.ArrayList(function.Function) = .empty;
         if (fobj) |fo| switch (fo) {
             .array => |arr| for (arr) |item| {
-                const fn_ = function.load(doc_, item, 0) catch |err| switch (err) {
+                const fn_ = function.loadKept(doc_, item, true) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.BadFunction => continue,
                 };
                 try funcs.append(self.a, fn_);
             },
-            else => if (function.load(doc_, fo, 0)) |f1| try funcs.append(self.a, f1) else |err| switch (err) {
+            else => if (function.loadKept(doc_, sd.get("Function").?, true)) |f1| try funcs.append(self.a, f1) else |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.BadFunction => {},
             },
@@ -940,13 +941,13 @@ const Run = struct {
         const num_id: u32 = if (raw == .ref) raw.ref.num else 0;
         const sub = self.doc().getName(st.dict, "Subtype") orelse "";
         if (std.mem.eql(u8, sub, "Image")) {
-            try self.imageOp(st, num_id);
+            try self.imageOp(st, num_id, false);
         } else if (std.mem.eql(u8, sub, "Form")) {
             try self.formOp(st, num_id);
         }
     }
 
-    fn imageOp(self: *Run, st: object.Stream, num_id: u32) Error!void {
+    fn imageOp(self: *Run, st: object.Stream, num_id: u32, inline_image: bool) Error!void {
         if (!self.r.options.graphics) return;
         const doc_ = self.doc();
         const w = doc_.getInt(st.dict, "Width") orelse doc_.getInt(st.dict, "W") orelse return;
@@ -954,7 +955,8 @@ const Run = struct {
         if (w <= 0 or h <= 0 or w > 1 << 20 or h > 1 << 20) return;
         const is_mask = if (doc_.get(st.dict, "ImageMask")) |m| (m == .boolean and m.boolean) else false;
         const space: color.Space = if (is_mask) .gray else if (st.dict.get("ColorSpace") orelse st.dict.get("CS")) |cs|
-            try color.parse(doc_, cs, self.resources, 0)
+            // An inline image's dictionary is a copy made for this list.
+            if (inline_image) try color.parse(doc_, cs, self.resources, 0) else try color.parseOwned(doc_, cs, self.resources, 0)
         else
             .gray;
         try self.emit(.{ .image = .{
@@ -976,7 +978,7 @@ const Run = struct {
         // The scanner's strings and the data live in scratch memory that is
         // reset when the page is done; the display list keeps its own copy.
         const dict = try object.dupeDict(self.a, im.dict);
-        try self.imageOp(.{ .dict = dict, .data = try self.a.dupe(u8, im.data) }, 0);
+        try self.imageOp(.{ .dict = dict, .data = try self.a.dupe(u8, im.data) }, 0, true);
     }
 
     fn formOp(self: *Run, st: object.Stream, num_id: u32) Error!void {

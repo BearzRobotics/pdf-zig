@@ -11,6 +11,9 @@ const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
 const filters = @import("filters.zig");
 const crypt = @import("crypt.zig");
+const color = @import("color.zig");
+const function = @import("function.zig");
+const font = @import("font.zig");
 const Object = object.Object;
 const Dict = object.Dict;
 const Ref = object.Ref;
@@ -105,6 +108,11 @@ pub const Document = struct {
     failed_bytes: usize = 0,
     /// The last search for `endstream`: nothing from `from` up to `at`.
     endstream_search: struct { from: usize = 1, at: usize = 0 } = .{},
+    /// Things parsed from the document that are used again and again, kept so
+    /// that using them does not grow the arena each time. See `cacheKey`.
+    color_spaces: std.AutoHashMapUnmanaged(usize, color.Space) = .empty,
+    functions: std.AutoHashMapUnmanaged(usize, function.Function) = .empty,
+    fonts: std.AutoHashMapUnmanaged(usize, *const font.Font) = .empty,
     /// How often an allocation has failed. Reading goes through functions that
     /// answer with a value, where a failure looks like a missing object.
     /// Nothing produced while this changed is cached, and the operations that
@@ -615,6 +623,20 @@ pub const Document = struct {
         return .{ .ends = ends, .same = same };
     }
 
+    /// The key under which something parsed from `o` may be cached, or null.
+    /// A reference stands for its object. A direct array or dictionary is known
+    /// by where it is, which only identifies it if it is part of the document
+    /// (`owned`): memory the caller will reuse must pass false.
+    pub fn cacheKey(o: Object, owned: bool) ?usize {
+        return switch (o) {
+            // Odd, so that it cannot be an address.
+            .ref => |r| (@as(usize, r.num) << 1) | 1,
+            .array => |items| if (owned and items.len > 0) @intFromPtr(items.ptr) else null,
+            .dict => |d| if (owned and d.entries.len > 0) @intFromPtr(d.entries.ptr) else null,
+            else => null,
+        };
+    }
+
     /// Follows references until a direct object (at most 32 hops).
     pub fn resolve(self: *Document, o: Object) Object {
         var cur = o;
@@ -715,6 +737,9 @@ pub const Document = struct {
         self.cache = .empty;
         self.objstms = .empty;
         self.objstm_objects = .empty;
+        self.color_spaces = .empty;
+        self.functions = .empty;
+        self.fonts = .empty;
         if (self.crypt) |c| if (c.encrypt_obj != 0) try self.cache.put(self.a(), c.encrypt_obj, .{ .dict = self.encrypt_dict });
     }
 
@@ -853,7 +878,7 @@ pub const Document = struct {
     pub fn rebuild(self: *Document) Error!void {
         // If repair fails, the document stays as it was. After a lack of memory
         // it can be tried again; other failures would only repeat.
-        const before = .{ .xref = self.xref, .cache = self.cache, .objstms = self.objstms, .objstm_objects = self.objstm_objects, .trailer = self.trailer, .base = self.base, .repaired = self.repaired, .crypt = self.crypt, .encrypt_dict = self.encrypt_dict };
+        const before = .{ .color_spaces = self.color_spaces, .functions = self.functions, .fonts = self.fonts, .xref = self.xref, .cache = self.cache, .objstms = self.objstms, .objstm_objects = self.objstm_objects, .trailer = self.trailer, .base = self.base, .repaired = self.repaired, .crypt = self.crypt, .encrypt_dict = self.encrypt_dict };
         const oom_before = self.oom_events;
         const outcome: Error!void = outcome: {
             self.rebuildTables() catch |err| break :outcome err;
@@ -862,6 +887,9 @@ pub const Document = struct {
         };
         outcome catch |err| {
             self.noteError(err);
+            self.color_spaces = before.color_spaces;
+            self.functions = before.functions;
+            self.fonts = before.fonts;
             self.xref = before.xref;
             self.cache = before.cache;
             self.objstms = before.objstms;

@@ -430,6 +430,17 @@ fn numArray(doc: *Document, o: ?Object) Allocator.Error![]const f64 {
 
 pub const LoadError = Allocator.Error || error{BadFunction};
 
+/// `load` for a function used again and again: one named by reference, or a
+/// direct dictionary that is part of the document (`owned`), is parsed once.
+pub fn loadKept(doc: *Document, obj: Object, owned: bool) LoadError!Function {
+    const key = Document.cacheKey(obj, owned) orelse return load(doc, obj, 0);
+    if (doc.functions.get(key)) |f| return f;
+    const oom_before = doc.oom_events;
+    const f = try load(doc, obj, 0);
+    if (doc.oom_events == oom_before) try doc.functions.put(doc.arena.allocator(), key, f);
+    return f;
+}
+
 /// Parses a function object (dictionary or stream), at most `depth` deep.
 pub fn load(doc: *Document, obj: Object, depth: u8) LoadError!Function {
     if (depth > 8) return error.BadFunction;

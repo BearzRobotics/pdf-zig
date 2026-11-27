@@ -198,19 +198,50 @@ pub const ParseError = Allocator.Error;
 
 /// Reads a colour space object. `resources` supplies `/ColorSpace` names.
 /// Unknown or damaged spaces become DeviceGray so that drawing can go on.
+/// `obj` may be temporary (an operand, an inline image's dictionary).
 pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseError!Space {
+    var named = false;
+    return parseCached(doc, obj, resources, depth, false, &named);
+}
+
+/// `parse` for an object that is part of the document (from its resources or
+/// a stream dictionary of its own), so that the result can be kept.
+pub fn parseOwned(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseError!Space {
+    var named = false;
+    return parseCached(doc, obj, resources, depth, true, &named);
+}
+
+/// Sets `named` if the result depends on `resources`; such a space is not kept.
+fn parseCached(doc: *Document, obj: Object, resources: ?Dict, depth: u8, owned: bool, named: *bool) ParseError!Space {
+    const key = if (obj == .ref or obj == .array) Document.cacheKey(obj, owned) else null;
+    if (key) |k| if (doc.color_spaces.get(k)) |space| return space;
+    const oom_before = doc.oom_events;
+    var depends = false;
+    // What a reference leads to is part of the document in any case.
+    const space = try parseNew(doc, obj, resources, depth, owned or obj == .ref, &depends);
+    if (depends) {
+        named.* = true;
+    } else if (key) |k| if (doc.oom_events == oom_before and depth <= 8) {
+        try doc.color_spaces.put(doc.arena.allocator(), k, space);
+    };
+    return space;
+}
+
+fn parseNew(doc: *Document, obj: Object, resources: ?Dict, depth: u8, owned: bool, named_out: *bool) ParseError!Space {
     if (depth > 8) return .gray;
     const a = doc.arena.allocator();
     const o = doc.resolve(obj);
     switch (o) {
         .name => |n| {
             if (byName(n)) |s| return s;
+            named_out.* = true;
             const res = resources orelse return .gray;
             const cs = doc.getDict(res, "ColorSpace") orelse return .gray;
             const named = cs.get(n) orelse return .gray;
             // A name that maps to itself would loop.
             if (named == .name and std.mem.eql(u8, named.name, n)) return .gray;
-            return parse(doc, named, resources, depth + 1);
+            // From a resource dictionary, so part of the document.
+            return parseCached(doc, named, resources, depth + 1, true, named_out);
         },
         .array => |arr| {
             if (arr.len == 0) return .gray;
@@ -250,7 +281,7 @@ pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseErro
             if (eq(u8, family, "Indexed") or eq(u8, family, "I")) {
                 if (arr.len < 4) return .gray;
                 const base = try a.create(Space);
-                base.* = try parse(doc, arr[1], resources, depth + 1);
+                base.* = try parseCached(doc, arr[1], resources, depth + 1, owned, named_out);
                 const hival: u32 = @intCast(std.math.clamp(doc.resolve(arr[2]).asInt() orelse 255, 0, 255));
                 const lk = doc.resolve(arr[3]);
                 const lookup: []const u8 = switch (lk) {
@@ -275,8 +306,8 @@ pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseErro
                     none = std.mem.eql(u8, doc.resolve(arr[1]).asName() orelse "", "None");
                 }
                 const alt = try a.create(Space);
-                alt.* = try parse(doc, arr[2], resources, depth + 1);
-                const f = function.load(doc, arr[3], 0) catch |err| switch (err) {
+                alt.* = try parseCached(doc, arr[2], resources, depth + 1, owned, named_out);
+                const f = function.loadKept(doc, arr[3], owned) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.BadFunction => null,
                 };
@@ -284,7 +315,7 @@ pub fn parse(doc: *Document, obj: Object, resources: ?Dict, depth: u8) ParseErro
             }
             if (eq(u8, family, "Pattern")) {
                 const under = try a.create(Space);
-                under.* = try parse(doc, arr[1], resources, depth + 1);
+                under.* = try parseCached(doc, arr[1], resources, depth + 1, owned, named_out);
                 return .{ .pattern = under };
             }
             return byName(family) orelse .gray;
