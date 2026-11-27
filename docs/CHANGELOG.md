@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-11-27)
+
+Upgrade from 0.3.0 for the CMap fix. The only interface change is the new `form.Field.comb`.
 
 - UTF-8 passwords with non-ASCII characters now open files encrypted at R2 to R4
   (they are converted to PDFDocEncoding). R5 and R6 passwords also get SASLprep's

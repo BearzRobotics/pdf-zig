@@ -99,7 +99,7 @@ timeout. The text of some files differs. Measured by words against `pdftotext`, 
 reading order 125 of those files moved closer to it, 60 further away and 15 stayed as
 far (the total difference over them fell by about 4%). In stream order 135 moved closer,
 9 further and 4 stayed as far, but the total rose by about 2%, mostly from two files with
-heavily overlapping text. In a separate sample, 273 copies with annotations added by the
+heavily overlapping text. 0.3.1 extracts the same text as 0.3.0 from all of them. In a separate sample, 273 copies with annotations added by the
 library showed no new errors when Poppler and MuPDF drew their first page. These are
 comparisons on one set of files, not a conformance claim. The scripts in `test/tools/`
 compare with `pdftotext` and `pdfinfo`.
