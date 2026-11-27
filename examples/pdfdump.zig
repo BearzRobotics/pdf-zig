@@ -12,7 +12,11 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("usage: pdfdump FILE [PAGE]\n", .{});
         return 2;
     }
-    const page_no = if (args.len > 2) (std.fmt.parseInt(usize, args[2], 10) catch 1) else 1;
+    const page_no = if (args.len > 2) (std.fmt.parseInt(usize, args[2], 10) catch 0) else 1;
+    if (page_no == 0) {
+        std.debug.print("usage: pdfdump FILE [PAGE]  (pages are numbered from 1)\n", .{});
+        return 2;
+    }
     var file = try std.Io.Dir.cwd().openFile(io, args[1], .{});
     defer file.close(io);
     var buf: [65536]u8 = undefined;

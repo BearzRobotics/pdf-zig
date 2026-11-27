@@ -22,7 +22,13 @@ pub fn main(init: std.process.Init) !u8 {
             password = args[i];
         } else if (path == null) {
             path = a;
-        } else only = std.fmt.parseInt(usize, a, 10) catch null;
+        } else {
+            only = std.fmt.parseInt(usize, a, 10) catch 0;
+            if (only == 0) {
+                std.debug.print("pdftext: not a page number: {s}\n", .{a});
+                return 2;
+            }
+        }
     }
     const file_path = path orelse {
         std.debug.print("usage: pdftext [-raw] [-p PASSWORD] FILE [PAGE]\n", .{});
