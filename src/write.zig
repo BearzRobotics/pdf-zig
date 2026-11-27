@@ -340,6 +340,10 @@ pub const Update = struct {
         // cross-reference data cannot be pointed at any more.
         if (doc.repaired) return error.Repaired;
         try doc.checkMemory(self.oom_at_init);
+        if (self.changed.count() == 0) {
+            w.writeAll(doc.data) catch return error.WriteFailed;
+            return;
+        }
         const prev = lastStartxref(doc.data) orelse return error.Repaired;
         // The same form as the file's last section. (The merged trailer mixes
         // the keys of all revisions, so it cannot say.)
@@ -369,12 +373,13 @@ pub const Update = struct {
 
         // A cross-reference stream is an object itself.
         if (use_stream and self.next >= doc.options.max_objects) return error.TooManyObjects;
+        const id = try self.updatedId(self.allocator(), sw.buffered());
         const size = self.next + @intFromBool(use_stream);
         const xref_pos = file_len + sw.end;
         if (use_stream) {
-            try self.writeXrefStream(gpa, sw, nums, offsets, xref_pos, size, prev);
+            try self.writeXrefStream(gpa, sw, nums, offsets, xref_pos, size, prev, id);
         } else {
-            try self.writeXrefTable(sw, nums, offsets, size, prev);
+            try self.writeXrefTable(sw, nums, offsets, size, prev, id);
         }
         sw.print("startxref\n{d}\n%%EOF\n", .{xref_pos}) catch return error.WriteFailed;
 
@@ -384,12 +389,31 @@ pub const Update = struct {
 
     /// The entries every trailer carries: Root, Info and ID of the previous one.
     fn trailerEntries(self: *Update, a: Allocator, out: *std.ArrayList(Entry)) Allocator.Error!void {
-        for ([_][]const u8{ "Root", "Info", "ID" }) |key| {
+        for ([_][]const u8{ "Root", "Info" }) |key| {
             if (self.doc.trailer.get(key)) |v| try out.append(a, .{ .key = key, .value = v });
         }
     }
 
-    fn writeXrefTable(self: *Update, sw: *Io.Writer, nums: []const u32, offsets: []const usize, size: u32, prev: usize) Error!void {
+    /// `/ID` for the update (14.4): the first string identifies the document
+    /// and is kept; the second identifies this version of it, and is derived
+    /// from the previous one and the objects written. Absent if the file had
+    /// none.
+    fn updatedId(self: *Update, a: Allocator, section: []const u8) Allocator.Error!?Object {
+        const old = self.doc.resolve(self.doc.trailer.get("ID") orelse return null).asArray() orelse return null;
+        if (old.len < 2) return null;
+        const first = self.doc.resolve(old[0]);
+        const previous = self.doc.resolve(old[1]);
+        if (first != .string or previous != .string) return null;
+        var hash = std.crypto.hash.Md5.init(.{});
+        hash.update(previous.string);
+        hash.update(std.mem.asBytes(&std.mem.nativeToLittle(u64, self.doc.data.len)));
+        hash.update(section);
+        var digest: [16]u8 = undefined;
+        hash.final(&digest);
+        return .{ .array = try a.dupe(Object, &.{ first, .{ .string = try a.dupe(u8, &digest) } }) };
+    }
+
+    fn writeXrefTable(self: *Update, sw: *Io.Writer, nums: []const u32, offsets: []const usize, size: u32, prev: usize, id: ?Object) Error!void {
         sw.writeAll("xref\n") catch return error.WriteFailed;
         var i: usize = 0;
         while (i < nums.len) {
@@ -403,13 +427,14 @@ pub const Update = struct {
         const a = self.allocator();
         try entries.append(a, .{ .key = "Size", .value = .{ .integer = size } });
         try self.trailerEntries(a, &entries);
+        if (id) |v| try entries.append(a, .{ .key = "ID", .value = v });
         try entries.append(a, .{ .key = "Prev", .value = .{ .integer = @intCast(prev) } });
         sw.writeAll("trailer\n") catch return error.WriteFailed;
         writeObject(sw, .{ .dict = .{ .entries = entries.items } }) catch return error.WriteFailed;
         sw.writeByte('\n') catch return error.WriteFailed;
     }
 
-    fn writeXrefStream(self: *Update, gpa: Allocator, sw: *Io.Writer, nums: []const u32, offsets: []const usize, xref_pos: usize, size: u32, prev: usize) Error!void {
+    fn writeXrefStream(self: *Update, gpa: Allocator, sw: *Io.Writer, nums: []const u32, offsets: []const usize, xref_pos: usize, size: u32, prev: usize, id: ?Object) Error!void {
         const a = self.allocator();
         // The stream describes itself too: it is object `self.next`.
         const own = self.next;
@@ -445,6 +470,7 @@ pub const Update = struct {
         try entries.append(a, .{ .key = "W", .value = .{ .array = widths } });
         try entries.append(a, .{ .key = "Index", .value = .{ .array = index.items } });
         try self.trailerEntries(a, &entries);
+        if (id) |v| try entries.append(a, .{ .key = "ID", .value = v });
         try entries.append(a, .{ .key = "Prev", .value = .{ .integer = @intCast(prev) } });
         sw.print("{d} 0 obj\n", .{own}) catch return error.WriteFailed;
         writeObject(sw, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = data.items } }) catch return error.WriteFailed;
@@ -764,4 +790,46 @@ test "the update's cross-reference form follows the file's last section" {
     const added = out.written()[bytes.len..];
     try testing.expect(std.mem.indexOf(u8, added, "\nxref\n") != null);
     try testing.expect(std.mem.indexOf(u8, added, "/XRef") == null);
+}
+
+test "the file identifier keeps its first part and gets a new second one" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const bytes = try std.mem.replaceOwned(u8, aa, try tests.page(aa, "0 g", "", &.{}, ""), "/Root 1 0 R >>", "/Root 1 0 R /ID [(first) (second)] >>");
+    var seconds: [2][]const u8 = undefined;
+    for (&seconds, 0..) |*second, k| {
+        var doc = try document.Document.open(a, bytes, .{});
+        defer doc.deinit();
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        _ = try upd.add(.{ .integer = @intCast(k) });
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        var doc2 = try document.Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        const id = doc2.trailer.get("ID").?.array;
+        try testing.expectEqualStrings("first", id[0].string);
+        try testing.expect(!std.mem.eql(u8, id[1].string, "second"));
+        second.* = try aa.dupe(u8, id[1].string);
+    }
+    // Different changes, different identifiers.
+    try testing.expect(!std.mem.eql(u8, seconds[0], seconds[1]));
+}
+
+test "an update with nothing in it writes the file unchanged" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const bytes = try tests.page(arena.allocator(), "0 g", "", &.{}, "");
+    var doc = try document.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try upd.write(a, &out.writer);
+    try testing.expectEqualStrings(bytes, out.written());
 }
