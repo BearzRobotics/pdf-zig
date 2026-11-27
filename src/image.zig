@@ -128,6 +128,19 @@ fn decodeArray(doc: *Document, a: Allocator, d: Dict, n: usize) Allocator.Error!
     return out;
 }
 
+/// The `/Decode` pair of component `c` when the image has none (8.9.5.2,
+/// table 90). Indexed images, whose samples are indices, are handled apart.
+fn defaultRange(space: color.Space, c: usize) [2]f64 {
+    return switch (space) {
+        .lab => |lab| switch (c) {
+            0 => .{ 0, 100 },
+            1 => lab.range[0..2].*,
+            else => lab.range[2..4].*,
+        },
+        else => .{ 0, 1 },
+    };
+}
+
 /// One sample of `bpc` bits at sample index `idx` of a row starting at `row`.
 fn sampleAt(row: []const u8, idx: usize, bpc: u8) u32 {
     switch (bpc) {
@@ -213,7 +226,8 @@ fn fromSamplesBpc(doc: *Document, a: Allocator, img: display.Image, samples: []c
                         if (!(s >= ck[2 * c] and s <= ck[2 * c + 1])) keyed = false;
                     }
                     const v: f64 = @floatFromInt(s);
-                    comps[c] = if (dec) |dd| dd[2 * c] + v * (dd[2 * c + 1] - dd[2 * c]) / maxv else v / maxv;
+                    const range: [2]f64 = if (dec) |dd| dd[2 * c ..][0..2].* else defaultRange(space, c);
+                    comps[c] = range[0] + v * (range[1] - range[0]) / maxv;
                 }
                 rgb = space.toRgb(comps[0..@min(ncomp, function_max)]);
             }

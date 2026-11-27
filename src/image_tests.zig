@@ -245,3 +245,18 @@ test "colour key values outside the sample range are clamped" {
     try testing.expectEqual(@as(u8, 0), low.rgba[3]);
     try testing.expectEqual(@as(u8, 0), low.rgba[7]);
 }
+
+test "Lab images use the Lab default decode ranges" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const lab = "/Width 3 /Height 1 /BitsPerComponent 8 /ColorSpace [/Lab << /WhitePoint [0.9505 1 1.089] /Range [-128 127 -128 127] >>]";
+    // White, black, and a strongly positive a* (red) at middle lightness.
+    const px = try decodeFirst(a, &.{try imageBody(a, lab, "\xff\x80\x80\x00\x80\x80\x80\xd0\x80")}, "");
+    for (0..3) |i| try testing.expect(px.rgba[i] > 250);
+    for (4..7) |i| try testing.expect(px.rgba[i] < 5);
+    try testing.expect(px.rgba[8] > 180 and px.rgba[9] < 100);
+    // An explicit /Decode with the same ranges changes nothing.
+    const explicit = try decodeFirst(a, &.{try imageBody(a, lab ++ " /Decode [0 100 -128 127 -128 127]", "\xff\x80\x80\x00\x80\x80\x80\xd0\x80")}, "");
+    try testing.expectEqualSlices(u8, px.rgba, explicit.rgba);
+}
