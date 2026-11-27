@@ -59,7 +59,7 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 | `text.layout` | reading-order text with a box for every glyph; hit testing, search ranges and per-line rectangles |
 | `outline` | reads the bookmark tree (named destinations too); adds and removes bookmarks |
 | `write` | serializes objects; appends an incremental update with a classic table or a cross-reference stream. Refuses encrypted files and files that had to be repaired on open |
-| `annot` | reads annotations; adds highlights, underlines, strike-outs (a squiggly underline is drawn straight), notes, ink and text boxes with appearance streams; edits and removes them |
+| `annot` | reads annotations; adds highlights, underlines (straight or squiggly), strike-outs, notes, ink and text boxes with appearance streams; edits and removes them |
 | `form` | finds AcroForm fields (groups, check boxes, radio groups, choices); fills text, check box, radio, combo and list fields |
 
 Form limits: a filled text field gets a new appearance with the widget's background,

@@ -154,6 +154,32 @@ fn checkedMeta(meta: Meta) Error!Meta {
     return out;
 }
 
+/// How many segments one squiggly line may have.
+const max_zigzags = 2000;
+
+/// A zigzag along the bottom edge of the quad `q` (top left, top right, bottom
+/// left, bottom right), rising towards its top.
+fn zigzag(a: Allocator, out: *std.ArrayList(u8), q: *const [8]f64) Allocator.Error!void {
+    const length = std.math.hypot(q[6] - q[4], q[7] - q[5]);
+    const height = std.math.hypot(q[0] - q[4], q[1] - q[5]);
+    if (length <= 0) return;
+    // In proportion to the text, within what stays legible.
+    const rise = std.math.clamp(height / 10, 1, 2.5);
+    const up_x = if (height > 0) (q[0] - q[4]) / height * rise else 0;
+    const up_y = if (height > 0) (q[1] - q[5]) / height * rise else 0;
+    const steps: usize = @intFromFloat(std.math.clamp(@ceil(length / rise), 1, max_zigzags));
+    for (0..steps + 1) |i| {
+        const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        const lift: f64 = @floatFromInt(i % 2);
+        try out.print(a, "{d:.3} {d:.3} {c} ", .{
+            q[4] + (q[6] - q[4]) * t + up_x * lift,
+            q[5] + (q[7] - q[5]) * t + up_y * lift,
+            @as(u8, if (i == 0) 'm' else 'l'),
+        });
+    }
+    try out.appendSlice(a, "S\n");
+}
+
 /// Adds a text markup annotation over `rects` (displayed-page rectangles, as
 /// `text.Layout.rectsFor` returns them). Returns the new annotation.
 pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text.Rect, meta_in: Meta) Error!Ref {
@@ -209,7 +235,11 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
             try ap.print(a, "{d:.3} {d:.3} {d:.3} RG 1 w\n", .{ c[0], c[1], c[2] });
             for (0..rects.len) |i| {
                 const q = quads[i * 8 ..][0..8];
-                // Bottom edge for underline and squiggly, the middle for strike-out.
+                if (kind == .squiggly) {
+                    try zigzag(a, &ap, q);
+                    continue;
+                }
+                // The bottom edge for an underline, the middle for a strike-out.
                 const mid = kind == .strikeout;
                 const lx = if (mid) (q[0] + q[4]) / 2 else q[4];
                 const ly = if (mid) (q[1] + q[5]) / 2 else q[5];
@@ -1025,6 +1055,64 @@ test "underlines and strike-outs lie inside the appearance's box" {
             try testing.expect(box[0].real <= 20 and box[2].real >= 180);
         }
     }
+}
+
+test "a squiggly underline is a zigzag along the bottom of each quad, however the page is turned" {
+    const a = testing.allocator;
+    for ([_][]const u8{ "", "/Rotate 90" }) |rotate| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var doc = try Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, rotate), .{});
+        defer doc.deinit();
+        const page = pages.page(&doc, try pages.PageList.build(&doc), 0).?;
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        const ref = try addMarkup(&upd, page, .squiggly, &.{.{ .x0 = 20, .y0 = 10, .x1 = 80, .y1 = 30 }}, .{});
+        const d = upd.get(ref.num).asDict().?;
+        const quad = d.get("QuadPoints").?.array;
+        var q: [8]f64 = undefined;
+        for (&q, quad) |*out, v| out.* = v.asNum().?;
+        // The bottom edge (the last two corners), and the way up from it.
+        const edge = [2]f64{ q[6] - q[4], q[7] - q[5] };
+        const up = [2]f64{ q[0] - q[4], q[1] - q[5] };
+        const length = std.math.hypot(edge[0], edge[1]);
+        const height = std.math.hypot(up[0], up[1]);
+        const content = upd.get(d.get("AP").?.dict.get("N").?.ref.num).stream.data;
+        var along: f64 = -1;
+        var points: usize = 0;
+        var tokens = std.mem.tokenizeAny(u8, content[std.mem.indexOf(u8, content, " w\n").? + 3 ..], " \n");
+        while (tokens.next()) |first| {
+            if (std.mem.eql(u8, first, "S")) break;
+            const x = try std.fmt.parseFloat(f64, first);
+            const y = try std.fmt.parseFloat(f64, tokens.next().?);
+            _ = tokens.next().?; // m or l
+            const s = ((x - q[4]) * edge[0] + (y - q[5]) * edge[1]) / length;
+            const h = ((x - q[4]) * up[0] + (y - q[5]) * up[1]) / height;
+            // Moves along the edge, alternately on it and a little above it.
+            try testing.expect(s > along);
+            along = s;
+            if (points == 0) try testing.expectApproxEqAbs(@as(f64, 0), s, 0.01);
+            if (points % 2 == 0 or @abs(s - length) > 0.01) {
+                if (points % 2 == 0) try testing.expectApproxEqAbs(@as(f64, 0), h, 0.01) else try testing.expect(h > 0.5 and h < height / 4);
+            }
+            points += 1;
+        }
+        try testing.expect(points > 10);
+        try testing.expectApproxEqAbs(length, along, 0.01);
+    }
+}
+
+test "a very long squiggly underline is drawn with a bounded number of segments" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, ""), .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const ref = try addMarkup(&upd, pages.page(&doc, try pages.PageList.build(&doc), 0).?, .squiggly, &.{.{ .x0 = 0, .y0 = 0, .x1 = 9e6, .y1 = 10 }}, .{});
+    const content = upd.get(upd.get(ref.num).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream.data;
+    try testing.expect(content.len < 100_000);
 }
 
 test "markup geometry: quads, drawn paths, and one of several removed" {

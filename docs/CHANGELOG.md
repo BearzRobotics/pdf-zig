@@ -5,6 +5,7 @@
 - UTF-8 passwords with non-ASCII characters now open files encrypted at R2 to R4
   (they are converted to PDFDocEncoding). R5 and R6 passwords also get SASLprep's
   character mapping; its NFKC normalization is still not applied.
+- Squiggly underlines are drawn as a zigzag, not a straight line.
 - Filled comb text fields lay one character in each cell. `form.Field` has `comb`.
 
 ## 0.3.0 (2026-11-27)
