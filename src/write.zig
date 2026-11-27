@@ -292,6 +292,9 @@ pub const Update = struct {
     /// Writes the original file followed by the update.
     pub fn write(self: *Update, gpa: Allocator, w: *Io.Writer) Error!void {
         const doc = self.doc;
+        // A bad entry found since `init` rebuilds the document: the file's own
+        // cross-reference data cannot be pointed at any more.
+        if (doc.repaired) return error.Repaired;
         const prev = lastStartxref(doc.data) orelse return error.Repaired;
         const use_stream = if (doc.trailer.get("Type")) |t| (t == .name and std.mem.eql(u8, t.name, "XRef")) else false;
 
@@ -583,4 +586,25 @@ test "set refuses object 0 and numbers that were never handed out" {
     try testing.expectError(error.InvalidObject, upd.set(999, .null));
     const r = try upd.add(.null);
     try upd.set(r.num, .{ .integer = 1 });
+}
+
+test "a repair that happens during editing stops the write" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const bytes = try arena.allocator().dupe(u8, try tests.page(arena.allocator(), "0 0 m", "", &.{"<< /Extra true >>"}, ""));
+    // Give object 5, which opening does not read, a wrong offset.
+    const table = std.mem.lastIndexOf(u8, bytes, "xref\n0 6\n").? + "xref\n0 6\n".len;
+    @memcpy(bytes[table + 5 * 20 ..][0..10], "0000000011");
+    var doc = try document.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    try testing.expect(!doc.repaired);
+    _ = upd.get(5);
+    try testing.expect(doc.repaired);
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try testing.expectError(error.Repaired, upd.write(a, &out.writer));
+    try testing.expectEqual(@as(usize, 0), out.written().len);
 }
