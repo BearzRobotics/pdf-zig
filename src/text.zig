@@ -14,7 +14,12 @@ const display = @import("display.zig");
 
 pub const Order = enum { reading, content };
 
+/// A glyph placed on the displayed page. Positions are measured in the frame of
+/// its writing direction: `x0` to `x1` along the baseline and `y` across it,
+/// downwards. For horizontal text these are page coordinates.
 const Item = struct {
+    /// The writing direction in whole degrees clockwise on the page, 0 to 359.
+    angle: u16,
     x0: f64,
     x1: f64,
     y: f64,
@@ -163,8 +168,30 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
         for ([_]display.Point{ to_page.apply(right, low), to_page.apply(right, high), to_page.apply(g.x, high) }) |corner| {
             box = .{ .x0 = @min(box.x0, corner.x), .y0 = @min(box.y0, corner.y), .x1 = @max(box.x1, corner.x), .y1 = @max(box.y1, corner.y) };
         }
-        try items.append(a, .{ .x0 = p0.x, .x1 = p1.x, .y = p0.y, .size = @abs(t.size * vscale), .text = g.text, .box = box });
+        const angle = writingAngle(to_page, t.size * t.h_scale);
+        // Every glyph of one direction is measured in the same frame.
+        const radians = @as(f64, @floatFromInt(angle)) * std.math.pi / 180.0;
+        const along: display.Point = .{ .x = @cos(radians), .y = @sin(radians) };
+        const across: display.Point = .{ .x = -along.y, .y = along.x };
+        try items.append(a, .{
+            .angle = angle,
+            .x0 = p0.x * along.x + p0.y * along.y,
+            .x1 = p1.x * along.x + p1.y * along.y,
+            .y = p0.x * across.x + p0.y * across.y,
+            .size = @abs(t.size * vscale),
+            .text = g.text,
+            .box = box,
+        });
     }
+}
+
+/// The direction glyphs advance in, in whole degrees clockwise on the page.
+/// `advance` is the size and horizontal scale, whose sign can reverse it.
+fn writingAngle(to_page: display.Matrix, advance: f64) u16 {
+    const sign: f64 = if (advance < 0) -1 else 1;
+    const degrees = std.math.atan2(sign * to_page.b, sign * to_page.a) * 180.0 / std.math.pi;
+    if (!std.math.isFinite(degrees)) return 0;
+    return @intFromFloat(@mod(@round(degrees), 360.0));
 }
 
 /// Appends `s`, expanding the Latin ligature code points U+FB00..U+FB06 into
@@ -210,7 +237,7 @@ fn contentOrder(a: Allocator, items: []const Item, out: *std.ArrayList(u8)) Allo
     var prev: ?Item = null;
     for (items) |it| {
         if (prev) |p| {
-            if (@abs(it.y - p.y) > 0.5 * @max(p.size, it.size)) {
+            if (it.angle != p.angle or @abs(it.y - p.y) > 0.5 * @max(p.size, it.size)) {
                 try out.append(a, '\n');
             } else if ((gapNeedsSpace(p, it) or jumpsBack(p, it)) and !endsWithSpace(p.text) and !startsWithSpace(it.text)) {
                 try out.append(a, ' ');
@@ -241,6 +268,8 @@ fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8), boxes: ?*s
     // large letter would be close to several small lines and mix them up.
     std.mem.sort(Item, items, {}, struct {
         fn lt(_: void, p: Item, q: Item) bool {
+            // Horizontal text first, then each other direction on its own.
+            if (p.angle != q.angle) return p.angle < q.angle;
             return switch (coordinateOrder(p.y, q.y)) {
                 .lt => true,
                 .gt => false,
@@ -252,7 +281,7 @@ fn readingOrder(a: Allocator, items: []Item, out: *std.ArrayList(u8), boxes: ?*s
     while (line_start < items.len) {
         var line_end = line_start + 1;
         const y0 = items[line_start].y;
-        while (line_end < items.len and @abs(items[line_end].y - y0) <= 0.5 * @max(items[line_end].size, items[line_start].size, 1)) line_end += 1;
+        while (line_end < items.len and items[line_end].angle == items[line_start].angle and @abs(items[line_end].y - y0) <= 0.5 * @max(items[line_end].size, items[line_start].size, 1)) line_end += 1;
         const line = items[line_start..line_end];
         std.mem.sort(Item, line, {}, struct {
             fn lt(_: void, p: Item, q: Item) bool {

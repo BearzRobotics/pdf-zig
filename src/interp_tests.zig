@@ -994,3 +994,27 @@ test "content order separates words drawn from right to left" {
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("world hello\n", got);
 }
+
+test "rotated text reads along its own baseline" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { content: []const u8, page_extra: []const u8 = "", want: []const u8 }{
+        .{ .content = "BT /F1 10 Tf 0 1 -1 0 50 10 Tm (Hello) Tj ET", .want = "Hello\n" },
+        .{ .content = "BT /F1 10 Tf -1 0 0 -1 150 50 Tm (Hello) Tj ET", .want = "Hello\n" },
+        .{ .content = "BT /F1 10 Tf 0 -1 1 0 50 90 Tm (Hello) Tj ET", .want = "Hello\n" },
+        .{ .content = "BT /F1 10 Tf 10 50 Td (Hello) Tj ET", .page_extra = "/Rotate 90", .want = "Hello\n" },
+        .{ .content = "BT /F1 10 Tf 0.8 0.6 -0.6 0.8 20 20 Tm (Hello world) Tj ET", .want = "Hello world\n" },
+        // Two upward lines read left to right, after the horizontal text.
+        .{ .content = "BT /F1 10 Tf 0 1 -1 0 40 10 Tm (second) Tj 0 1 -1 0 25 10 Tm (first) Tj 1 0 0 1 80 80 Tm (level) Tj ET", .want = "level\nfirst\nsecond\n" },
+    };
+    for (cases) |c| {
+        const r = try render(try page(a, c.content, helv, &.{helv_obj}, c.page_extra));
+        defer done(r);
+        const got = try pdf.text.extract(a, &r.list, .reading);
+        try testing.expectEqualStrings(c.want, got);
+    }
+    const r = try render(try page(a, cases[0].content, helv, &.{helv_obj}, ""));
+    defer done(r);
+    try testing.expectEqualStrings("Hello\n", try pdf.text.extract(a, &r.list, .content));
+}
