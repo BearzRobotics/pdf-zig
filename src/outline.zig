@@ -18,6 +18,10 @@ const Document = document.Document;
 
 pub const max_depth = 32;
 pub const max_items = 100_000;
+/// Most name-tree nodes examined to resolve one named destination, and to
+/// resolve all those of one outline.
+const max_lookup_nodes = 100_000;
+const max_outline_lookup_nodes = 4_000_000;
 
 /// Where a bookmark or link goes.
 pub const Destination = struct {
@@ -46,11 +50,18 @@ pub fn read(a: Allocator, doc: *Document, list: pages.PageList) Allocator.Error!
     var budget: usize = max_items;
     var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
     defer seen.deinit(a);
-    return children(a, doc, list, root, 0, &budget, &seen);
+    var page_of: PageIndex = .empty;
+    defer page_of.deinit(a);
+    for (list.entries, 0..) |e, i| {
+        const gop = try page_of.getOrPut(a, e.num);
+        if (!gop.found_existing) gop.value_ptr.* = i;
+    }
+    var work: Work = .{ .lookups = max_outline_lookup_nodes, .page_of = &page_of };
+    return children(a, doc, list, root, 0, &budget, &seen, &work);
 }
 
 /// The items below `parent` (a dictionary with `/First`).
-fn children(a: Allocator, doc: *Document, list: pages.PageList, parent: Dict, depth: usize, budget: *usize, seen: *std.AutoHashMapUnmanaged(u32, void)) Allocator.Error![]const Item {
+fn children(a: Allocator, doc: *Document, list: pages.PageList, parent: Dict, depth: usize, budget: *usize, seen: *std.AutoHashMapUnmanaged(u32, void), work: *Work) Allocator.Error![]const Item {
     if (depth >= max_depth) return &.{};
     var out: std.ArrayList(Item) = .empty;
     errdefer out.deinit(a);
@@ -70,9 +81,9 @@ fn children(a: Allocator, doc: *Document, list: pages.PageList, parent: Dict, de
         try out.append(a, .{
             .num = if (c == .ref) c.ref.num else 0,
             .title = try write.textToUtf8(a, title_raw),
-            .dest = destinationOf(a, doc, list, d),
+            .dest = destinationWithin(doc, list, d, work),
             .open = count > 0,
-            .children = if (d.get("First") != null) try children(a, doc, list, d, depth + 1, budget, seen) else &.{},
+            .children = if (d.get("First") != null) try children(a, doc, list, d, depth + 1, budget, seen, work) else &.{},
         });
         cursor = d.get("Next");
     }
@@ -81,25 +92,45 @@ fn children(a: Allocator, doc: *Document, list: pages.PageList, parent: Dict, de
 
 /// The destination of an outline item or link: its `/Dest`, or the `/D` of a GoTo action `/A`.
 pub fn destinationOf(a: Allocator, doc: *Document, list: pages.PageList, d: Dict) ?Destination {
-    if (d.get("Dest")) |dest| return resolveDest(a, doc, list, dest, 0);
+    _ = a;
+    var work: Work = .{ .lookups = max_lookup_nodes };
+    return destinationWithin(doc, list, d, &work);
+}
+
+/// Page index by page object number.
+const PageIndex = std.AutoHashMapUnmanaged(u32, usize);
+
+/// What resolving destinations may still spend, and what it can reuse.
+const Work = struct {
+    lookups: usize,
+    page_of: ?*const PageIndex = null,
+};
+
+/// `destinationOf` within the limits of `work`.
+fn destinationWithin(doc: *Document, list: pages.PageList, d: Dict, work: *Work) ?Destination {
+    if (d.get("Dest")) |dest| return resolveDest(doc, list, dest, 0, work);
     const action = doc.getDict(d, "A") orelse return null;
     const kind = doc.getName(action, "S") orelse return null;
     if (!std.mem.eql(u8, kind, "GoTo")) return null;
-    return resolveDest(a, doc, list, action.get("D") orelse return null, 0);
+    return resolveDest(doc, list, action.get("D") orelse return null, 0, work);
 }
 
-fn resolveDest(a: Allocator, doc: *Document, list: pages.PageList, dest: Object, depth: usize) ?Destination {
+fn resolveDest(doc: *Document, list: pages.PageList, dest: Object, depth: usize, work: *Work) ?Destination {
     if (depth > 4) return null;
     const o = doc.resolve(dest);
     switch (o) {
-        .array => |arr| return fromArray(doc, list, arr),
-        .dict => |d| return resolveDest(a, doc, list, d.get("D") orelse return null, depth + 1),
+        .array => |arr| return fromArray(doc, list, arr, work),
+        .dict => |d| return resolveDest(doc, list, d.get("D") orelse return null, depth + 1, work),
         .name, .string => |key| {
             // A named destination: the catalog's /Dests dictionary, then the /Names /Dests tree.
             const cat = doc.catalog() orelse return null;
-            if (o == .name) if (doc.getDict(cat, "Dests")) |dests| if (dests.get(key)) |v| return resolveDest(a, doc, list, v, depth + 1);
+            if (o == .name) if (doc.getDict(cat, "Dests")) |dests| if (dests.get(key)) |v| return resolveDest(doc, list, v, depth + 1, work);
             if (doc.getDict(cat, "Names")) |names| if (doc.getDict(names, "Dests")) |tree| {
-                if (lookupTree(doc, tree, key, 0)) |v| return resolveDest(a, doc, list, v, depth + 1);
+                var this: usize = @min(max_lookup_nodes, work.lookups);
+                const allowed = this;
+                const hit = lookupTree(doc, tree, key, 0, &this);
+                work.lookups -= allowed - this;
+                if (hit) |v| return resolveDest(doc, list, v, depth + 1, work);
             };
             return null;
         },
@@ -107,12 +138,14 @@ fn resolveDest(a: Allocator, doc: *Document, list: pages.PageList, dest: Object,
     }
 }
 
-fn fromArray(doc: *Document, list: pages.PageList, arr: []const Object) ?Destination {
+fn fromArray(doc: *Document, list: pages.PageList, arr: []const Object, work: *const Work) ?Destination {
     if (arr.len == 0) return null;
     const first = arr[0];
     var page_index: ?usize = null;
     if (first == .ref) {
-        for (list.entries, 0..) |e, i| if (e.num == first.ref.num) {
+        if (work.page_of) |map| {
+            page_index = map.get(first.ref.num);
+        } else for (list.entries, 0..) |e, i| if (e.num == first.ref.num) {
             page_index = i;
             break;
         };
@@ -130,8 +163,10 @@ fn fromArray(doc: *Document, list: pages.PageList, arr: []const Object) ?Destina
 }
 
 /// Looks `key` up in a name tree (7.9.6).
-fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize) ?Object {
-    if (depth > 16) return null;
+fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize, budget: *usize) ?Object {
+    // Depth alone allows (kids per node)^16 visits when nodes repeat.
+    if (depth > 16 or budget.* == 0) return null;
+    budget.* -= 1;
     if (doc.getArray(node, "Names")) |pairs| {
         var i: usize = 0;
         while (i + 1 < pairs.len) : (i += 2) {
@@ -140,14 +175,18 @@ fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize) ?Object
         }
     }
     if (doc.getArray(node, "Kids")) |kids| for (kids) |kid| {
+        if (budget.* == 0) break;
         const kd = doc.resolve(kid).asDict() orelse continue;
         // A kid with /Limits [low high] can be skipped when the key is outside it.
         if (doc.getArray(kd, "Limits")) |lim| if (lim.len == 2) {
             const lo = doc.resolve(lim[0]);
             const hi = doc.resolve(lim[1]);
-            if (lo == .string and hi == .string and (std.mem.lessThan(u8, key, lo.string) or std.mem.lessThan(u8, hi.string, key))) continue;
+            if (lo == .string and hi == .string and (std.mem.lessThan(u8, key, lo.string) or std.mem.lessThan(u8, hi.string, key))) {
+                budget.* -= 1;
+                continue;
+            }
         };
-        if (lookupTree(doc, kd, key, depth + 1)) |v| return v;
+        if (lookupTree(doc, kd, key, depth + 1, budget)) |v| return v;
     };
     return null;
 }
@@ -529,4 +568,32 @@ test "recount survives hostile /Count values and /Next loops" {
     _ = try add(&upd, 3, "c", null);
     const count = upd.get(4).asDict().?.get("Count").?.asInt().?;
     try testing.expect(count >= 2 and count <= max_items);
+}
+
+test "name tree lookups are bounded however the tree repeats itself" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][2][]const u8{
+        .{ "<< /Kids [6 0 R 6 0 R 6 0 R 6 0 R 6 0 R 6 0 R 6 0 R 6 0 R] >>", "null" },
+        // Direct kids sharing one array.
+        .{ "<< /Kids 7 0 R >>", "[ << /Kids 7 0 R >> << /Kids 7 0 R >> << /Kids 7 0 R >> << /Kids 7 0 R >> ]" },
+    }) |case| {
+        const bytes = try tests.buildFile(a, &.{
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R /Names << /Dests 6 0 R >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            "<< /First 5 0 R >>",
+            "<< /Title (a) /Parent 4 0 R /Dest (zz) >>",
+            case[0],
+            case[1],
+        });
+        var doc = try Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        const items = try read(a, &doc, pl);
+        try testing.expectEqual(@as(usize, 1), items.len);
+        try testing.expect(items[0].dest == null);
+    }
 }
