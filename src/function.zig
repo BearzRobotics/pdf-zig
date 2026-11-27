@@ -430,8 +430,8 @@ fn numArray(doc: *Document, o: ?Object) Allocator.Error![]const f64 {
 
 pub const LoadError = Allocator.Error || error{BadFunction};
 
-/// `load` for a function used again and again: one named by reference, or a
-/// direct dictionary that is part of the document (`owned`), is parsed once.
+/// `load` for a function used again and again: a direct dictionary that is part
+/// of the document (`owned`) is parsed once, as one named by reference is.
 pub fn loadKept(doc: *Document, obj: Object, owned: bool) LoadError!Function {
     const key = Document.cacheKey(obj, owned) orelse return load(doc, obj, 0);
     if (doc.functions.get(key)) |f| return f;
@@ -444,6 +444,19 @@ pub fn loadKept(doc: *Document, obj: Object, owned: bool) LoadError!Function {
 /// Parses a function object (dictionary or stream), at most `depth` deep.
 pub fn load(doc: *Document, obj: Object, depth: u8) LoadError!Function {
     if (depth > 8) return error.BadFunction;
+    // A function named by reference is parsed once, however many name it:
+    // without that, stitching functions that list one another several times
+    // take time and memory exponential in the depth.
+    if (obj != .ref) return loadNew(doc, obj, depth);
+    const key = Document.cacheKey(obj, false).?;
+    if (doc.functions.get(key)) |f| return f;
+    const oom_before = doc.oom_events;
+    const f = try loadNew(doc, obj, depth);
+    if (doc.oom_events == oom_before) try doc.functions.put(doc.arena.allocator(), key, f);
+    return f;
+}
+
+fn loadNew(doc: *Document, obj: Object, depth: u8) LoadError!Function {
     const a = doc.arena.allocator();
     const o = doc.resolve(obj);
     const d = o.asDict() orelse return error.BadFunction;

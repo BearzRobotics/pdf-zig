@@ -749,3 +749,18 @@ test "reading order: superscripts stay on their line and runs sort by position" 
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("hello world 2\nnext\n", got);
 }
+
+test "a function tree that repeats references is loaded once per function" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Eight levels, each naming the next eight times: 8^8 leaves.
+    var objects: std.ArrayList([]const u8) = .empty;
+    for (0..8) |level| {
+        const next: [8][]const u8 = @splat(try std.fmt.allocPrint(a, "{d} 0 R", .{level + 6}));
+        try objects.append(a, try std.fmt.allocPrint(a, "<< /FunctionType 3 /Domain [0 1] /Functions [{s}] /Bounds [] /Encode [] >>", .{try std.mem.join(a, " ", &next)}));
+    }
+    try objects.append(a, "<< /FunctionType 2 /Domain [0 1] /N 1 >>");
+    const bytes = try page(a, "/CS0 cs 0.5 sc 0 0 1 1 re f", "/ColorSpace << /CS0 [/Separation /S /DeviceGray 5 0 R] >>", objects.items, "");
+    try testing.expect(try renderCost(bytes, .{}) < 1 << 20);
+}
