@@ -46,6 +46,10 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Deepest chain of objects that need one another to be read. Real files need
+/// two or three levels.
+const max_load_depth = 32;
+
 pub const XrefEntry = union(enum) {
     free,
     /// Offset of `N G obj` from the start of the file (after `base`).
@@ -77,6 +81,9 @@ pub const Document = struct {
     repaired: bool = false,
     /// Set for an encrypted file once the key is derived.
     crypt: ?crypt.Crypt = null,
+    /// How many objects are being read inside one another. Reading an object can
+    /// need others (a stream's `/Length`, the object stream it is stored in).
+    depth: u8 = 0,
     /// Guards against references that lead back to the object being read.
     reading: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
@@ -354,6 +361,11 @@ pub const Document = struct {
     pub fn getObject(self: *Document, num: u32) Object {
         if (self.cache.get(num)) |o| return o;
         if (self.reading.contains(num)) return .null;
+        // Too deep: null for this chain only, so nothing is cached and the
+        // object can still be read from nearer the top.
+        if (self.depth >= max_load_depth) return .null;
+        self.depth += 1;
+        defer self.depth -= 1;
         self.reading.put(self.a(), num, {}) catch return .null;
         defer _ = self.reading.remove(num);
 
@@ -397,6 +409,9 @@ pub const Document = struct {
     }
 
     fn loadObjStm(self: *Document, num: u32) ?ObjStm {
+        // An object stream is never stored in an object stream (7.5.7).
+        const entry = self.xref.get(num) orelse return null;
+        if (entry != .in_use) return null;
         const st = switch (self.getObject(num)) {
             .stream => |s| s,
             else => return null,

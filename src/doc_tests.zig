@@ -361,3 +361,41 @@ test "page rotation is normalised for any integer" {
         try testing.expectEqual(c[1], pdf.pages.page(&doc, list, 0).?.rotate);
     }
 }
+
+test "a long chain of indirect stream lengths does not overflow the stack" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 100_000;
+    var bodies: std.ArrayList([]const u8) = .empty;
+    try bodies.appendSlice(a, &.{ "<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>" });
+    // The length of stream i is stream i + 1.
+    for (3..n) |i| try bodies.append(a, try std.fmt.allocPrint(a, "<< /Length {d} 0 R >>\nstream\nx\nendstream", .{i + 1}));
+    try bodies.append(a, "1");
+    var doc = try pdf.Document.open(testing.allocator, try build(a, bodies.items), .{});
+    defer doc.deinit();
+    // The data is still found, by its endstream.
+    try testing.expectEqualStrings("x", doc.getObject(3).stream.data);
+    // An object past the depth that was reached must not have been cached as missing.
+    try testing.expect(doc.getObject(40) == .stream);
+    try testing.expectEqualStrings("x", doc.getObject(n - 1).stream.data);
+}
+
+test "a chain of object streams inside object streams does not overflow the stack" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 100_000;
+    // Cross-reference stream: object i is said to be stored in object stream i + 1.
+    var rows: std.ArrayList(u8) = .empty;
+    try rows.appendSlice(a, &.{ 0, 0, 0, 0, 0 });
+    for (1..n) |i| {
+        const next: u32 = @intCast(i + 1);
+        try rows.appendSlice(a, &.{ 2, @intCast(next >> 16), @intCast((next >> 8) & 0xFF), @intCast(next & 0xFF), 0 });
+    }
+    var file: std.ArrayList(u8) = .empty;
+    try file.print(a, "%PDF-1.7\n9999999 0 obj\n<< /Type /XRef /W [1 3 1] /Size {d} /Root 1 0 R /Length {d} >>\nstream\n", .{ n, rows.items.len });
+    try file.appendSlice(a, rows.items);
+    try file.appendSlice(a, "\nendstream\nendobj\nstartxref\n9\n%%EOF\n");
+    try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, file.items, .{}));
+}
