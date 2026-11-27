@@ -413,22 +413,7 @@ fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_
     var lines: std.ArrayList([]const u8) = .empty;
     var paras = std.mem.splitScalar(u8, bytes, '\n');
     while (paras.next()) |para| {
-        var start: usize = 0;
-        var last_space: ?usize = null;
-        var i: usize = 0;
-        while (i < para.len) : (i += 1) {
-            if (para[i] == ' ') last_space = i;
-            if (forms.textWidth(para[start .. i + 1], size) > bw - 2 * pad and i > start) {
-                const cut = last_space orelse i;
-                const brk = if (cut > start) cut else i;
-                try lines.append(a, para[start..brk]);
-                start = if (para[brk] == ' ') brk + 1 else brk;
-                last_space = null;
-                i = start;
-                if (i > 0) i -= 1;
-            }
-        }
-        try lines.append(a, para[start..]);
+        try forms.wrapLine(a, &lines, para, bw - 2 * pad, size);
     }
 
     var ap: std.ArrayList(u8) = .empty;

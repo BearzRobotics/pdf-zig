@@ -584,8 +584,42 @@ test "line breaks survive the WinAnsi conversion, so multi-line fields break" {
 /// Width of WinAnsi `bytes` in Helvetica at `size` points.
 pub fn textWidth(bytes: []const u8, size: f64) f64 {
     var w: f64 = 0;
-    for (bytes) |b| w += @as(f64, @floatFromInt(helveticaWidth(encoding.unicodeOf(.win_ansi, b))));
+    for (bytes) |b| w += @as(f64, @floatFromInt(byte_widths[b]));
     return w * size / 1000.0;
+}
+
+/// The Helvetica width of every WinAnsi byte, in 1/1000 em.
+const byte_widths = blk: {
+    @setEvalBranchQuota(2_000_000);
+    var out: [256]u16 = undefined;
+    for (&out, 0..) |*w, b| w.* = helveticaWidth(encoding.unicodeOf(.win_ansi, b));
+    break :blk out;
+};
+
+/// Appends `para`, WinAnsi bytes without line breaks, cut into lines no wider
+/// than `width` at `size` points: at spaces, or within a word that is too wide.
+pub fn wrapLine(a: Allocator, lines: *std.ArrayList([]const u8), para: []const u8, width: f64, size: f64) Allocator.Error!void {
+    var start: usize = 0;
+    var last_space: ?usize = null;
+    // The width of para[start..i] in 1/1000 em, kept as the line grows.
+    var units: u64 = 0;
+    var i: usize = 0;
+    while (i < para.len) : (i += 1) {
+        if (para[i] == ' ') last_space = i;
+        units += byte_widths[para[i]];
+        if (@as(f64, @floatFromInt(units)) * size / 1000.0 <= width or i == start) continue;
+        const cut = last_space orelse i;
+        const brk = if (cut > start) cut else i;
+        try lines.append(a, para[start..brk]);
+        start = if (para[brk] == ' ') brk + 1 else brk;
+        last_space = null;
+        // Measure the new line from its start.
+        units = 0;
+        i = start;
+        if (i < para.len) units = byte_widths[para[i]];
+        if (i < para.len and para[i] == ' ') last_space = i;
+    }
+    try lines.append(a, para[start..]);
 }
 
 /// What a field shows for `value`: a password field shows one `*` per character.
@@ -661,22 +695,7 @@ fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []c
             try lines.append(a, para);
             continue;
         }
-        var start: usize = 0;
-        var last_space: ?usize = null;
-        var i: usize = 0;
-        while (i < para.len) : (i += 1) {
-            if (para[i] == ' ') last_space = i;
-            if (textWidth(para[start .. i + 1], size) > w - 2 * pad and i > start) {
-                const cut = last_space orelse i;
-                const brk = if (cut > start) cut else i;
-                try lines.append(a, para[start..brk]);
-                start = if (para[brk] == ' ') brk + 1 else brk;
-                last_space = null;
-                i = start;
-                if (i > 0) i -= 1;
-            }
-        }
-        try lines.append(a, para[start..]);
+        try wrapLine(a, &lines, para, w - 2 * pad, size);
     }
 
     var content: std.ArrayList(u8) = .empty;
@@ -1216,4 +1235,25 @@ test "a filled field keeps the widget's background, border and rotation" {
         else => {},
     };
     try testing.expect(yellow and blue_border);
+}
+
+test "wrapping a very long line takes linear time" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const long = try a.alloc(u8, 200_000);
+    @memset(long, 'i');
+    var lines: std.ArrayList([]const u8) = .empty;
+    // One line as wide as all of it: re-measuring per character takes minutes.
+    try wrapLine(a, &lines, long, 1e12, 10);
+    try testing.expectEqual(@as(usize, 1), lines.items.len);
+    lines.clearRetainingCapacity();
+    try wrapLine(a, &lines, "aaa bbb ccc", textWidth("aaa bbb", 10), 10);
+    try testing.expectEqual(@as(usize, 2), lines.items.len);
+    try testing.expectEqualStrings("aaa bbb", lines.items[0]);
+    try testing.expectEqualStrings("ccc", lines.items[1]);
+    lines.clearRetainingCapacity();
+    // A word wider than the line is cut where it must be.
+    try wrapLine(a, &lines, "abcdefgh", textWidth("abc", 10), 10);
+    try testing.expect(lines.items.len > 1);
 }
