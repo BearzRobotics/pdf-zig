@@ -105,6 +105,11 @@ pub const Document = struct {
     failed_bytes: usize = 0,
     /// The last search for `endstream`: nothing from `from` up to `at`.
     endstream_search: struct { from: usize = 1, at: usize = 0 } = .{},
+    /// How often an allocation has failed. Reading goes through functions that
+    /// answer with a value, where a failure looks like a missing object.
+    /// Nothing produced while this changed is cached, and the operations that
+    /// can fail report `error.OutOfMemory` if it did (`checkMemory`).
+    oom_events: u64 = 0,
     /// Guards against references that lead back to the object being read.
     reading: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
@@ -141,13 +146,33 @@ pub const Document = struct {
         return self.arena.allocator();
     }
 
+    /// Remembers an allocation failure that is about to be turned into a value.
+    pub fn noteError(self: *Document, err: anyerror) void {
+        if (err == error.OutOfMemory) self.oom_events += 1;
+    }
+
+    /// Fails if an allocation has failed since `oom_events` was `since`.
+    pub fn checkMemory(self: *const Document, since: u64) Allocator.Error!void {
+        if (self.oom_events != since) return error.OutOfMemory;
+    }
+
     // ---- loading -----------------------------------------------------------------
 
     fn load(self: *Document) Error!void {
+        // A failed allocation may surface as any error, or as none at all.
+        self.loadParts() catch |err| {
+            try self.checkMemory(0);
+            return err;
+        };
+        try self.checkMemory(0);
+    }
+
+    fn loadParts(self: *Document) Error!void {
         const head_len = @min(self.data.len, 1024);
         if (std.mem.indexOf(u8, self.data[0..head_len], "%PDF-")) |i| self.base = i;
 
         const ok = self.readXrefChain();
+        try self.checkMemory(0);
         // The key must be known before any other object is read and cached.
         if (ok) try self.setupEncryption();
         if (!ok or !self.catalogReachable()) try self.rebuild();
@@ -170,15 +195,24 @@ pub const Document = struct {
         var sections: usize = 0;
         while (offset) |off| {
             if (visited.contains(off)) break;
-            visited.put(self.a(), off, {}) catch return false;
+            visited.put(self.a(), off, {}) catch |err| {
+                self.noteError(err);
+                return false;
+            };
             sections += 1;
             if (sections > self.options.max_sections) return false;
             var table_free: std.ArrayList(u32) = .empty;
             const t = self.readXrefSection(off, &table_free) orelse return false;
-            trailers.append(self.a(), t) catch return false;
+            trailers.append(self.a(), t) catch |err| {
+                self.noteError(err);
+                return false;
+            };
             // Hybrid-reference files: the stream's entries come before /Prev (7.5.8.4).
             if (t.get("XRefStm")) |xs| if (xs.asInt()) |xo| if (xo >= 0 and !visited.contains(@intCast(xo))) {
-                visited.put(self.a(), @intCast(xo), {}) catch return false;
+                visited.put(self.a(), @intCast(xo), {}) catch |err| {
+                    self.noteError(err);
+                    return false;
+                };
                 _ = self.readXrefSection(@intCast(xo), &table_free) orelse return false;
             };
             // A hybrid file's table marks the objects hidden from old readers
@@ -187,7 +221,10 @@ pub const Document = struct {
             offset = if (t.get("Prev")) |p| (if (p.asInt()) |pi| (if (pi >= 0) @as(?u64, @intCast(pi)) else null) else null) else null;
         }
         if (trailers.items.len == 0) return false;
-        self.trailer = self.mergeTrailers(trailers.items) catch return false;
+        self.trailer = self.mergeTrailers(trailers.items) catch |err| {
+            self.noteError(err);
+            return false;
+        };
         return true;
     }
 
@@ -230,7 +267,7 @@ pub const Document = struct {
 
     fn addEntry(self: *Document, num: u32, e: XrefEntry) void {
         if (num >= self.options.max_objects) return;
-        const gop = self.xref.getOrPut(self.a(), num) catch return;
+        const gop = self.xref.getOrPut(self.a(), num) catch |err| return self.noteError(err);
         if (!gop.found_existing) gop.value_ptr.* = e;
     }
 
@@ -257,11 +294,17 @@ pub const Document = struct {
                 if (kind.len == 1 and kind[0] == 'n') {
                     self.addEntry(num, .{ .in_use = .{ .offset = off, .gen = @intCast(@min(gen, 65535)) } });
                 } else if (kind.len == 1 and kind[0] == 'f') {
-                    table_free.append(self.a(), num) catch return null;
+                    table_free.append(self.a(), num) catch |err| {
+                        self.noteError(err);
+                        return null;
+                    };
                 } else return null;
             }
         }
-        const o = p.parseObject() catch return null;
+        const o = p.parseObject() catch |err| {
+            self.noteError(err);
+            return null;
+        };
         return o.asDict();
     }
 
@@ -288,10 +331,16 @@ pub const Document = struct {
         var index_pairs: std.ArrayList(u32) = .empty;
         if (st.dict.get("Index")) |ix| {
             const arr = ix.asArray() orelse return null;
-            for (arr) |x| index_pairs.append(self.a(), std.math.lossyCast(u32, x.asInt() orelse return null)) catch return null;
+            for (arr) |x| index_pairs.append(self.a(), std.math.lossyCast(u32, x.asInt() orelse return null)) catch |err| {
+                self.noteError(err);
+                return null;
+            };
         } else {
             const size = (st.dict.get("Size") orelse return null).asInt() orelse return null;
-            index_pairs.appendSlice(self.a(), &.{ 0, std.math.lossyCast(u32, size) }) catch return null;
+            index_pairs.appendSlice(self.a(), &.{ 0, std.math.lossyCast(u32, size) }) catch |err| {
+                self.noteError(err);
+                return null;
+            };
         }
 
         var cursor: usize = 0;
@@ -343,7 +392,8 @@ pub const Document = struct {
         if (expect) |e| if (e != num) return null;
 
         p.src = self.parseWindow(p.pos);
-        const value = p.parseObject() catch {
+        const value = p.parseObject() catch |err| {
+            self.noteError(err);
             self.failed_bytes +|= p.pos - pos;
             return null;
         };
@@ -423,7 +473,11 @@ pub const Document = struct {
         if (self.depth >= max_load_depth) return .null;
         self.depth += 1;
         defer self.depth -= 1;
-        self.reading.put(self.a(), num, {}) catch return .null;
+        const oom_before = self.oom_events;
+        self.reading.put(self.a(), num, {}) catch |err| {
+            self.noteError(err);
+            return .null;
+        };
         defer _ = self.reading.remove(num);
 
         var result: Object = .null;
@@ -431,9 +485,19 @@ pub const Document = struct {
             .free => {},
             .in_use => |e| {
                 if (self.readIndirectAt(self.base + @as(usize, @intCast(@min(e.offset, std.math.maxInt(usize) / 2))), num)) |ind| {
-                    result = self.decryptObject(ind.value, num, ind.gen) catch .null;
+                    result = self.decryptObject(ind.value, num, ind.gen) catch |err| failed: {
+                        self.noteError(err);
+                        break :failed .null;
+                    };
+                } else if (self.oom_events != oom_before) {
+                    // Not damage: reading failed for want of memory.
+                    return .null;
                 } else if (!self.repaired) {
-                    self.rebuild() catch {};
+                    self.rebuild() catch |err| {
+                        self.noteError(err);
+                        // Nothing changed after a lack of memory: try again later.
+                        if (!self.repaired) return .null;
+                    };
                     // Repair replaced the table: look again, once.
                     self.reading.clearRetainingCapacity();
                     return self.getObject(num);
@@ -441,7 +505,8 @@ pub const Document = struct {
             },
             .compressed => |c| result = self.getCompressed(c.stream_num, c.index, num),
         };
-        self.cache.put(self.a(), num, result) catch {};
+        if (self.oom_events != oom_before) return .null;
+        self.cache.put(self.a(), num, result) catch |err| self.noteError(err);
         return result;
     }
 
@@ -457,15 +522,21 @@ pub const Document = struct {
         const key = (@as(u64, stream_num) << 32) | stm.same[i];
         if (self.objstm_objects.get(key)) |o| return o;
         var p = object.Parser.init(self.a(), stm.data[0..@min(stm.data.len, stm.first +| stm.ends[i])], at);
-        const o = p.parseObject() catch .null;
-        self.objstm_objects.put(self.a(), key, o) catch {};
+        const o = p.parseObject() catch |err| failed: {
+            self.noteError(err);
+            if (err == error.OutOfMemory) return .null;
+            break :failed .null;
+        };
+        self.objstm_objects.put(self.a(), key, o) catch |err| self.noteError(err);
         return o;
     }
 
     fn objStm(self: *Document, num: u32) ?ObjStm {
         if (self.objstms.get(num)) |cached| return cached;
+        const oom_before = self.oom_events;
         const loaded = self.loadObjStm(num);
-        self.objstms.put(self.a(), num, loaded) catch {};
+        if (self.oom_events != oom_before) return null;
+        self.objstms.put(self.a(), num, loaded) catch |err| self.noteError(err);
         return loaded;
     }
 
@@ -485,19 +556,34 @@ pub const Document = struct {
         var p = object.Parser.init(self.a(), data, 0);
         // A number and an offset take at least three bytes.
         const most: usize = @min(@as(usize, @intCast(n)), data.len / 3 + 1);
-        const nums = self.a().alloc(u32, most) catch return null;
-        const offs = self.a().alloc(usize, most) catch return null;
+        const nums = self.a().alloc(u32, most) catch |err| {
+            self.noteError(err);
+            return null;
+        };
+        const offs = self.a().alloc(usize, most) catch |err| {
+            self.noteError(err);
+            return null;
+        };
         var count: usize = 0;
         while (count < nums.len) : (count += 1) {
-            const a1 = p.parseObject() catch break;
-            const a2 = p.parseObject() catch break;
+            const a1 = p.parseObject() catch |err| {
+                self.noteError(err);
+                break;
+            };
+            const a2 = p.parseObject() catch |err| {
+                self.noteError(err);
+                break;
+            };
             const on = a1.asInt() orelse break;
             const oo = a2.asInt() orelse break;
             if (on < 0 or oo < 0) break;
             nums[count] = @intCast(@min(on, std.math.maxInt(u32)));
             offs[count] = @intCast(oo);
         }
-        const spans = self.objStmSpans(offs[0..count], data.len) catch return null;
+        const spans = self.objStmSpans(offs[0..count], data.len) catch |err| {
+            self.noteError(err);
+            return null;
+        };
         return .{ .data = data, .nums = nums[0..count], .offsets = offs[0..count], .first = @intCast(first), .ends = spans.ends, .same = spans.same };
     }
 
@@ -709,7 +795,10 @@ pub const Document = struct {
 
     /// A copy of `d` whose values are resolved (so filter code sees numbers, not references).
     fn resolveDict(self: *Document, d: Dict) Dict {
-        const out = self.a().alloc(object.Entry, d.entries.len) catch return d;
+        const out = self.a().alloc(object.Entry, d.entries.len) catch |err| {
+            self.noteError(err);
+            return d;
+        };
         for (d.entries, 0..) |e, i| out[i] = .{ .key = e.key, .value = self.resolve(e.value) };
         return .{ .entries = out };
     }
@@ -728,7 +817,17 @@ pub const Document = struct {
     /// Like `decodeStream`, but the decoded data (and intermediate buffers) are
     /// allocated from `a`, for example a scratch arena that is reset per page.
     pub fn decodeStreamIn(self: *Document, alloc: Allocator, st: Stream) Error!filters.Result {
+        return self.decodeFiltered(alloc, st) catch |err| {
+            self.noteError(err);
+            return err;
+        };
+    }
+
+    fn decodeFiltered(self: *Document, alloc: Allocator, st: Stream) Error!filters.Result {
+        const oom_before = self.oom_events;
         const list = try self.filterList(st.dict);
+        // A filter that could not be read must not look like no filter.
+        try self.checkMemory(oom_before);
         var data = st.data;
         if (st.encrypted) if (self.crypt) |c| {
             data = try c.decrypt(alloc, c.stream_method, st.num, st.gen, data);
@@ -752,6 +851,33 @@ pub const Document = struct {
     /// Rebuilds the cross-reference table by scanning the file for `N G obj`
     /// and `trailer` (the usual recovery of viewers). Replaces the table.
     pub fn rebuild(self: *Document) Error!void {
+        // If repair fails, the document stays as it was. After a lack of memory
+        // it can be tried again; other failures would only repeat.
+        const before = .{ .xref = self.xref, .cache = self.cache, .objstms = self.objstms, .objstm_objects = self.objstm_objects, .trailer = self.trailer, .base = self.base, .repaired = self.repaired, .crypt = self.crypt, .encrypt_dict = self.encrypt_dict };
+        const oom_before = self.oom_events;
+        const outcome: Error!void = outcome: {
+            self.rebuildTables() catch |err| break :outcome err;
+            self.checkMemory(oom_before) catch |err| break :outcome err;
+            if (self.xref.count() == 0) break :outcome error.NotPdf;
+        };
+        outcome catch |err| {
+            self.noteError(err);
+            self.xref = before.xref;
+            self.cache = before.cache;
+            self.objstms = before.objstms;
+            self.objstm_objects = before.objstm_objects;
+            self.trailer = before.trailer;
+            self.base = before.base;
+            self.repaired = before.repaired or self.oom_events == oom_before;
+            self.crypt = before.crypt;
+            self.encrypt_dict = before.encrypt_dict;
+            self.reading = .empty;
+            try self.checkMemory(oom_before);
+            return err;
+        };
+    }
+
+    fn rebuildTables(self: *Document) Error!void {
         self.repaired = true;
         // The scan records positions in the whole file, so that objects before
         // the `%PDF-` header are kept too.
@@ -879,7 +1005,6 @@ pub const Document = struct {
             }
             if (guess) |ref| try self.setTrailerKey("Root", ref);
         }
-        if (self.xref.count() == 0) return error.NotPdf;
     }
 
     /// Something found by the repair scan, and its position in the file.

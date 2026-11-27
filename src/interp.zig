@@ -89,11 +89,14 @@ pub const Renderer = struct {
             _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
         }
         const scratch = self.scratch.?.allocator();
+        const oom_before = self.doc.oom_events;
         var run: Run = .{ .r = self, .a = list.arena.allocator(), .scratch = scratch };
         const data = try pages.contents(self.doc, scratch, p);
         run.gs = .{};
         try run.interpret(data, p.resources, .identity);
         try run.annotations(p);
+        // Missing content must not pass for success.
+        try self.doc.checkMemory(oom_before);
         list.commands = run.commands.items;
         return list;
     }
@@ -103,19 +106,24 @@ pub const Renderer = struct {
         self.ocg_loaded = true;
         const doc = self.doc;
         const a = doc.arena.allocator();
+        const oom_before = doc.oom_events;
+        // Read again next time if it could not be read completely now.
+        defer if (doc.oom_events != oom_before) {
+            self.ocg_loaded = false;
+        };
         const cat = doc.catalog() orelse return;
         const props = doc.getDict(cat, "OCProperties") orelse return;
         const d = doc.getDict(props, "D") orelse return;
         const base_off = if (doc.getName(d, "BaseState")) |b| std.mem.eql(u8, b, "OFF") else false;
         if (base_off) {
             if (doc.getArray(props, "OCGs")) |all| for (all) |g| if (g == .ref) {
-                self.ocg_off.put(a, g.ref.num, {}) catch {};
+                self.ocg_off.put(a, g.ref.num, {}) catch |err| doc.noteError(err);
             };
             if (doc.getArray(d, "ON")) |on| for (on) |g| if (g == .ref) {
                 _ = self.ocg_off.remove(g.ref.num);
             };
         } else if (doc.getArray(d, "OFF")) |off| for (off) |g| if (g == .ref) {
-            self.ocg_off.put(a, g.ref.num, {}) catch {};
+            self.ocg_off.put(a, g.ref.num, {}) catch |err| doc.noteError(err);
         };
     }
 
@@ -161,7 +169,9 @@ pub const Renderer = struct {
         const d = doc.resolve(dict_obj).asDict() orelse return null;
         const a = doc.arena.allocator();
         const f = try a.create(font_mod.Font);
+        const oom_before = doc.oom_events;
         f.* = try font_mod.Font.load(doc, d, num);
+        try doc.checkMemory(oom_before);
         if (num != 0) try self.fonts.put(a, num, f);
         return f;
     }
@@ -759,7 +769,10 @@ const Run = struct {
         var funcs: std.ArrayList(function.Function) = .empty;
         if (fobj) |fo| switch (fo) {
             .array => |arr| for (arr) |item| {
-                const fn_ = function.load(doc_, item, 0) catch continue;
+                const fn_ = function.load(doc_, item, 0) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.BadFunction => continue,
+                };
                 try funcs.append(self.a, fn_);
             },
             else => if (function.load(doc_, fo, 0)) |f1| try funcs.append(self.a, f1) else |err| switch (err) {

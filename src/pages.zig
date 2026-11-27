@@ -70,6 +70,14 @@ pub const PageList = struct {
     pub const max_pages = 1 << 20;
 
     pub fn build(doc: *Document) Allocator.Error!PageList {
+        const oom_before = doc.oom_events;
+        const list = try walk(doc);
+        // A node that could not be read would silently drop its pages.
+        try doc.checkMemory(oom_before);
+        return list;
+    }
+
+    fn walk(doc: *Document) Allocator.Error!PageList {
         const a = doc.arena.allocator();
         var out: std.ArrayList(Entry) = .empty;
         const root = doc.get(doc.catalog() orelse return .{ .entries = &.{} }, "Pages") orelse return .{ .entries = &.{} };
@@ -171,7 +179,11 @@ pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
 /// The buffer is allocated from `a`; pass a scratch arena to avoid keeping it
 /// for the life of the document.
 pub fn contents(doc: *Document, a: Allocator, p: Page) (Allocator.Error || doc_mod.Error)![]const u8 {
-    const c = doc.get(p.dict, "Contents") orelse return "";
+    const oom_before = doc.oom_events;
+    const c = doc.get(p.dict, "Contents") orelse {
+        try doc.checkMemory(oom_before);
+        return "";
+    };
     var out: std.ArrayList(u8) = .empty;
     switch (c) {
         .stream => |s| try out.appendSlice(a, try doc.streamDataIn(a, s)),
@@ -195,5 +207,6 @@ pub fn contents(doc: *Document, a: Allocator, p: Page) (Allocator.Error || doc_m
         },
         else => {},
     }
+    try doc.checkMemory(oom_before);
     return out.items;
 }

@@ -233,6 +233,9 @@ pub const Update = struct {
     /// Object number to its new value, in the order they were set.
     changed: std.AutoArrayHashMapUnmanaged(u32, Object) = .empty,
     next: u32,
+    /// `Document.oom_events` at `init`. If an object could not be read for
+    /// want of memory since, the update may be built on a missing one.
+    oom_at_init: u64,
 
     pub fn init(gpa: Allocator, doc: *Document) Error!Update {
         if (doc.crypt != null) return error.Encrypted;
@@ -241,7 +244,7 @@ pub const Update = struct {
         if (doc.trailer.get("Size")) |s| top = @intCast(@max(0, @min(s.asInt() orelse 0, std.math.maxInt(u32) - 1)));
         var it = doc.xref.keyIterator();
         while (it.next()) |k| top = @max(top, k.* + 1);
-        return .{ .doc = doc, .arena = std.heap.ArenaAllocator.init(gpa), .next = top };
+        return .{ .doc = doc, .arena = std.heap.ArenaAllocator.init(gpa), .next = top, .oom_at_init = doc.oom_events };
     }
 
     pub fn deinit(self: *Update) void {
@@ -295,6 +298,7 @@ pub const Update = struct {
         // A bad entry found since `init` rebuilds the document: the file's own
         // cross-reference data cannot be pointed at any more.
         if (doc.repaired) return error.Repaired;
+        try doc.checkMemory(self.oom_at_init);
         const prev = lastStartxref(doc.data) orelse return error.Repaired;
         const use_stream = if (doc.trailer.get("Type")) |t| (t == .name and std.mem.eql(u8, t.name, "XRef")) else false;
 

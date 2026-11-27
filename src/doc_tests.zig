@@ -669,3 +669,105 @@ test "limits: the document keeps a bounded amount of decoded data" {
     // Decoding into the caller's own allocator is not counted.
     _ = try doc.decodeStreamIn(a, st);
 }
+
+test "out of memory is reported and never remembered as a missing object" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Large enough that parsing object 4 must allocate.
+    const items: [20_000][]const u8 = @splat("7");
+    const big = try std.fmt.allocPrint(a, "[{s}]", .{try std.mem.join(a, " ", &items)});
+    const bytes = try build(a, &(simple ++ .{big}));
+
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        var doc = pdf.Document.open(failing.allocator(), bytes, .{}) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer doc.deinit();
+        // A successful open is a complete one.
+        try testing.expect(!doc.repaired);
+        const first = doc.getObject(4);
+        const failed = failing.has_induced_failure;
+        if (failed) {
+            try testing.expect(doc.oom_events > 0);
+            // With memory available again the object is there.
+            failing.fail_index = std.math.maxInt(usize);
+            failing.resize_fail_index = std.math.maxInt(usize);
+            try testing.expectEqual(@as(usize, items.len), doc.getObject(4).array.len);
+            try testing.expect(!doc.repaired);
+        } else {
+            try testing.expectEqual(@as(usize, items.len), first.array.len);
+            break;
+        }
+    }
+}
+
+test "out of memory during rendering or page listing is an error, not a partial result" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var content: std.ArrayList(u8) = .empty;
+    for (0..3000) |_| try content.appendSlice(a, "0 0 5 5 re f ");
+    var hex: std.ArrayList(u8) = .empty;
+    for (content.items) |c| try hex.print(a, "{x:0>2}", .{c});
+    const form = try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [0 0 9 9] /Filter /AHx /Length {d} >>\nstream\n{s}\nendstream", .{ hex.items.len, hex.items });
+    const bytes = try @import("interp_tests.zig").page(a, "/F Do", "/XObject << /F 5 0 R >>", &.{form}, "");
+
+    var fail_at: usize = 0;
+    var successes: usize = 0;
+    while (successes == 0) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        const gpa = failing.allocator();
+        var doc = pdf.Document.open(gpa, bytes, .{}) catch continue;
+        defer doc.deinit();
+        const list = pdf.pages.PageList.build(&doc) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try testing.expectEqual(@as(usize, 1), list.entries.len);
+        const p = pdf.pages.page(&doc, list, 0).?;
+        if (failing.has_induced_failure) continue;
+        var rend = pdf.Renderer.init(&doc, .{});
+        defer rend.deinit();
+        var dl = rend.render(gpa, p) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer dl.deinit();
+        var fills: usize = 0;
+        for (dl.commands) |c| {
+            if (c == .fill) fills += 1;
+        }
+        try testing.expectEqual(@as(usize, 3000), fills);
+        successes += 1;
+    }
+}
+
+test "out of memory inside an object stream is not remembered either" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Object 5 is stored in object stream 4. No xref data: the file is scanned,
+    // so object 5 is parsed when first asked for.
+    const zeros: [40_000]u8 = @splat(' ');
+    var data: std.ArrayList(u8) = .empty;
+    try data.appendSlice(a, "5 0 [");
+    for (&zeros, 0..) |_, i| try data.append(a, if (i % 2 == 0) '7' else ' ');
+    try data.append(a, ']');
+    const bytes = try looseFile(a, try std.fmt.allocPrint(a, "4 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {d} >>\nstream\n{s}\nendstream\nendobj\n", .{ data.items.len, data.items }));
+    var fail_at: usize = 0;
+    var reached = false;
+    while (!reached) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        var doc = pdf.Document.open(failing.allocator(), bytes, .{}) catch continue;
+        defer doc.deinit();
+        _ = doc.getObject(5);
+        reached = !failing.has_induced_failure;
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        try testing.expectEqual(@as(usize, 20_000), doc.getObject(5).array.len);
+    }
+}
