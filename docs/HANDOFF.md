@@ -3,6 +3,7 @@
 > **Note (2026-11-27, pdf-zig 0.3.0):** the pdf-zig details below are from 2026-11-07 and
 > are out of date. For this library see `README.md`, `docs/architecture.md` and
 > `docs/CHANGELOG.md`. The notes on the other projects have not been checked since.
+> For updating the viewer, use `docs/HANDOFF-viewer.md`.
 
 Written 2026-11-07 so a new Claude (or the maintainer) can continue. Read `ai/AGENTS.md` first:
 the maintainer's engineering rules apply (std.Io, bounded resources, tests derived from
