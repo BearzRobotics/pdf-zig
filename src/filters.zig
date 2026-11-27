@@ -328,21 +328,22 @@ fn predict(a: Allocator, data: []const u8, parms: object.Dict, max: usize) Error
     // PNG predictors (10..15): every row starts with a tag byte.
     const stride = row_bytes + 1;
     const rows = (data.len + stride - 1) / stride;
-    if (rows * row_bytes > max) return error.TooLarge;
-    var out = try a.alloc(u8, rows * row_bytes);
-    @memset(out, 0);
+    // Every byte but the tags is output. Only the last row can be short, and
+    // only the bytes it has are processed: the declared row size comes from the
+    // file and may be far larger than the data.
+    const size = data.len - rows;
+    if (size > max) return error.TooLarge;
+    var out = try a.alloc(u8, size);
     var prev_row: []const u8 = out[0..0];
-    var written: usize = 0;
     for (0..rows) |r| {
         const src_start = r * stride;
         const tag = data[src_start];
         const src = data[src_start + 1 .. @min(data.len, src_start + stride)];
-        const dst = out[r * row_bytes .. r * row_bytes + row_bytes];
-        @memcpy(dst[0..src.len], src);
-        written = r * row_bytes + src.len;
+        const dst = out[r * row_bytes ..][0..src.len];
+        @memcpy(dst, src);
         switch (tag) {
             0 => {},
-            1 => for (bpp..dst.len) |k| {
+            1 => if (dst.len > bpp) for (bpp..dst.len) |k| {
                 dst[k] +%= dst[k - bpp];
             },
             2 => if (prev_row.len > 0) for (0..dst.len) |k| {
@@ -363,7 +364,7 @@ fn predict(a: Allocator, data: []const u8, parms: object.Dict, max: usize) Error
         }
         prev_row = dst;
     }
-    return out[0..@min(written, out.len)];
+    return out;
 }
 
 fn paeth(a: i32, b: i32, c: i32) u8 {
@@ -485,4 +486,22 @@ test "predictor limits and short data" {
     const out = try predict(a, &.{ 0, 9, 9, 9, 1, 4 }, try pngParms(a, 3), 1 << 16);
     try std.testing.expectEqualSlices(u8, &.{ 9, 9, 9, 4 }, out);
     try std.testing.expectError(error.TooLarge, predict(a, &.{ 0, 1, 2, 3 }, try pngParms(a, 3), 2));
+}
+
+test "PNG predictor: a huge row with almost no data costs only the data" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var arena = std.heap.ArenaAllocator.init(counting.allocator());
+    defer arena.deinit();
+    const entries = [_]object.Entry{
+        .{ .key = "Predictor", .value = .{ .integer = 12 } },
+        .{ .key = "Columns", .value = .{ .integer = 16_777_216 } },
+        .{ .key = "Colors", .value = .{ .integer = 31 } },
+    };
+    // One byte: the tag of a row, with nothing after it.
+    const out = try predict(arena.allocator(), "\x04", .{ .entries = &entries }, 512 << 20);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+    // A tag and three bytes of an Up row.
+    const short = try predict(arena.allocator(), "\x02abc", .{ .entries = &entries }, 512 << 20);
+    try std.testing.expectEqualStrings("abc", short);
+    try std.testing.expect(counting.allocated_bytes < 1 << 16);
 }
