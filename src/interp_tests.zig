@@ -889,3 +889,21 @@ test "optional content membership: every policy, direct and indirect /OCGs" {
     defer done(r);
     try testing.expectEqual(@as(usize, 0), countKind(r.list, .fill));
 }
+
+test "marked content opened or closed in a form stays in the form" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The form leaves a hidden section open.
+    const open_body = "/OC /Off BDC 0 0 1 1 re f";
+    const open_form = try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [0 0 9 9] /Length {d} >>\nstream\n{s}\nendstream", .{ open_body.len, open_body });
+    const r = try render(try ocPage(a, "<< /Type /OCG >>", "/Fm Do 0 0 9 9 re f", &.{open_form}));
+    defer done(r);
+    try testing.expectEqual(@as(usize, 1), countKind(r.list, .fill));
+    // The form's stray EMC cannot end the page's hidden section.
+    const close_body = "EMC 0 0 1 1 re f";
+    const close_form = try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [0 0 9 9] /Length {d} >>\nstream\n{s}\nendstream", .{ close_body.len, close_body });
+    const r2 = try render(try ocPage(a, "<< /Type /OCG >>", "/OC /Off BDC /Fm Do 0 0 9 9 re f EMC 0 0 3 3 re f", &.{close_form}));
+    defer done(r2);
+    try testing.expectEqual(@as(usize, 1), countKind(r2.list, .fill));
+}

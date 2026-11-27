@@ -325,6 +325,8 @@ const Run = struct {
     /// `q` levels below this belong to the callers of the current content
     /// stream, which its `Q` operators must not pop.
     floor: usize = 0,
+    /// The same for marked content: sections below this are the callers'.
+    mc_floor: usize = 0,
     ops: usize = 0,
     content_bytes: usize = 0,
     depth: u8 = 0,
@@ -364,6 +366,13 @@ const Run = struct {
         const saved_floor = self.floor;
         self.floor = saved_depth;
         defer self.floor = saved_floor;
+        const saved_mc_floor = self.mc_floor;
+        self.mc_floor = self.mc_stack.items.len;
+        defer {
+            // Sections left open end with their stream.
+            while (self.mc_stack.items.len > self.mc_floor) self.endMarked();
+            self.mc_floor = saved_mc_floor;
+        }
         self.resources = resources;
         self.base_ctm = base;
         defer {
@@ -401,6 +410,12 @@ const Run = struct {
         const v = num(op, i);
         if (std.math.isNan(v)) return 0;
         return @intFromFloat(std.math.clamp(@trunc(v), @as(f64, @floatFromInt(lo)), @as(f64, @floatFromInt(hi))));
+    }
+
+    /// Ends the innermost marked-content section.
+    fn endMarked(self: *Run) void {
+        const hide = self.mc_stack.pop() orelse return;
+        if (hide and self.hidden_depth > 0) self.hidden_depth -= 1;
     }
 
     fn save(self: *Run) Error!void {
@@ -577,9 +592,7 @@ const Run = struct {
                 try self.mc_stack.append(self.a, hide);
                 if (hide) self.hidden_depth += 1;
             },
-            .EMC => if (self.mc_stack.pop()) |hide| {
-                if (hide and self.hidden_depth > 0) self.hidden_depth -= 1;
-            },
+            .EMC => if (self.mc_stack.items.len > self.mc_floor) self.endMarked(),
         }
     }
 
