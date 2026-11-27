@@ -22,6 +22,7 @@ const object = @import("object.zig");
 const document = @import("document.zig");
 const pages = @import("pages.zig");
 const encoding = @import("encoding.zig");
+const font_mod = @import("font.zig");
 const std14 = @import("std14.zig");
 const write = @import("write.zig");
 
@@ -270,7 +271,7 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
     fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, text) });
     try upd.set(field.num, .{ .dict = fd });
 
-    const da = try defaultAppearance(upd, fd);
+    const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, text, field.password)));
     for (field.widgets) |w| {
         if (w.num == 0) continue;
         const ap = try textAppearance(upd, w.rect, text, field.multiline, field.password, da);
@@ -360,8 +361,29 @@ const DefaultAppearance = struct {
     font: Ref,
 };
 
-/// Reads `/DA` and `/Q` of the field and finds (or makes) the font it names.
-fn defaultAppearance(upd: *Update, fd: Dict) Error!DefaultAppearance {
+/// Whether a field's appearance can write the WinAnsi `bytes` with this font:
+/// a font of one byte per character that has each of them where WinAnsi has
+/// it. An embedded subset may lack glyphs, and the symbol fonts have no text.
+fn drawsWinAnsi(doc: *Document, font_dict: Dict, bytes: []const u8) Allocator.Error!bool {
+    const loaded = try font_mod.Font.load(doc, font_dict, 0);
+    if (loaded.subtype != .type1 and loaded.subtype != .truetype) return false;
+    for ([_][]const u8{ "Symbol", "ZapfDingbats" }) |symbols| {
+        if (std.mem.eql(u8, loaded.base_font, symbols)) return false;
+    }
+    if (loaded.program.kind != .none) {
+        const name = doc.getName(font_dict, "BaseFont") orelse "";
+        if (name.len != loaded.base_font.len) return false; // a subset prefix was removed
+    }
+    for (bytes) |b| {
+        if (b == '\n') continue;
+        if (loaded.unicode[b] != encoding.unicodeOf(.win_ansi, b)) return false;
+    }
+    return true;
+}
+
+/// Reads `/DA` and `/Q` of the field and finds (or makes) a font for the
+/// WinAnsi `bytes` the appearance will show.
+fn defaultAppearance(upd: *Update, fd: Dict, bytes: []const u8) Error!DefaultAppearance {
     const a = upd.allocator();
     const doc = upd.doc;
     var da_text: []const u8 = "/Helv 0 Tf 0 g";
@@ -435,11 +457,12 @@ fn defaultAppearance(upd: *Update, fd: Dict) Error!DefaultAppearance {
     if (color.items.len > 0) out.color_ops = color.items;
     out.font_name = try a.dupe(u8, out.font_name);
 
-    // The font: the form's default resources first, else a new Helvetica.
+    // The font: the one /DA names in the form's default resources if it can
+    // write the text, else a new Helvetica.
     var font_ref: ?Ref = null;
     if (form) |f| if (doc.getDict(f, "DR")) |dr| if (doc.getDict(dr, "Font")) |fonts| {
-        if (fonts.get(out.font_name)) |fo| if (fo == .ref) {
-            font_ref = fo.ref;
+        if (fonts.get(out.font_name)) |fo| if (fo == .ref) if (doc.resolve(fo).asDict()) |font_dict| {
+            if (try drawsWinAnsi(doc, font_dict, bytes)) font_ref = fo.ref;
         };
     };
     out.font = font_ref orelse try upd.add(.{ .dict = try write.makeDict(a, &.{
@@ -512,6 +535,14 @@ pub fn textWidth(bytes: []const u8, size: f64) f64 {
     return w * size / 1000.0;
 }
 
+/// What a field shows for `value`: a password field shows one `*` per character.
+fn shownText(a: Allocator, value: []const u8, password: bool) Allocator.Error![]const u8 {
+    if (!password) return value;
+    const stars = try a.alloc(u8, std.unicode.utf8CountCodepoints(value) catch value.len);
+    @memset(stars, '*');
+    return stars;
+}
+
 /// A form XObject that draws `value` inside `rect` (placed at the widget's size).
 fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: bool, password: bool, da: DefaultAppearance) Error!Ref {
     const a = upd.allocator();
@@ -519,14 +550,7 @@ fn textAppearance(upd: *Update, rect: pages.Rect, value: []const u8, multiline: 
     const h = rect.height();
     const pad = 2.0;
 
-    var shown: []const u8 = value;
-    if (password) {
-        const n = std.unicode.utf8CountCodepoints(value) catch value.len;
-        const stars = try a.alloc(u8, n);
-        @memset(stars, '*');
-        shown = stars;
-    }
-    const bytes = try toWinAnsi(a, shown);
+    const bytes = try toWinAnsi(a, try shownText(a, value, password));
     const size: f64 = if (da.size > 0) da.size else if (multiline) 12 else std.math.clamp(h - 2 * pad, 4, 12);
 
     // Lines: explicit breaks, and for multi-line fields a wrap at spaces.
@@ -764,5 +788,68 @@ test "a field tree that names its nodes many times is walked once" {
         const pl = try pages.PageList.build(&doc);
         const all = try fields(arena.allocator(), &doc, pl);
         try testing.expect(all.len <= 1);
+    }
+}
+
+/// Fills a field whose `/DA` font is `font`, and returns the base font of the
+/// font the new appearance uses and the text drawn on the page.
+fn fillWithFont(arena: Allocator, font: []const u8, value: []const u8) !struct { used_form_font: bool, drawn: []const u8 } {
+    const tests = @import("interp_tests.zig");
+    const bytes = try tests.buildFile(arena, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /DR << /Font << /F0 5 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) /Rect [10 100 190 160] /DA (/F0 12 Tf 0 g) >>",
+        font,
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica >>",
+        "<< /Type /FontDescriptor /FontName /ABCDEF+Some /Flags 32 /FontFile2 8 0 R >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(arena, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setText(&upd, all[0], value);
+    const ap = upd.get(upd.get(4).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    const fonts = ap.dict.get("Resources").?.dict.get("Font").?.dict;
+    try testing.expectEqual(@as(usize, 1), fonts.entries.len);
+    const used = fonts.entries[0].value.ref.num == 5;
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try upd.write(testing.allocator, &out.writer);
+    var doc2 = try Document.open(testing.allocator, out.written(), .{});
+    defer doc2.deinit();
+    const pl2 = try pages.PageList.build(&doc2);
+    var rend = interp.Renderer.init(&doc2, .{});
+    defer rend.deinit();
+    var dl = try rend.render(testing.allocator, pages.page(&doc2, pl2, 0).?);
+    defer dl.deinit();
+    const drawn = try @import("text.zig").extract(arena, &dl, .reading);
+    return .{ .used_form_font = used, .drawn = std.mem.trim(u8, drawn, "\n") };
+}
+
+test "the form's font is used only if it draws the bytes written" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { font: []const u8, value: []const u8, keep: bool }{
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>", .value = "caf\u{e9}", .keep = true },
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>", .value = "plain words", .keep = true },
+        .{ .font = "<< /Type /Font /Subtype /TrueType /BaseFont /Arial >>", .value = "caf\u{e9}", .keep = true },
+        .{ .font = "<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica /Encoding /Identity-H /DescendantFonts [6 0 R] >>", .value = "Hello World", .keep = false },
+        // Differences that move a letter the text uses, and one it does not use.
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [72 /bullet] >> >>", .value = "Hello", .keep = false },
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [1 /bullet] >> >>", .value = "Hello", .keep = true },
+        // Without an encoding a Type 1 font lacks the accented letter.
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", .value = "caf\u{e9}", .keep = false },
+        .{ .font = "<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Some /Encoding /WinAnsiEncoding /FontDescriptor 7 0 R >>", .value = "Hello", .keep = false },
+        .{ .font = "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>", .value = "Hello", .keep = false },
+    };
+    for (cases) |c| {
+        const got = try fillWithFont(a, c.font, c.value);
+        try testing.expectEqual(c.keep, got.used_form_font);
+        if (!c.keep) try testing.expectEqualStrings(c.value, got.drawn);
     }
 }
