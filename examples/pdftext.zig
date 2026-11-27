@@ -50,12 +50,14 @@ pub fn main(init: std.process.Init) !u8 {
     var out_buf: [65536]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buf);
     const w = &stdout.interface;
+    var failed_pages = false;
     var n: usize = 0;
     while (n < list.entries.len) : (n += 1) {
         if (only) |o| if (o != n + 1) continue;
         const page = pdf.pages.page(&doc, list, n) orelse continue;
         var dl = rend.render(gpa, page) catch |err| {
             std.debug.print("pdftext: page {d}: {s}\n", .{ n + 1, @errorName(err) });
+            failed_pages = true;
             continue;
         };
         defer dl.deinit();
@@ -65,5 +67,5 @@ pub fn main(init: std.process.Init) !u8 {
         try w.writeAll("\x0c");
     }
     try w.flush();
-    return 0;
+    return @intFromBool(failed_pages);
 }

@@ -74,5 +74,5 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("{s}: pages={d} objects={d} streams={d} undecodable={d} image-codec-streams={d} repaired={}\n", .{
         args[1], list.entries.len, doc.xref.count(), streams, failed, image_codecs, doc.repaired,
     });
-    return 0;
+    return @intFromBool(render_errors > 0);
 }
