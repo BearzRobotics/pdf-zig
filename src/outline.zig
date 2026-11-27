@@ -117,21 +117,27 @@ pub fn destinationWithin(doc: *Document, list: pages.PageList, d: Dict, work: *W
 }
 
 fn resolveDest(doc: *Document, list: pages.PageList, dest: Object, depth: usize, work: *Work) ?Destination {
+    return fromArray(doc, list, destinationArray(doc, dest, depth, work) orelse return null, work);
+}
+
+/// The array `[page /Kind ...]` that `dest` stands for: itself, or what a name,
+/// a string or a dictionary with `/D` leads to (12.3.2).
+pub fn destinationArray(doc: *Document, dest: Object, depth: usize, work: *Work) ?[]const Object {
     if (depth > 4) return null;
     const o = doc.resolve(dest);
     switch (o) {
-        .array => |arr| return fromArray(doc, list, arr, work),
-        .dict => |d| return resolveDest(doc, list, d.get("D") orelse return null, depth + 1, work),
+        .array => |arr| return arr,
+        .dict => |d| return destinationArray(doc, d.get("D") orelse return null, depth + 1, work),
         .name, .string => |key| {
             // A named destination: the catalog's /Dests dictionary, then the /Names /Dests tree.
             const cat = doc.catalog() orelse return null;
-            if (o == .name) if (doc.getDict(cat, "Dests")) |dests| if (dests.get(key)) |v| return resolveDest(doc, list, v, depth + 1, work);
+            if (o == .name) if (doc.getDict(cat, "Dests")) |dests| if (dests.get(key)) |v| return destinationArray(doc, v, depth + 1, work);
             if (doc.getDict(cat, "Names")) |names| if (doc.getDict(names, "Dests")) |tree| {
                 var this: usize = @min(max_lookup_nodes, work.lookups);
                 const allowed = this;
                 const hit = lookupTree(doc, tree, key, 0, &this);
                 work.lookups -= allowed - this;
-                if (hit) |v| return resolveDest(doc, list, v, depth + 1, work);
+                if (hit) |v| return destinationArray(doc, v, depth + 1, work);
             };
             return null;
         },

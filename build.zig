@@ -92,6 +92,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfimg);
 
+    const pdfpages = b.addExecutable(.{
+        .name = "pdfpages",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfpages.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfpages);
+
     // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
     for ([_][]const u8{
         "plain",          "enc_rc4_40",         "enc_rc4_128",          "enc_aes_128",           "enc_aes_256",
@@ -109,7 +120,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests and compile the example programs");
     // A change that breaks an example must fail the tests too.
-    for ([_]*std.Build.Step.Compile{ pdfinfo, pdftext, pdfdump, pdfmark, pdffill, pdfsvg, pdfimg }) |example| {
+    for ([_]*std.Build.Step.Compile{ pdfinfo, pdftext, pdfdump, pdfmark, pdffill, pdfsvg, pdfimg, pdfpages }) |example| {
         test_step.dependOn(&example.step);
     }
     const unit = b.addTest(.{ .root_module = mod });

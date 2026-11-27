@@ -114,7 +114,8 @@ pub const Renderer = struct {
         return list;
     }
 
-    fn loadOcgs(self: *Renderer) void {
+    /// Fills `ocg_off` from the document's default configuration (8.11.4.3).
+    pub fn loadOcgs(self: *Renderer) void {
         if (self.ocg_loaded) return;
         self.ocg_loaded = true;
         const doc = self.doc;

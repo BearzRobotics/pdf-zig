@@ -24,6 +24,8 @@
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
+| `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
+| `compose.zig` | A new document from blank pages and pages of other documents |
 | `image.zig` | Image samples to RGBA; masks; hand-off to a JPEG/JPX codec |
 | `ccitt.zig` | CCITT fax decoding (T.4, T.6), used for images and their masks |
 | `spans.zig` | Overlapping ranges (CMaps, CID widths) made disjoint, later definitions winning |
@@ -59,6 +61,34 @@ invisible text (mode 3) so it can be extracted.
 
 A list with content left out (a stream that cannot be decoded, a function that cannot
 be read, a shading of type 1 or 4 to 7, nesting past `max_depth`) has `DisplayList.incomplete` set.
+
+## New documents
+
+`compose.Builder` writes a complete new file (`docs/decisions/0003-writing-new-documents.md`).
+It creates, deletes, reorders, merges, splits and rotates pages. `write.Update` is the other
+way to change a PDF: it appends to the file and keeps everything in it.
+
+- **Copying.** `importPages` first numbers the chosen pages, then their annotations, then
+  copies everything they refer to from a work list. A reference to the catalog, a page tree
+  node, a structure element, the outline or a page not in the call becomes null, so nothing
+  left out can come in through it. Objects are copied once per call.
+- **What is rewritten.** Pages get their inherited attributes. A destination becomes an
+  explicit array to the new page, or is dropped. Of actions, `GoTo` (as a destination),
+  `URI` and `Named` stay; others, `/Next` chains and the `/AA` entries of pages and
+  annotations are dropped. A widget loses `/Parent`. Layers that were copied go into
+  `/OCProperties` with their default on or off state.
+- **Memory.** Pages and objects are serialized as they are copied, and the source can be
+  closed after the call. `compose.Options` limits the size and the number of objects. A
+  call that fails adds nothing.
+- **Output.** PDF 1.7 (2.0 if a source is), a cross-reference table, no object streams.
+  Stored stream data is copied without being re-encoded. A file whose source uses object
+  streams grows: on the long TeX manuals tried, up to a little over twice the size.
+- **Not carried over:** bookmarks and the form (planned next), document information and
+  metadata, page labels, document attachments, structure and output intents. Widgets keep
+  their appearance streams only. **It is not redaction:** a resource dictionary that pages
+  share is copied whole.
+- **Encrypted sources** need `ImportOptions.allow_decrypted_output`, as the output is not
+  encrypted. Repaired sources are fine.
 
 ## Resource limits
 
@@ -103,6 +133,8 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
+- In new documents: bookmarks, forms, object streams, encryption, and drawing new page
+  content.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with

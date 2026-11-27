@@ -3,8 +3,9 @@
 A PDF library for Zig, built on `std.Io`, for the DKDE PDF viewer. It reads the
 file structure and turns pages into a **display list** (paths, text, images, shadings)
 that a renderer draws; it draws nothing itself. It also finds text on the page, reads
-bookmarks and form fields, and writes annotations, bookmarks and form values as an
-incremental update. Zig 0.17.1, no dependencies.
+bookmarks, links and form fields, and writes annotations, bookmarks and form values as an
+incremental update. It can also make new documents from blank pages and from pages of
+others. Zig 0.17.1, no dependencies.
 
 Written from ISO 32000-1:2008 (see `docs/decisions/0001-architecture.md`).
 
@@ -75,6 +76,27 @@ of a password field is not stored in the file. A choice field stores the option'
 value, and only an editable combo box takes other text. Signature fields are listed, not
 filled; XFA forms are not read; no scripts run.
 
+## New documents: extract, reorder, merge
+
+```zig
+var out = pdf.compose.Builder.init(gpa, .{});
+defer out.deinit();
+try out.importPages(&first, &.{ 2, 0, 1 }, .{});          // any pages, in any order
+try out.addBlankPage(612, 792);                           // points
+try out.importPages(&second, &.{0}, .{});
+try out.setRotation(0, 90);
+try out.write(&writer.interface);                         // a complete new file
+```
+
+Import all the pages you want from a document in one call: shared fonts and images are
+then copied once, and links between those pages keep working. Pages keep their content,
+annotations, links and hidden layers. **Bookmarks and fillable forms are not carried yet**
+(form fields keep their look), nor are document information, page labels or accessibility
+tags. An encrypted source is refused unless `allow_decrypted_output` is set, because the
+new file is not encrypted. Leaving a page out is **not redaction**: pages often share
+resources, which are copied whole. Details in `docs/architecture.md`, "New documents".
+Drawing content on new pages is not supported yet.
+
 ## What it reads
 
 | Area | State |
@@ -113,7 +135,8 @@ compare with `pdftotext` and `pdfinfo`.
 `zig build` installs `pdfinfo` (structure, `-r` renders every page and decodes its images),
 `pdftext` (`-raw` for stream order, `-p` for a password), `pdfdump` (the display list of a page),
 `pdfsvg` (a page as SVG, to look at), `pdfimg` (decode the images of a page), `pdfmark`
-(highlight a word and add a note) and `pdffill` (list or fill form fields).
+(highlight a word and add a note), `pdffill` (list or fill form fields) and `pdfpages` (a new
+PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`).
 
 ## Tests
 

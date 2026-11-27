@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New `compose.Builder`: makes a new document from blank pages and pages of other
+  documents, to create, delete, reorder, merge, split and rotate pages. Bookmarks and
+  fillable forms are not carried over yet. New example `pdfpages`.
+- New `Document.storedStreamData` and `Renderer.loadOcgs`, which `compose` uses.
 - New `link.list`: the links of a page, with the page they go to, their URI or their
   named action.
 - Pages with `/UserUnit` have their true size: `Page.displaySize` and `DisplayList.base`

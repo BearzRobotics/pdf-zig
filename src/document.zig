@@ -892,6 +892,20 @@ pub const Document = struct {
         return filters.decode(alloc, data, list, self.options.max_stream_bytes);
     }
 
+    /// The stream's bytes as the file stores them, with every filter still
+    /// applied but decrypted: what copying the stream elsewhere needs. Borrowed
+    /// from the document unless decryption had to allocate from `alloc`.
+    pub fn storedStreamData(self: *Document, alloc: Allocator, st: Stream) Error![]const u8 {
+        if (!st.encrypted) return st.data;
+        const c = self.crypt orelse return st.data;
+        const method = st.crypt_method orelse c.stream_method;
+        if (method == .unsupported) return error.UnsupportedFilter;
+        return c.decrypt(alloc, method, st.num, st.gen, st.data) catch |err| {
+            self.noteError(err);
+            return err;
+        };
+    }
+
     pub fn streamDataIn(self: *Document, alloc: Allocator, st: Stream) Error![]const u8 {
         const r = try self.decodeStreamIn(alloc, st);
         return r.data;
