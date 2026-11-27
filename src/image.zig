@@ -237,7 +237,8 @@ fn colorKey(doc: *Document, a: Allocator, d: Dict, ncomp: usize) Allocator.Error
     const arr = m.asArray() orelse return null;
     if (arr.len < 2 * ncomp) return null;
     const out = try a.alloc(u32, 2 * ncomp);
-    for (0..2 * ncomp) |i| out[i] = @intCast(@max(0, doc.resolve(arr[i]).asInt() orelse return null));
+    // No sample is wider than 16 bits.
+    for (0..2 * ncomp) |i| out[i] = @intCast(std.math.clamp(doc.resolve(arr[i]).asInt() orelse return null, 0, 65535));
     return out;
 }
 

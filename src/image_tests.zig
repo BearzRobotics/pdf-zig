@@ -233,3 +233,15 @@ test "CCITT G3 1D, G3 2D and G4 match the bitmap Ghostscript rendered" {
         doc.deinit();
     }
 }
+
+test "colour key values outside the sample range are clamped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const px = try decodeFirst(a, &.{try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Mask [128 9223372036854775807]", "\x05\x80")}, "");
+    try testing.expectEqual(@as(u8, 255), px.rgba[3]);
+    try testing.expectEqual(@as(u8, 0), px.rgba[7]); // 128 and above is keyed out
+    const low = try decodeFirst(a, &.{try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Mask [-5 4294967296]", "\x05\x80")}, "");
+    try testing.expectEqual(@as(u8, 0), low.rgba[3]);
+    try testing.expectEqual(@as(u8, 0), low.rgba[7]);
+}
