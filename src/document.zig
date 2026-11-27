@@ -265,8 +265,9 @@ pub const Document = struct {
     /// Adds entries that are not already known (newer sections come first).
     /// The free entries of a table are returned in `table_free` and not added.
     fn readXrefSection(self: *Document, offset: u64, table_free: *std.ArrayList(u32)) ?Dict {
-        const pos = self.base + offset;
-        if (pos >= self.data.len) return null;
+        // Compared before it is narrowed: `offset` may not fit a 32-bit usize.
+        if (offset >= self.data.len - self.base) return null;
+        const pos = self.base + @as(usize, @intCast(offset));
         var p = object.Parser.init(self.a(), self.data, pos);
         p.skipWs();
         if (p.eatKeyword("xref")) return self.readXrefTable(&p, table_free);
@@ -558,7 +559,7 @@ pub const Document = struct {
         };
         const n = (self.resolve(st.dict.get("N") orelse return null)).asInt() orelse return null;
         const first = (self.resolve(st.dict.get("First") orelse return null)).asInt() orelse return null;
-        if (n < 0 or first < 0 or n > 1_000_000) return null;
+        if (n < 0 or first < 0 or first > std.math.maxInt(u31) or n > 1_000_000) return null;
         const data = self.streamData(st) catch return null;
         if (@as(usize, @intCast(first)) > data.len) return null;
         var p = object.Parser.init(self.a(), data, 0);
@@ -586,7 +587,7 @@ pub const Document = struct {
             const oo = a2.asInt() orelse break;
             if (on < 0 or oo < 0) break;
             nums[count] = @intCast(@min(on, std.math.maxInt(u32)));
-            offs[count] = @intCast(oo);
+            offs[count] = std.math.cast(usize, oo) orelse break;
         }
         const spans = self.objStmSpans(offs[0..count], data.len) catch |err| {
             self.noteError(err);

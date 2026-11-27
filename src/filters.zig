@@ -311,7 +311,9 @@ fn predict(a: Allocator, data: []const u8, parms: object.Dict, max: usize) Error
     const colors: usize = @intCast(std.math.clamp(intParm(parms, "Colors", 1), 1, 32));
     const bpc: usize = @intCast(std.math.clamp(intParm(parms, "BitsPerComponent", 8), 1, 16));
     const columns: usize = @intCast(std.math.clamp(intParm(parms, "Columns", 1), 1, 1 << 24));
-    const row_bytes = (colors * bpc * columns + 7) / 8;
+    // Up to 2^33 bits: more than a 32-bit usize holds. A row longer than the
+    // data behaves like one exactly that long.
+    const row_bytes: usize = @intCast(@min((@as(u64, colors) * bpc * columns + 7) / 8, data.len + 1));
     const bpp = @max(1, (colors * bpc + 7) / 8);
 
     if (predictor == 2) {
