@@ -318,12 +318,26 @@ fn predict(a: Allocator, data: []const u8, parms: object.Dict, max: usize) Error
 
     if (predictor == 2) {
         // TIFF predictor 2: each sample is the difference from the one to its left.
-        if (bpc != 8 and bpc != 16) return data; // 1, 2 and 4 bits: left as they are
+        if (bpc != 1 and bpc != 2 and bpc != 4 and bpc != 8 and bpc != 16) return data;
         const out = try a.dupe(u8, data);
         var row: usize = 0;
         while (row * row_bytes < out.len) : (row += 1) {
             const line = out[row * row_bytes .. @min(out.len, (row + 1) * row_bytes)];
-            if (bpc == 8) {
+            if (bpc < 8) {
+                // Samples packed into bytes, most significant first.
+                const mask: u8 = (@as(u8, 1) << @intCast(bpc)) - 1;
+                const samples = line.len * 8 / bpc;
+                var k: usize = colors;
+                while (k < samples) : (k += 1) {
+                    const at = k * bpc;
+                    const left_at = (k - colors) * bpc;
+                    const shift: u3 = @intCast(8 - bpc - at % 8);
+                    const left_shift: u3 = @intCast(8 - bpc - left_at % 8);
+                    const left = (line[left_at / 8] >> left_shift) & mask;
+                    const value = ((line[at / 8] >> shift) +% left) & mask;
+                    line[at / 8] = (line[at / 8] & ~(mask << shift)) | (value << shift);
+                }
+            } else if (bpc == 8) {
                 var k: usize = colors;
                 while (k < line.len) : (k += 1) line[k] +%= line[k - colors];
             } else {
@@ -537,4 +551,28 @@ test "FlateDecode: a truncated stream keeps everything decoded before the cut" {
         try std.testing.expectEqualSlices(u8, z.items[7..cut], out);
     }
     try std.testing.expectError(error.TooLarge, decode(a, z.items[0..9000], &.{.{ .name = "FlateDecode" }}, 8000));
+}
+
+test "TIFF predictor with 1, 2 and 4 bits per component" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { bpc: i64, colors: i64, columns: i64, in: []const u8, out: []const u8 }{
+        .{ .bpc = 4, .colors = 1, .columns = 4, .in = "\x11\x11", .out = "\x12\x34" },
+        // Two rows: each starts again; sums wrap within a sample.
+        .{ .bpc = 4, .colors = 1, .columns = 2, .in = "\xf2\x11", .out = "\xf1\x12" },
+        .{ .bpc = 2, .colors = 2, .columns = 2, .in = "\x65", .out = "\x6b" },
+        .{ .bpc = 1, .colors = 1, .columns = 8, .in = "\x80\xc0", .out = "\xff\x80" },
+        // A last row that is cut short.
+        .{ .bpc = 4, .colors = 1, .columns = 4, .in = "\x11\x11\x22", .out = "\x12\x34\x24" },
+    };
+    for (cases) |c| {
+        const entries = [_]object.Entry{
+            .{ .key = "Predictor", .value = .{ .integer = 2 } },
+            .{ .key = "BitsPerComponent", .value = .{ .integer = c.bpc } },
+            .{ .key = "Colors", .value = .{ .integer = c.colors } },
+            .{ .key = "Columns", .value = .{ .integer = c.columns } },
+        };
+        try std.testing.expectEqualSlices(u8, c.out, try predict(a, c.in, .{ .entries = &entries }, 100));
+    }
 }
