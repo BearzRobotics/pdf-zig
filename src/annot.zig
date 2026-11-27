@@ -474,40 +474,31 @@ fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) A
     }
 }
 
-const ArrayObject = struct { num: u32, items: []const Object };
-
-/// The array object that `ref` leads to, following references, or null when it
-/// does not end at an array. Only such an object may be rewritten as the array.
-fn arrayObject(upd: *Update, ref: Ref) ?ArrayObject {
-    var num = ref.num;
+/// The entries of the page's `/Annots`, wherever the array lives: direct, or an
+/// object reached through references. Null when it does not lead to an array.
+fn annotsOf(upd: *Update, value: Object) ?[]const Object {
+    var cur = value;
     var hops: usize = 0;
-    while (hops < 32 and num != 0 and num < upd.next) : (hops += 1) {
-        switch (upd.get(num)) {
-            .array => |items| return .{ .num = num, .items = items },
-            .ref => |r| num = r.num,
-            else => break,
+    while (hops < 32) : (hops += 1) {
+        switch (cur) {
+            .array => |items| return items,
+            .ref => |r| {
+                if (r.num == 0 or r.num >= upd.next) return null;
+                cur = upd.get(r.num);
+            },
+            else => return null,
         }
     }
     return null;
 }
 
-/// Appends `annot` to the page's `/Annots`, wherever that array lives.
+/// Appends `annot` to the page's annotations. The page gets an array of its
+/// own: an array object may be shared with other pages, and a reference that
+/// does not lead to an array must be left alone.
 fn attachToPage(upd: *Update, page: pages.Page, annot: Ref) Error!void {
     const a = upd.allocator();
     const page_dict = upd.get(page.num).asDict() orelse return error.DirectPage;
-    const existing = page_dict.get("Annots");
-    if (existing) |e| if (e == .ref) if (arrayObject(upd, e.ref)) |holder| {
-        // The array is its own object: change that object.
-        const items = holder.items;
-        const grown = try a.alloc(Object, items.len + 1);
-        @memcpy(grown[0..items.len], items);
-        grown[items.len] = .{ .ref = annot };
-        try upd.set(holder.num, .{ .array = grown });
-        return;
-    };
-    // No array, or a reference that does not lead to one: the page gets a new
-    // array of its own, and whatever the reference points at is left alone.
-    const items = if (existing) |e| (e.asArray() orelse &[_]Object{}) else &[_]Object{};
+    const items: []const Object = if (page_dict.get("Annots")) |existing| (annotsOf(upd, existing) orelse &.{}) else &.{};
     const grown = try a.alloc(Object, items.len + 1);
     @memcpy(grown[0..items.len], items);
     grown[items.len] = .{ .ref = annot };
@@ -553,13 +544,7 @@ pub fn remove(upd: *Update, page: pages.Page, num: u32) Error!void {
     const a = upd.allocator();
     const page_dict = upd.get(page.num).asDict() orelse return error.DirectPage;
     const existing = page_dict.get("Annots") orelse return error.NoSuchAnnotation;
-    var holder: ?u32 = null;
-    var items: []const Object = &.{};
-    if (existing == .ref) {
-        const found_array = arrayObject(upd, existing.ref) orelse return error.NoSuchAnnotation;
-        holder = found_array.num;
-        items = found_array.items;
-    } else items = existing.asArray() orelse return error.NoSuchAnnotation;
+    const items = annotsOf(upd, existing) orelse return error.NoSuchAnnotation;
 
     var kept: std.ArrayList(Object) = .empty;
     var found = false;
@@ -571,11 +556,7 @@ pub fn remove(upd: *Update, page: pages.Page, num: u32) Error!void {
         try kept.append(a, it);
     }
     if (!found) return error.NoSuchAnnotation;
-    if (holder) |h| {
-        try upd.set(h, .{ .array = kept.items });
-    } else {
-        try upd.set(page.num, .{ .dict = try write.dictWith(a, page_dict, "Annots", .{ .array = kept.items }) });
-    }
+    try upd.set(page.num, .{ .dict = try write.dictWith(a, page_dict, "Annots", .{ .array = kept.items }) });
 }
 
 // ---- tests -----------------------------------------------------------------------------------
@@ -946,4 +927,37 @@ test "numbers that are not usable geometry are refused" {
     try testing.expectEqual(@as(f64, 0), c[1].real);
     // A bookmark position must be a number.
     try testing.expectError(error.BadDestination, @import("outline.zig").add(&upd, page.num, "x", nan));
+}
+
+test "editing one page leaves other pages that share its /Annots array alone" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const bytes = try tests.buildFile(aa, &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots 5 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots 5 0 R >>",
+        "[6 0 R]",
+        "<< /Subtype /Text /Rect [0 0 20 20] >>",
+    });
+    for ([_]bool{ true, false }) |adding| {
+        var doc = try Document.open(a, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        const first = pages.page(&doc, pl, 0).?;
+        if (adding) _ = try addNote(&upd, first, 1, 1, .{}) else try remove(&upd, first, 6);
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        try tests.expectSoundFile(out.written());
+        var doc2 = try Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        const pl2 = try pages.PageList.build(&doc2);
+        try testing.expectEqual(@as(usize, if (adding) 2 else 0), (try list(aa, &doc2, pages.page(&doc2, pl2, 0).?)).len);
+        try testing.expectEqual(@as(usize, 1), (try list(aa, &doc2, pages.page(&doc2, pl2, 1).?)).len);
+    }
 }
