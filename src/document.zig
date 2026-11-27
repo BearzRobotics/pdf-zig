@@ -219,7 +219,7 @@ pub const Document = struct {
                 const kind = p.token() orelse return null;
                 const off = std.fmt.parseInt(u64, off_t, 10) catch return null;
                 const gen = std.fmt.parseInt(u32, gen_t, 10) catch return null;
-                const num = start + i;
+                const num = std.math.add(u32, start, i) catch return null;
                 if (kind.len == 1 and kind[0] == 'n') {
                     self.addEntry(num, .{ .in_use = .{ .offset = off, .gen = @intCast(@min(gen, 65535)) } });
                 } else if (kind.len == 1 and kind[0] == 'f') {

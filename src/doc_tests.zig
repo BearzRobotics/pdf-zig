@@ -313,3 +313,8 @@ test "page resources given as an indirect object, inherited" {
     try testing.expect(pdf.pages.page(&doc, list, 0).?.resources.has("Font")); // inherited, through a reference
     try testing.expect(pdf.pages.page(&doc, list, 1).?.resources.has("XObject")); // its own, through a reference
 }
+
+test "xref table object numbers past 2^32 do not overflow" {
+    const bytes = "%PDF-1.7\nxref\n4294967295 2\n0000000000 00000 f \n0000000000 00000 f \ntrailer\n<<>>\nstartxref\n9\n%%EOF\n";
+    try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, bytes, .{}));
+}
