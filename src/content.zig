@@ -103,9 +103,11 @@ pub const Scanner = struct {
         };
     }
 
-    /// `BI key value ... ID <data> EI`. The data ends at an `EI` that stands
-    /// alone between white space and is followed by something that looks like
-    /// the rest of a content stream.
+    /// `BI key value ... ID <data> EI`. The data's length comes from `/L`, or
+    /// follows from the image's size if it is not filtered; an `EI` must then
+    /// follow it. Otherwise the data ends at an `EI` that stands alone between
+    /// white space and is followed by something that looks like the rest of a
+    /// content stream, or failing that at the first one that stands alone.
     fn inlineImage(self: *Scanner) Allocator.Error!Op {
         var entries: std.ArrayList(object.Entry) = .empty;
         while (true) {
@@ -128,21 +130,83 @@ pub const Scanner = struct {
         }
         const start = self.p.pos;
         const src = self.p.src;
+        const dict: object.Dict = .{ .entries = entries.items };
+        if (declaredLength(dict)) |len| if (len <= src.len - start) {
+            var after = start + len;
+            while (after < src.len and object.isWhite(src[after])) after += 1;
+            if (isEndMarker(src, after)) {
+                self.p.pos = after + 2;
+                return .{ .name = "BI", .operands = &.{}, .image = .{ .dict = dict, .data = src[start .. start + len] } };
+            }
+        };
         var i = start;
-        var end = src.len;
-        var after_ei = src.len;
+        var found: ?usize = null;
+        var first: ?usize = null;
         while (i + 1 < src.len) : (i += 1) {
-            if (src[i] != 'E' or src[i + 1] != 'I') continue;
+            if (!isEndMarker(src, i)) continue;
             if (i > start and !object.isWhite(src[i - 1])) continue;
-            if (i + 2 < src.len and object.isRegular(src[i + 2])) continue;
-            if (!looksLikeContent(src[@min(i + 2, src.len)..])) continue;
-            end = if (i > start) i - 1 else i;
-            after_ei = i + 2;
+            if (first == null) first = i;
+            if (!looksLikeContent(src[i + 2 ..])) continue;
+            found = i;
             break;
         }
-        self.p.pos = after_ei;
-        const dict: object.Dict = .{ .entries = entries.items };
+        const marker = found orelse first;
+        const end = if (marker) |m| (if (m > start) m - 1 else m) else src.len;
+        self.p.pos = if (marker) |m| m + 2 else src.len;
         return .{ .name = "BI", .operands = &.{}, .image = .{ .dict = dict, .data = src[start..@max(start, end)] } };
+    }
+
+    /// Whether `EI` is at `i` and is a whole word.
+    fn isEndMarker(src: []const u8, i: usize) bool {
+        if (i + 1 >= src.len or src[i] != 'E' or src[i + 1] != 'I') return false;
+        return i + 2 >= src.len or !object.isRegular(src[i + 2]);
+    }
+
+    /// The data length the dictionary gives: `/L` (ISO 32000-2), or for
+    /// unfiltered data the rows the image's size calls for.
+    fn declaredLength(d: object.Dict) ?usize {
+        if (d.get("L") orelse d.get("Length")) |v| {
+            const n = v.asInt() orelse return null;
+            return std.math.cast(usize, n);
+        }
+        if (d.has("Filter")) return null;
+        const w = positive(d.get("Width")) orelse return null;
+        const h = positive(d.get("Height")) orelse return null;
+        var components: u64 = 1;
+        var bits: u64 = 1;
+        const mask = if (d.get("ImageMask")) |m| (m == .boolean and m.boolean) else false;
+        if (!mask) {
+            bits = positive(d.get("BitsPerComponent")) orelse return null;
+            if (bits > 16) return null;
+            components = componentsOf(d.get("ColorSpace") orelse return null) orelse return null;
+        }
+        return std.math.cast(usize, (w * components * bits + 7) / 8 * h);
+    }
+
+    /// A size from the dictionary, small enough that products cannot overflow.
+    fn positive(o: ?Object) ?u64 {
+        const n = (o orelse return null).asInt() orelse return null;
+        return if (n > 0 and n <= 1 << 20) @intCast(n) else null;
+    }
+
+    /// Components of the colour spaces an inline image can name by itself. A
+    /// name defined in the page's resources is not known here.
+    fn componentsOf(space: Object) ?u64 {
+        const name = switch (space) {
+            .name => |n| n,
+            .array => |items| {
+                if (items.len == 0) return null;
+                const family = items[0].asName() orelse return null;
+                return if (std.mem.eql(u8, family, "I") or std.mem.eql(u8, family, "Indexed")) 1 else null;
+            },
+            else => return null,
+        };
+        const known = [_]struct { []const u8, u64 }{
+            .{ "G", 1 },    .{ "DeviceGray", 1 }, .{ "RGB", 3 }, .{ "DeviceRGB", 3 },
+            .{ "CMYK", 4 }, .{ "DeviceCMYK", 4 },
+        };
+        for (known) |k| if (std.mem.eql(u8, name, k[0])) return k[1];
+        return null;
     }
 
     /// True if the next few tokens parse as operands or operators, which is
@@ -150,6 +214,8 @@ pub const Scanner = struct {
     fn looksLikeContent(rest: []const u8) bool {
         const n = @min(rest.len, 16);
         for (rest[0..n]) |c| {
+            // A string or comment may hold any byte.
+            if (c == '(' or c == '%') return true;
             if (c >= 128 or (c < 32 and !object.isWhite(c))) return false;
         }
         return true;
@@ -270,4 +336,42 @@ test "scanning resumes after damage, also once the rescan budget is spent" {
     try src.appendSlice(a, " 5 6 m S");
     const many = try collect(a, src.items);
     try std.testing.expectEqualStrings("S", many[many.len - 1].name);
+}
+
+test "inline image: the length is taken from /L or computed for raw data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Raw data that contains " EI " followed by printable text.
+    const raw = "\x10 EI AAAAAAAAAAAAAAAAAA";
+    for ([_][]const u8{
+        "BI /W 23 /H 1 /BPC 8 /CS /G ID " ++ raw ++ "\nEI Q",
+        "BI /W 23 /H 1 /BPC 8 /CS /DeviceGray ID " ++ raw ++ "\nEI Q",
+        "BI /W 1 /H 1 /F /Fl /L 23 ID " ++ raw ++ "\nEI Q",
+        "BI /W 1 /H 1 /F /Fl /Length 23 ID " ++ raw ++ " EI Q",
+    }) |src| {
+        const ops = try collect(a, src);
+        try std.testing.expectEqualStrings(raw, ops[0].image.?.data);
+        try std.testing.expectEqualStrings("Q", ops[1].name);
+    }
+    // Eight pixels of one bit each, as a mask and in an indexed space.
+    const mask = try collect(a, "BI /IM true /W 8 /H 2 ID \xff\x00 EI Q");
+    try std.testing.expectEqual(@as(usize, 2), mask[0].image.?.data.len);
+    // A wrong /L is not believed.
+    const wrong = try collect(a, "BI /W 1 /H 1 /F /Fl /L 999 ID abc\nEI Q");
+    try std.testing.expectEqualStrings("abc", wrong[0].image.?.data);
+}
+
+test "inline image: the end is found before text that is not ASCII" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A filtered image of unknown length, then a string with a WinAnsi byte.
+    const ops = try collect(a, "BI /W 1 /H 1 /F /Fl ID abc\nEI Q\nBT (caf\xe9) Tj ET");
+    try std.testing.expectEqualStrings("abc", ops[0].image.?.data);
+    try std.testing.expectEqualStrings("ET", ops[ops.len - 1].name);
+    // Nothing after EI looks like content: the first EI still ends the image.
+    const odd = try collect(a, "BI /W 1 /H 1 /F /Fl ID abc\nEI \x01\x02 Q");
+    try std.testing.expectEqualStrings("abc", odd[0].image.?.data);
+    try std.testing.expectEqualStrings("Q", odd[odd.len - 1].name);
 }
