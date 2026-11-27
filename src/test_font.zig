@@ -14,6 +14,8 @@ pub const Options = struct {
     os2: bool = true,
     /// Add a format 12 character map, which also has U+1F600.
     format12: bool = false,
+    /// With `format12`: a space, drawn as glyph 5.
+    space: bool = false,
     /// Long `loca` entries.
     long_loca: bool = false,
     /// Full metrics for this many glyphs; the rest share the last advance.
@@ -126,12 +128,13 @@ pub fn make(a: Allocator, options: Options) ![]u8 {
     std.mem.writeInt(u16, four.items[2..4], @intCast(four.items.len), .big);
 
     var twelve: List = .empty;
-    const groups = [_][3]u32{ .{ 'A', 'D', 1 }, .{ 0xE9, 0xE9, 6 }, .{ 0x1F600, 0x1F600, 7 } };
+    const all_groups = [_][3]u32{ .{ ' ', ' ', 5 }, .{ 'A', 'D', 1 }, .{ 0xE9, 0xE9, 6 }, .{ 0x1F600, 0x1F600, 7 } };
+    const groups: []const [3]u32 = all_groups[if (options.space) 0 else 1..];
     try put(a, &twelve, u16, 12);
     try put(a, &twelve, u16, 0);
     try put(a, &twelve, u32, @intCast(16 + groups.len * 12));
     try put(a, &twelve, u32, 0);
-    try put(a, &twelve, u32, groups.len);
+    try put(a, &twelve, u32, @intCast(groups.len));
     for (groups) |g| for (g) |v| try put(a, &twelve, u32, v);
 
     var cmap: List = .empty;

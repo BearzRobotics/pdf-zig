@@ -70,6 +70,9 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 Form limits: a filled text field or list box gets a new appearance with the widget's
 background, border and rotation. It uses the font `/DA` names if that font can write the
 text, else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text).
+**For other characters, fill with an embedded font** (`form.setTextWith` and
+`annot.addFreeTextWith`, with a `form.Typeface` and `draw.Embedder.finish` before saving);
+a missing character is then an error instead of `?`.
 A comb field gets one character per cell, with dividing lines if it has a border colour.
 A filled widget keeps only its normal appearance: an old pressed one would show the old
 value. The value of a password field is not stored in the file. A choice field stores the

@@ -25,12 +25,19 @@ pub const Entry = struct {
 };
 
 /// A dictionary (7.3.7). Keys are names without the slash. Dictionaries are
-/// small, so lookup is a linear search; the first entry of a repeated key wins.
+/// small, so lookup is a linear search. A key may not be repeated, but files
+/// repeat them (a LaTeX package has been seen to write four `/AcroForm`
+/// entries); the last one counts, as it does in other readers. Otherwise an
+/// edit could land in an object that they never look at.
 pub const Dict = struct {
     entries: []const Entry = &.{},
 
     pub fn get(self: Dict, key: []const u8) ?Object {
-        for (self.entries) |e| if (std.mem.eql(u8, e.key, key)) return e.value;
+        var i = self.entries.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.entries[i].key, key)) return self.entries[i].value;
+        }
         return null;
     }
 
@@ -546,7 +553,9 @@ test "arrays, dictionaries, references, keywords" {
     try std.testing.expectEqual(@as(u16, 0), d.get("Parent").?.ref.gen);
     try std.testing.expectEqual(@as(usize, 2), d.get("Kids").?.array.len);
     try std.testing.expect(d.get("N").? == .null);
-    try std.testing.expectEqual(@as(i64, 1), d.get("Dup").?.integer); // first wins
+    // The last of a repeated key counts: Poppler and MuPDF read a real file with
+    // four /AcroForm entries that way.
+    try std.testing.expectEqual(@as(i64, 2), d.get("Dup").?.integer);
     try std.testing.expect(d.get("Missing") == null);
 
     // Comments and a value-less key are tolerated.

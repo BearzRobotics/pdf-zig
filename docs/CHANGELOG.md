@@ -6,8 +6,20 @@
   `draw.Font.embedded`, with `canvas.glyphs` for shaped text. Fonts are subset, honour
   their `fsType` embedding permissions, and keep their text searchable. `.otf` fonts with
   CFF outlines and `.ttc` collections are not read yet; there is no shaping.
-- `write.Error` has `UnfinishedStamp` and `compose.Error` and `draw.StampError` have
-  `BadFont`: switches over them need the cases. `draw.Font` has the new case `embedded`.
+- Forms and text boxes can be written in an embedded font: `form.setTextWith`,
+  `setChoicesWith` and `resetWith`, `annot.addFreeTextWith` and `setContentsWith`, with a
+  `form.Typeface`; new `draw.Embedder` stores a font once for all of an update. A form
+  that asked for appearances (`NeedAppearances`) has the flag turned off, after its other
+  widgets that relied on it are given appearances. Preview-and-print fonts are refused
+  (`error.FontNotForForms`).
+- **Fixed: of a dictionary key that a file repeats, the last now counts**, as in Poppler
+  and MuPDF; the first did. A file with four `/AcroForm` entries had changes to its form
+  written where those readers never looked. `write.dictWith` leaves one entry.
+- New error cases, which switches need: `write.Error` has `UnfinishedFonts`;
+  `form.Error` and `annot.Error` have `MissingGlyph`, `FontNotForForms` and `BadFont`;
+  `compose.Error` and `draw.StampError` have `BadFont`. `draw.Font` has the new case
+  `embedded`. `form.textForm`, `form.listForm`, `form.wrapLine` and `annot.freeTextForm`,
+  the appearance builders, take the text as UTF-8 or units and a `form.Face`.
 
 ## 0.5.0 (2026-11-27)
 

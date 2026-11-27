@@ -63,7 +63,9 @@ pub fn decode(doc: *Document, a: Allocator, img: display.Image) Error!Result {
     var dec = try doc.decodeStreamIn(a, img.stream);
     if (dec.rest.len == 1 and (std.mem.eql(u8, dec.rest[0].name, "CCITTFaxDecode") or std.mem.eql(u8, dec.rest[0].name, "CCF"))) {
         // Fax data is decoded here: it needs no codec library.
-        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, img.width, img.height), .rest = &.{} };
+        // Made first: the new value is built from the one it replaces.
+        const samples = try faxSamples(doc, a, dec.data, dec.rest[0].parms, img.width, img.height);
+        dec = .{ .data = samples, .rest = &.{} };
     }
     if (dec.rest.len > 0) return .{ .codec = .{ .name = dec.rest[0].name, .data = dec.data, .parms = dec.rest[0].parms } };
     const is_fax = blk: {
@@ -286,7 +288,9 @@ fn applyMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
     };
     var is_fax = false;
     if (dec.rest.len == 1 and (std.mem.eql(u8, dec.rest[0].name, "CCITTFaxDecode") or std.mem.eql(u8, dec.rest[0].name, "CCF"))) {
-        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, mw, mh), .rest = &.{} };
+        // Made first: the new value is built from the one it replaces.
+        const samples = try faxSamples(doc, a, dec.data, dec.rest[0].parms, mw, mh);
+        dec = .{ .data = samples, .rest = &.{} };
         is_fax = true;
     }
     if (dec.rest.len > 0) {

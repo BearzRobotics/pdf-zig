@@ -146,6 +146,18 @@ character the font lacks is `error.MissingGlyph`. The built-in fonts take WinAns
 components, 8 bit) or raw gray or RGB pixels, Flate compressed, with alpha as a soft mask.
 `compose.Builder.addPage` makes the page; fonts and equal images are stored once.
 
+**Forms and text boxes** can be written in an embedded font (`form.Typeface`: a font and a
+`draw.Embedder`, which a `Stamp` also has, so that one copy serves everything in an
+update). The font draws the appearance; `/DA` keeps the field's own font (a box:
+Helvetica), so another program editing the value later writes with that. Text is laid out
+by the same code as before, over units that are WinAnsi bytes or glyph numbers with their
+widths. A missing character or a preview-and-print font is refused before anything
+changes. Because a form with `NeedAppearances` would have readers redraw the field in its
+own font, the flag is turned off, after the other widgets that relied on it get stored
+appearances: text and choice fields with values, and widgets with no drawing at all (a
+button gets both its states). Those take pdf-zig's style, which differs from some
+readers' (bevelled borders, the shape of a radio button).
+
 **Embedded fonts** (`truetype.zig`, `font_embed.zig`). `truetype.Font.init` copies a
 `.ttf` file and reads `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, a Unicode `cmap`
 (format 4 or 12), `OS/2`, `post` and `name`, checking every read; CFF fonts and
@@ -168,7 +180,7 @@ leaves unmatched, and fails with `error.UnreadableContent` if it cannot be decod
 `.under` goes in front and needs no reading, but a page that paints all of itself hides it.
 The page gets resources of its own, under names not in use. As any update, it refuses
 encrypted and repaired files. Embedded fonts are written by `Stamp.finish`; until then the
-update is `error.UnfinishedStamp`.
+update is `error.UnfinishedFonts`.
 
 ## Resource limits
 
@@ -215,7 +227,7 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 - In new documents: encryption.
 - Embedding fonts with CFF outlines (`.otf`) or from collections (`.ttc`), and text
-  shaping. Forms and text boxes are still written in WinAnsi.
+  shaping.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with

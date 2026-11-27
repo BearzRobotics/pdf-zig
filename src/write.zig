@@ -223,13 +223,26 @@ pub fn pdfDocCodepoint(c: u8) u21 {
 
 // ---- building objects --------------------------------------------------------------------
 
-/// A copy of `d` with `key` set to `value` (replaced if present, else added), allocated from `a`.
+/// A copy of `d` with `key` set to `value` (replaced if present, else added),
+/// allocated from `a`. A key that `d` repeats is left once.
 pub fn dictWith(a: Allocator, d: Dict, key: []const u8, value: Object) Allocator.Error!Dict {
-    for (d.entries, 0..) |e, i| {
-        if (!std.mem.eql(u8, e.key, key)) continue;
-        const out = try a.dupe(Entry, d.entries);
-        out[i].value = value;
-        return .{ .entries = out };
+    var found: usize = 0;
+    for (d.entries) |e| {
+        if (std.mem.eql(u8, e.key, key)) found += 1;
+    }
+    if (found > 0) {
+        const kept = try a.alloc(Entry, d.entries.len - found + 1);
+        var n: usize = 0;
+        for (d.entries) |e| {
+            if (std.mem.eql(u8, e.key, key)) {
+                found -= 1;
+                // The value goes where the entry that counted was.
+                if (found > 0) continue;
+                kept[n] = .{ .key = e.key, .value = value };
+            } else kept[n] = e;
+            n += 1;
+        }
+        return .{ .entries = kept };
     }
     const out = try a.alloc(Entry, d.entries.len + 1);
     @memcpy(out[0..d.entries.len], d.entries);
@@ -272,9 +285,9 @@ pub const Error = error{
     TooManyObjects,
     /// An object number that is neither in the file nor handed out by `add`.
     InvalidObject,
-    /// A `draw.Stamp` placed text in an embedded font and `finish` has not run
-    /// since: the font is not written yet.
-    UnfinishedStamp,
+    /// Text was written in an embedded font and `finish` has not run since
+    /// (`draw.Embedder`, or `draw.Stamp`): the font is not written yet.
+    UnfinishedFonts,
     OutOfMemory,
     WriteFailed,
 };
@@ -284,7 +297,7 @@ pub const Error = error{
 pub const Update = struct {
     doc: *Document,
     arena: std.heap.ArenaAllocator,
-    /// Fonts that a `draw.Stamp` has still to write.
+    /// Fonts that a `draw.Embedder` has still to write.
     unfinished: u32 = 0,
     /// Object number to its new value, in the order they were set.
     changed: std.AutoArrayHashMapUnmanaged(u32, Object) = .empty,
@@ -356,7 +369,7 @@ pub const Update = struct {
     /// Writes the original file followed by the update.
     pub fn write(self: *Update, gpa: Allocator, w: *Io.Writer) Error!void {
         const doc = self.doc;
-        if (self.unfinished != 0) return error.UnfinishedStamp;
+        if (self.unfinished != 0) return error.UnfinishedFonts;
         // A bad entry found since `init` rebuilds the document: the file's own
         // cross-reference data cannot be pointed at any more.
         if (doc.repaired) return error.Repaired;

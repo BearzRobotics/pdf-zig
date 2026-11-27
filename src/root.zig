@@ -73,6 +73,7 @@ test {
     _ = @import("draw.zig");
     _ = @import("truetype.zig");
     _ = @import("truetype_tests.zig");
+    _ = @import("form_font_tests.zig");
     _ = @import("font_embed.zig");
     _ = @import("page_edit.zig");
     _ = @import("draw_tests.zig");

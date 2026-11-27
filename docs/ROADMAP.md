@@ -86,13 +86,14 @@ it would show the old value while the field is pressed.
 
 The first item is mostly a restructuring: the code that makes appearances in `form.zig`
 and `annot.zig` writes into an edit today, and must also be able to feed the interpreter.
-Forms in other scripts than WinAnsi need font embedding (stage 2).
+Forms in other scripts than WinAnsi are filled with an embedded font (done in stage 2).
 
 ## Stage 2: creating documents (stage B of 0003)
 
-Design: `docs/decisions/0005-drawing-content.md`. **Progress:** B1 (new pages, built-in
-fonts, images, document information), B2 (stamps on existing pages) and B3 (embedded
-TrueType fonts) are done. Next B4, forms and text boxes in an embedded font.
+Design: `docs/decisions/0005-drawing-content.md`. **Progress:** B1 (new pages, built-in fonts, images, document information), B2 (stamps on
+existing pages), B3 (embedded TrueType fonts) and B4 (forms and text boxes in an embedded
+font) are done. Open in this stage: carrying document information, page labels and
+attachments into new documents.
 
 | Item | Size |
 |---|---|

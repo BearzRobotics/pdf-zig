@@ -859,6 +859,101 @@ pub fn compressedContent(a: Allocator, canvas: *const Canvas) Allocator.Error![]
     return pack.compress(a, all.items);
 }
 
+// ---- embedded fonts in an update -----------------------------------------------------------
+
+/// The embedded fonts of one `write.Update`: each is stored once, however many
+/// stamps, form fields and text boxes use it. After the last use, call
+/// `finish`, which writes each font with the glyphs used; until then the update
+/// refuses to be written (`error.UnfinishedFonts`).
+pub const Embedder = struct {
+    upd: *serial.Update,
+    /// By digest. They live in the update's memory.
+    entries: std.AutoArrayHashMapUnmanaged([32]u8, *Entry) = .empty,
+
+    const Entry = struct {
+        /// A copy, in the update's memory.
+        font: truetype.Font,
+        used: font_embed.Usage = .empty,
+        ref: object.Ref,
+        /// The font's other objects, once `finish` has made them.
+        parts: [4]u32 = @splat(0),
+        /// Glyphs have been added since the font was last written.
+        dirty: bool = false,
+    };
+
+    pub fn init(upd: *serial.Update) Embedder {
+        return .{ .upd = upd };
+    }
+
+    /// The reference under which `font` will be written. The font is copied, so
+    /// it need not outlive the call.
+    pub fn refFor(self: *Embedder, font: *const truetype.Font) !object.Ref {
+        const a = self.upd.allocator();
+        const gop = try self.entries.getOrPut(a, font.digest);
+        if (!gop.found_existing) {
+            errdefer _ = self.entries.swapRemove(font.digest);
+            const entry = try a.create(Entry);
+            entry.* = .{ .font = try font.clone(a), .ref = try self.upd.add(.null) };
+            gop.value_ptr.* = entry;
+        }
+        return gop.value_ptr.*.ref;
+    }
+
+    /// Counts the glyphs of `use`, whose font `refFor` has been asked for.
+    /// Temporaries that must last as long as the update come from its memory.
+    pub fn note(self: *Embedder, _: Allocator, use: *const EmbeddedUse) !void {
+        const a = self.upd.allocator();
+        const entry = self.entries.get(use.font.digest).?;
+        for (use.used.keys(), use.used.values()) |glyph, text| {
+            if (entry.used.get(glyph)) |old| if (!font_embed.preferred(text, old)) continue;
+            try entry.used.put(a, glyph, try a.dupe(u8, text));
+            if (!entry.dirty) {
+                entry.dirty = true;
+                self.upd.unfinished += 1;
+            }
+        }
+    }
+
+    /// Writes the fonts used since the last call, each with every glyph used so
+    /// far. More can be used afterwards; then call it again.
+    pub fn finish(self: *Embedder) StampError!void {
+        const a = self.upd.allocator();
+        for (self.entries.values()) |entry| {
+            if (!entry.dirty) continue;
+            var sink: Sink = .{ .upd = self.upd, .parts = &entry.parts };
+            font_embed.write(a, &entry.font, &entry.used, entry.ref, &sink) catch |err| switch (err) {
+                error.BadFont => return error.BadFont,
+                error.TooLarge => return error.TooLarge,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.TooManyObjects => return error.TooManyObjects,
+                error.InvalidObject => return error.InvalidObject,
+                else => unreachable,
+            };
+            entry.dirty = false;
+            self.upd.unfinished -= 1;
+        }
+    }
+
+    /// Where `font_embed` puts a font's objects: the same numbers each time.
+    const Sink = struct {
+        upd: *serial.Update,
+        parts: *[4]u32,
+        next: usize = 0,
+
+        pub fn add(self: *Sink, o: object.Object) !object.Ref {
+            const slot = &self.parts[self.next];
+            self.next += 1;
+            if (slot.* == 0) slot.* = (try self.upd.add(.null)).num;
+            try self.upd.set(slot.*, o);
+            return .{ .num = slot.* };
+        }
+
+        pub fn set(self: *Sink, ref: object.Ref, o: object.Object) !void {
+            try self.upd.set(ref.num, o);
+        }
+    };
+};
+
 // ---- onto existing pages -------------------------------------------------------------------
 
 pub const StampError = page_edit.Error || error{
@@ -893,82 +988,25 @@ pub const Stamp = struct {
     fonts: std.EnumArray(Builtin, u32) = .initFill(0),
     images: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
     forms: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
-    embedded: std.AutoArrayHashMapUnmanaged([32]u8, *StampFont) = .empty,
-
-    const StampFont = struct {
-        /// A copy, in the update's memory.
-        font: truetype.Font,
-        used: font_embed.Usage = .empty,
-        ref: object.Ref,
-        /// The font's other objects, once `finish` has made them.
-        parts: [4]u32 = @splat(0),
-        /// Glyphs have been added since the font was last written.
-        dirty: bool = false,
-    };
+    /// The embedded fonts. `form` and `annot` can be given this too, so that a
+    /// font used by both is stored once.
+    fonts_embedded: Embedder,
 
     pub fn init(upd: *serial.Update) Stamp {
-        return .{ .upd = upd };
+        return .{ .upd = upd, .fonts_embedded = .init(upd) };
     }
 
-    /// Writes the embedded fonts, each once, with the glyphs of every page
-    /// placed so far. Until it has run after the last `place`, the update
-    /// refuses to be written (`error.UnfinishedStamp`). With only built-in
-    /// fonts there is nothing to write.
+    /// Writes the embedded fonts (`Embedder.finish`). Until it has run after
+    /// the last `place` that used one, the update refuses to be written
+    /// (`error.UnfinishedFonts`).
     pub fn finish(self: *Stamp) StampError!void {
-        const a = self.upd.allocator();
-        for (self.embedded.values()) |entry| {
-            if (!entry.dirty) continue;
-            var sink: StampSink = .{ .upd = self.upd, .parts = &entry.parts };
-            font_embed.write(a, &entry.font, &entry.used, entry.ref, &sink) catch |err| switch (err) {
-                error.BadFont => return error.BadFont,
-                error.TooLarge => return error.TooLarge,
-                error.OutOfMemory => return error.OutOfMemory,
-                error.TooManyObjects => return error.TooManyObjects,
-                error.InvalidObject => return error.InvalidObject,
-                else => unreachable,
-            };
-            entry.dirty = false;
-            self.upd.unfinished -= 1;
-        }
+        return self.fonts_embedded.finish();
     }
-
-    /// Where `font_embed` puts a font's objects: the same numbers each time.
-    const StampSink = struct {
-        upd: *serial.Update,
-        parts: *[4]u32,
-        next: usize = 0,
-
-        pub fn add(self: *StampSink, o: object.Object) !object.Ref {
-            const slot = &self.parts[self.next];
-            self.next += 1;
-            if (slot.* == 0) slot.* = (try self.upd.add(.null)).num;
-            try self.upd.set(slot.*, o);
-            return .{ .num = slot.* };
-        }
-
-        pub fn set(self: *StampSink, ref: object.Ref, o: object.Object) !void {
-            try self.upd.set(ref.num, o);
-        }
-    };
 
     pub fn embeddedObject(self: *Stamp, a: Allocator, use: *const EmbeddedUse) !object.Ref {
-        const gop = try self.embedded.getOrPut(a, use.font.digest);
-        if (!gop.found_existing) {
-            errdefer _ = self.embedded.swapRemove(use.font.digest);
-            const entry = try a.create(StampFont);
-            entry.* = .{ .font = try use.font.clone(a), .ref = try self.upd.add(.null) };
-            gop.value_ptr.* = entry;
-        }
-        const entry = gop.value_ptr.*;
-        for (use.used.keys(), use.used.values()) |glyph, text| {
-            if (entry.used.get(glyph)) |old| if (!font_embed.preferred(text, old)) continue;
-            try entry.used.put(a, glyph, try a.dupe(u8, text));
-            if (!entry.dirty) {
-                entry.dirty = true;
-                self.upd.unfinished += 1;
-            }
-        }
-        return entry.ref;
+        const ref = try self.fonts_embedded.refFor(use.font);
+        try self.fonts_embedded.note(a, use);
+        return ref;
     }
 
     /// Draws `canvas` on `page`. The canvas can be changed or freed afterwards.

@@ -2,19 +2,25 @@
 
 Status: accepted by the maintainer in conversation, with all four recommendations under
 "Questions for the maintainer". This is stage 2 of `docs/ROADMAP.md`, called stage B in
-0003. Steps B1 to B3 are implemented; see docs/architecture.md. Settled while implementing
+0003. Steps B1 to B4 are implemented; see docs/architecture.md. Settled while implementing
 B1: a
 canvas keeps its own copy of each image (so images need not outlive the call), equal
 images are found by a digest of their content, and transparency is `setAlpha` and
 `setBlend`.
 
-Settled in B2 and B3: `write.Update.write` returns `error.UnfinishedStamp` rather than
+Settled in B2 and B3: `write.Update.write` returns `error.UnfinishedFonts` rather than
 write a file whose embedded font `finish` has not written. A font is borrowed only until
 the canvas is placed: the builder and the stamp copy it. A subset keeps the glyph numbers
 and empties the glyphs not used, so `CIDToGIDMap` is `Identity`. A PDF gives one text to a
 code, so when a font uses one glyph for two characters the one with the lower number is
 recorded; over 220 installed fonts the only case met was the increment sign reading back
 as the Greek delta.
+
+Settled in B4: the embedded font draws the appearance and the field keeps its `/DA` font.
+The subset is therefore enough, and a program that edits the value later uses the field's
+font. Text boxes follow the same rule as fields, preview-and-print fonts refused, since a
+box is edited like one. Turning `NeedAppearances` off is needed for the appearance to be
+shown at all.
 
 ## Problem
 

@@ -121,7 +121,7 @@ fn rectOf(doc: *Document, d: Dict, key: []const u8) ?pages.Rect {
     return .{ .x0 = @min(v[0], v[2]), .y0 = @min(v[1], v[3]), .x1 = @max(v[0], v[2]), .y1 = @max(v[1], v[3]) };
 }
 
-pub const Error = write.Error || error{ DirectPage, NoSuchAnnotation, BadGeometry };
+pub const Error = write.Error || error{ DirectPage, NoSuchAnnotation, BadGeometry, MissingGlyph, FontNotForForms, BadFont };
 
 /// What a new annotation carries besides its shape.
 pub const Meta = struct {
@@ -407,6 +407,15 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
 /// kept; characters outside WinAnsi are drawn as `?` (the text itself keeps
 /// them).
 pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta_in: Meta) Error!Ref {
+    return makeFreeText(upd, page, x, y, w, h, size, meta_in, null);
+}
+
+/// `addFreeText`, drawn in an embedded font (`form.Typeface`).
+pub fn addFreeTextWith(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta_in: Meta, typeface: forms.Typeface) Error!Ref {
+    return makeFreeText(upd, page, x, y, w, h, size, meta_in, typeface);
+}
+
+fn makeFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta_in: Meta, typeface: ?forms.Typeface) Error!Ref {
     const meta = try checkedMeta(meta_in);
     if (!usable(&.{ x, y, w, h, size })) return error.BadGeometry;
     if (page.num == 0) return error.DirectPage;
@@ -420,7 +429,7 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
     const c = meta.color;
     const color_ops = try std.fmt.allocPrint(a, "{d:.3} {d:.3} {d:.3} rg", .{ c[0], c[1], c[2] });
     const user_size = size / page.user_unit;
-    const made = try freeTextAppearance(upd, rect, page.rotate, user_size, color_ops, meta.contents);
+    const made = try freeTextAppearance(upd, rect, page.rotate, user_size, color_ops, meta.contents, typeface);
     const da = try std.fmt.allocPrint(a, "/Helv {d:.4} Tf {s}", .{ user_size, color_ops });
     const dr = try write.makeDict(a, &.{.{ "Font", .{ .dict = made.fonts } }});
     const border = try write.makeDict(a, &.{.{ "W", .{ .integer = 0 } }});
@@ -446,18 +455,25 @@ const FreeTextAppearance = struct { form: Ref, fonts: Dict };
 
 /// The appearance of a text box covering `rect` (user space) on a page turned
 /// `rotate` degrees, with its font added to the file.
-fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8) Error!FreeTextAppearance {
+fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8, typeface: ?forms.Typeface) Error!FreeTextAppearance {
     const a = upd.allocator();
+    var embedded: ?Object = null;
+    if (typeface) |t| {
+        try t.check();
+        embedded = try t.prepare(a, &.{contents});
+    }
+    // Helvetica stays the font of `/DA`, for a program that edits the box.
     const font_ref = try upd.add(forms.helvetica);
-    const form = try freeTextForm(a, rect, rotate, size, color_ops, contents, .{ .ref = font_ref });
+    const form = try freeTextForm(a, rect, rotate, size, color_ops, contents, embedded orelse .{ .ref = font_ref }, if (typeface) |t| .{ .embedded = t.font } else .win_ansi);
     const fonts = try write.makeDict(a, &.{.{ "Helv", .{ .ref = font_ref } }});
     return .{ .form = try upd.add(.{ .stream = form }), .fonts = fonts };
 }
 
 /// The appearance of a text box: `contents` laid out as it will be read, then
 /// turned in user space so that the page's rotation brings it upright. `font`
-/// is Helvetica in WinAnsi.
-pub fn freeTextForm(a: Allocator, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8, font: Object) Allocator.Error!object.Stream {
+/// is the one `face` writes with: Helvetica in WinAnsi, or an embedded one.
+pub fn freeTextForm(a: Allocator, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8, font: Object, face: forms.Face) (Allocator.Error || error{MissingGlyph})!object.Stream {
+    const font_name: []const u8 = if (face == .embedded) forms.embedded_name else "Helv";
     const sideways = rotate == 90 or rotate == 270;
     // The box's width and height as displayed.
     const bw = if (sideways) rect[3] - rect[1] else rect[2] - rect[0];
@@ -472,15 +488,13 @@ pub fn freeTextForm(a: Allocator, rect: [4]f64, rotate: u16, size: f64, color_op
     // Lines: the text's own breaks, then a wrap at spaces to fit the box.
     // Two units, less for text under 8 units (a page with a large /UserUnit).
     const pad = @min(2.0, size / 4);
-    const bytes = try forms.toWinAnsi(a, contents);
-    var lines: std.ArrayList([]const u8) = .empty;
-    var paras = std.mem.splitScalar(u8, bytes, '\n');
-    while (paras.next()) |para| {
+    var lines: std.ArrayList([]const forms.Unit) = .empty;
+    for (try forms.paragraphs(a, face, contents)) |para| {
         try forms.wrapLine(a, &lines, para, bw - 2 * pad, size);
     }
 
     var ap: std.ArrayList(u8) = .empty;
-    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.4} Tf {s}\n", .{ bw, bh, size, color_ops });
+    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /{s} {d:.4} Tf {s}\n", .{ bw, bh, font_name, size, color_ops });
     const leading = size * 1.15;
     var baseline = bh - pad - size * 0.8;
     var first = true;
@@ -489,14 +503,13 @@ pub fn freeTextForm(a: Allocator, rect: [4]f64, rotate: u16, size: f64, color_op
             try ap.print(a, "{d:.2} {d:.2} Td\n", .{ pad, baseline });
             first = false;
         } else try ap.print(a, "0 {d:.2} Td\n", .{-leading});
-        var sb: std.Io.Writer.Allocating = .init(a);
-        write.writeString(&sb.writer, line) catch return error.OutOfMemory;
-        try ap.print(a, "{s} Tj\n", .{sb.written()});
+        try forms.appendString(a, &ap, face, line);
+        try ap.appendSlice(a, " Tj\n");
         baseline -= leading;
     }
     try ap.appendSlice(a, "ET Q\n");
 
-    const fonts = try write.makeDict(a, &.{.{ "Helv", font }});
+    const fonts = try write.makeDict(a, &.{.{ font_name, font }});
     const res = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
     const form_dict = try write.makeDict(a, &.{
         .{ "Type", .{ .name = "XObject" } },
@@ -552,6 +565,16 @@ fn attachToPage(upd: *Update, page: pages.Page, annot: Ref) Error!void {
 /// new appearance in Helvetica with the size and colour of its `/DA`; any
 /// other styling its old appearance had is not kept.
 pub fn setContents(upd: *Update, num: u32, contents: []const u8, date: ?[]const u8) Error!void {
+    return changeContents(upd, num, contents, date, null);
+}
+
+/// `setContents`, with a text box drawn again in an embedded font. Without it a
+/// box that had one is drawn in Helvetica.
+pub fn setContentsWith(upd: *Update, num: u32, contents: []const u8, date: ?[]const u8, typeface: forms.Typeface) Error!void {
+    return changeContents(upd, num, contents, date, typeface);
+}
+
+fn changeContents(upd: *Update, num: u32, contents: []const u8, date: ?[]const u8, typeface: ?forms.Typeface) Error!void {
     const a = upd.allocator();
     // A dictionary of its own (not a stream, whose data would be lost) with an
     // annotation's subtype and rectangle.
@@ -564,14 +587,14 @@ pub fn setContents(upd: *Update, num: u32, contents: []const u8, date: ?[]const 
     d = try write.dictWithout(a, d, "RC");
     // A text box shows its contents, so its appearance is made again.
     if (upd.doc.getName(d, "Subtype")) |subtype| if (std.mem.eql(u8, subtype, "FreeText")) {
-        d = try redrawFreeText(upd, d, contents);
+        d = try redrawFreeText(upd, d, contents, typeface);
     };
     try upd.set(num, .{ .dict = d });
 }
 
 /// `d` with a new appearance showing `contents`, from its `/Rect`, `/DA` and
 /// `/Rotate`.
-fn redrawFreeText(upd: *Update, d: Dict, contents: []const u8) Error!Dict {
+fn redrawFreeText(upd: *Update, d: Dict, contents: []const u8, typeface: ?forms.Typeface) Error!Dict {
     const a = upd.allocator();
     const doc = upd.doc;
     const r = rectOf(doc, d, "Rect") orelse return error.BadGeometry;
@@ -579,7 +602,7 @@ fn redrawFreeText(upd: *Update, d: Dict, contents: []const u8) Error!Dict {
     const da = try forms.parseDa(a, da_text);
     const turn = @mod(doc.getInt(d, "Rotate") orelse 0, 360);
     const rotate: u16 = if (turn == 90 or turn == 180 or turn == 270) @intCast(turn) else 0;
-    const made = try freeTextAppearance(upd, .{ r.x0, r.y0, r.x1, r.y1 }, rotate, if (da.size > 0) da.size else 12, da.color_ops, contents);
+    const made = try freeTextAppearance(upd, .{ r.x0, r.y0, r.x1, r.y1 }, rotate, if (da.size > 0) da.size else 12, da.color_ops, contents, typeface);
     const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = made.form } }});
     return write.dictWith(a, d, "AP", .{ .dict = ap_dict });
 }

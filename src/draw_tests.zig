@@ -1040,7 +1040,7 @@ test "a stamp's embedded fonts are written by finish, which cannot be forgotten"
             try canvas.text(.{ .embedded = &font }, 10, 10, 50, line);
             try stamp.place(pdf.pages.page(&doc, list, i).?, &canvas, .over);
         }
-        try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+        try testing.expectError(error.UnfinishedFonts, upd.write(testing.allocator, &out.writer));
         try testing.expectEqual(@as(usize, 0), out.written().len);
         try stamp.finish();
         // More text after finishing needs finishing again.
@@ -1048,7 +1048,7 @@ test "a stamp's embedded fonts are written by finish, which cannot be forgotten"
         defer canvas.deinit();
         try canvas.text(.{ .embedded = &font }, 10, 10, 50, "D");
         try stamp.place(pdf.pages.page(&doc, list, 2).?, &canvas, .over);
-        try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+        try testing.expectError(error.UnfinishedFonts, upd.write(testing.allocator, &out.writer));
         // A page with only glyphs that are in does not.
         try stamp.finish();
         try stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .under);
@@ -1091,7 +1091,7 @@ test "a font too damaged to cut down stops the writing" {
     var stamp: draw.Stamp = .init(&upd);
     try stamp.place(pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?, &canvas, .over);
     try testing.expectError(error.BadFont, stamp.finish());
-    try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+    try testing.expectError(error.UnfinishedFonts, upd.write(testing.allocator, &out.writer));
 }
 
 fn embedUnderAllocationFailure(gpa: Allocator, font_file: []const u8, existing_file: []const u8) !void {

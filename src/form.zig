@@ -26,6 +26,10 @@ const font_mod = @import("font.zig");
 const content_mod = @import("content.zig");
 const std14 = @import("std14.zig");
 const write = @import("write.zig");
+const draw = @import("draw.zig");
+const truetype = @import("truetype.zig");
+const font_embed = @import("font_embed.zig");
+const appearance = @import("appearance.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -302,7 +306,7 @@ const Walk = struct {
 
 // ---- filling ---------------------------------------------------------------------------------------
 
-pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, NotMultiSelect, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
+pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, NotMultiSelect, MissingGlyph, FontNotForForms, BadFont, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
 
 /// A widget written directly inside another object cannot be rewritten, and
 /// would go on showing the old value.
@@ -310,16 +314,67 @@ fn requireIndirectWidgets(field: Field) Error!void {
     for (field.widgets) |w| if (w.num == 0) return error.DirectObject;
 }
 
+/// An embedded TrueType font to fill fields and write text boxes with, in place
+/// of WinAnsi Helvetica. One `draw.Embedder` serves a whole update (a
+/// `draw.Stamp` has one, `stamp.fonts_embedded`); call its `finish` before the
+/// update is written.
+///
+/// The font draws the appearances. The field keeps its own default font, so a
+/// program that edits the field later writes with that, and only what that font
+/// has. A character the embedded font lacks is `error.MissingGlyph`. A font
+/// whose `fsType` allows only preview and print is `error.FontNotForForms`.
+pub const Typeface = struct {
+    embedder: *draw.Embedder,
+    font: *const truetype.Font,
+
+    pub fn check(self: Typeface) error{FontNotForForms}!void {
+        if (self.font.permission == .preview_and_print) return error.FontNotForForms;
+    }
+
+    /// Every character of `text` has a glyph; line breaks and tabs are not
+    /// characters to draw.
+    pub fn requireCovers(self: Typeface, a: Allocator, text: []const u8) (Allocator.Error || error{MissingGlyph})!void {
+        _ = try paragraphs(a, .{ .embedded = self.font }, text);
+    }
+
+    /// The name and reference under which an appearance writes with the font,
+    /// after counting the glyphs that `texts` need.
+    pub fn prepare(self: Typeface, a: Allocator, texts: []const []const u8) (Allocator.Error || error{ MissingGlyph, TooManyObjects })!Object {
+        var use: draw.EmbeddedUse = .{ .font = self.font };
+        for (texts) |text| for (try paragraphs(a, .{ .embedded = self.font }, text)) |para| for (para) |unit| {
+            const gop = try use.used.getOrPut(a, unit.code);
+            var buffer: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(unit.char, &buffer) catch unreachable;
+            if (!gop.found_existing or font_embed.preferred(buffer[0..n], gop.value_ptr.*)) gop.value_ptr.* = try a.dupe(u8, buffer[0..n]);
+        };
+        const ref = try self.embedder.refFor(self.font);
+        try self.embedder.note(a, &use);
+        return .{ .ref = ref };
+    }
+};
+
+/// The name an appearance gives an embedded font.
+pub const embedded_name = "PzE";
+
 /// Sets the text of a text field or an editable combo box. The value of a
 /// password field is not stored: it is only shown, masked, in the appearance.
 pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
+    return fillText(upd, field, value, null);
+}
+
+/// `setText`, drawn with an embedded font.
+pub fn setTextWith(upd: *Update, field: Field, value: []const u8, typeface: Typeface) Error!void {
+    return fillText(upd, field, value, typeface);
+}
+
+fn fillText(upd: *Update, field: Field, value: []const u8, typeface: ?Typeface) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .text and field.kind != .combo) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
     try requireIndirectWidgets(field);
     const a = upd.allocator();
     if (field.kind == .combo) {
-        if (optionIndex(field, value)) |i| return storeText(upd, field, field.exports[i], field.options[i]);
+        if (optionIndex(field, value)) |i| return storeText(upd, field, field.exports[i], field.options[i], typeface);
         // A combo box without choices cannot restrict anything.
         if (!field.editable and field.options.len > 0) return error.NotAnOption;
     }
@@ -338,7 +393,7 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
         const count = std.unicode.utf8CountCodepoints(text) catch text.len;
         if (count > m) return error.TooLong;
     }
-    return storeText(upd, field, text, text);
+    return storeText(upd, field, text, text, typeface);
 }
 
 /// The choice that `choice` names, by its export value or its display text.
@@ -349,8 +404,14 @@ fn optionIndex(field: Field, choice: []const u8) ?usize {
 }
 
 /// Writes `value` to `/V` and gives every widget an appearance showing `shown`.
-fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) Error!void {
+fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8, typeface: ?Typeface) Error!void {
     const a = upd.allocator();
+    const drawn = try shownText(a, shown, field.password);
+    // Refused before anything changes.
+    if (typeface) |t| {
+        try t.check();
+        try t.requireCovers(a, drawn);
+    }
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
     // A password is never put in the file, where an incremental update would
     // keep it for good: the note on this flag in table 228 (12.7.4.3) says
@@ -362,7 +423,14 @@ fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) E
     fd = try write.dictWithout(a, fd, "RV");
     try upd.set(field.num, .{ .dict = fd });
 
-    const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, shown, field.password)));
+    var da = try defaultAppearance(upd, fd, try toWinAnsi(a, drawn));
+    var face: Face = .win_ansi;
+    if (typeface) |t| {
+        da.font = try t.prepare(a, &.{drawn});
+        da.font_name = embedded_name;
+        face = .{ .embedded = t.font };
+        try settleAppearances(upd);
+    }
     for (field.widgets) |w| {
         if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
         const wd = upd.get(w.num).asDict() orelse continue;
@@ -370,7 +438,7 @@ fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) E
             .multiline = field.multiline,
             .password = field.password,
             .cells = if (field.comb) field.max_len else null,
-        }, da);
+        }, da, face);
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
     }
 }
@@ -423,12 +491,22 @@ pub fn setChoice(upd: *Update, field: Field, choice: []const u8) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .combo and field.kind != .list) return error.WrongKind;
     if (field.kind == .combo) return setText(upd, field, choice);
-    return setChoices(upd, field, &.{choice});
+    return selectChoices(upd, field, &.{choice}, null);
 }
 
 /// Selects exactly `choices` (export values or display texts) in a list box and
 /// draws it; none clears it. More than one needs `Field.multi_select`.
 pub fn setChoices(upd: *Update, field: Field, choices: []const []const u8) Error!void {
+    return selectChoices(upd, field, choices, null);
+}
+
+/// `setChoices`, with the list drawn in an embedded font. (A combo box takes
+/// `setTextWith`.) The font must have every entry that shows.
+pub fn setChoicesWith(upd: *Update, field: Field, choices: []const []const u8, typeface: Typeface) Error!void {
+    return selectChoices(upd, field, choices, typeface);
+}
+
+fn selectChoices(upd: *Update, field: Field, choices: []const []const u8, typeface: ?Typeface) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .list) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
@@ -450,6 +528,10 @@ pub fn setChoices(upd: *Update, field: Field, choices: []const []const u8) Error
         }
     } else try values.appendSlice(a, choices);
     if (values.items.len > 1 and !field.multi_select) return error.NotMultiSelect;
+    if (typeface) |t| {
+        try t.check();
+        for (field.options) |shown| try t.requireCovers(a, shown);
+    }
 
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
     const strings = try a.alloc(Object, values.items.len);
@@ -485,20 +567,28 @@ pub fn setChoices(upd: *Update, field: Field, choices: []const []const u8) Error
     try upd.set(field.num, .{ .dict = fd });
 
     var rows: std.ArrayList(ListRow) = .empty;
+    var texts: std.ArrayList([]const u8) = .empty;
     var all: std.ArrayList(u8) = .empty;
     var next: usize = 0;
     for (field.options, 0..) |shown, i| {
         while (next < indices.items.len and indices.items[next] < i) next += 1;
         if (i < top or rows.items.len >= max_list_rows) continue;
-        const bytes = try toWinAnsi(a, shown);
-        try all.appendSlice(a, bytes);
-        try rows.append(a, .{ .text = bytes, .selected = next < indices.items.len and indices.items[next] == i });
+        try all.appendSlice(a, try toWinAnsi(a, shown));
+        try texts.append(a, shown);
+        try rows.append(a, .{ .text = shown, .selected = next < indices.items.len and indices.items[next] == i });
     }
-    const da = try defaultAppearance(upd, fd, all.items);
+    var da = try defaultAppearance(upd, fd, all.items);
+    var face: Face = .win_ansi;
+    if (typeface) |t| {
+        da.font = try t.prepare(a, texts.items);
+        da.font_name = embedded_name;
+        face = .{ .embedded = t.font };
+        try settleAppearances(upd);
+    }
     for (field.widgets) |w| {
         if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
         const wd = upd.get(w.num).asDict() orelse continue;
-        const ap = try upd.add(.{ .stream = try listForm(a, w.rect, try widgetStyle(upd.doc, a, wd), rows.items, da) });
+        const ap = try upd.add(.{ .stream = try listForm(a, w.rect, try widgetStyle(upd.doc, a, wd), rows.items, da, face) });
         // A merged field and widget is the dictionary written above.
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
     }
@@ -522,6 +612,15 @@ pub fn inheritedIn(upd: *Update, d: Dict, key: []const u8) ?Object {
 /// resetting a form does (12.7.5.3). Push buttons and signatures have nothing
 /// to reset.
 pub fn reset(upd: *Update, field: Field) Error!void {
+    return restoreDefault(upd, field, null);
+}
+
+/// `reset`, with text and lists drawn in an embedded font.
+pub fn resetWith(upd: *Update, field: Field, typeface: Typeface) Error!void {
+    return restoreDefault(upd, field, typeface);
+}
+
+fn restoreDefault(upd: *Update, field: Field, typeface: ?Typeface) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.num == 0) return error.DirectObject;
     try requireIndirectWidgets(field);
@@ -535,7 +634,7 @@ pub fn reset(upd: *Update, field: Field) Error!void {
             if (field.kind == .combo) if (optionIndex(field, value)) |i| {
                 shown = field.options[i];
             };
-            try storeText(upd, field, value, shown);
+            try storeText(upd, field, value, shown, typeface);
             if (default == .null) {
                 fd = upd.get(field.num).asDict() orelse return error.DirectObject;
                 try upd.set(field.num, .{ .dict = try write.dictWithout(a, fd, "V") });
@@ -553,7 +652,7 @@ pub fn reset(upd: *Update, field: Field) Error!void {
                 if (choices.items.len == 1 and !field.multi_select) break;
                 try choices.append(a, text);
             }
-            try setChoices(upd, field, choices.items);
+            try selectChoices(upd, field, choices.items, typeface);
         },
         .checkbox, .radio => {
             const state: []const u8 = default.asName() orelse "Off";
@@ -572,6 +671,100 @@ pub fn reset(upd: *Update, field: Field) Error!void {
         },
         else => return error.WrongKind,
     }
+}
+
+/// A form that asks readers to make appearances (`NeedAppearances`) would have
+/// them redraw a field in its own font, losing what an embedded font was needed
+/// for. Before that is turned off, the other widgets that relied on it are
+/// given appearances as they would be shown: text and choice fields with a
+/// value, and every widget without a drawing of its own.
+fn settleAppearances(upd: *Update) Error!void {
+    const a = upd.allocator();
+    const root = upd.doc.trailer.get("Root") orelse return;
+    if (root != .ref) return;
+    const cat = upd.get(root.ref.num).asDict() orelse return;
+    const acro_value = cat.get("AcroForm") orelse return;
+    const acro = (if (acro_value == .ref) upd.get(acro_value.ref.num) else acro_value).asDict() orelse return;
+    const need = acro.get("NeedAppearances") orelse return;
+    const flag = if (need == .ref) upd.get(need.ref.num) else need;
+    if (flag != .boolean or !flag.boolean) return;
+
+    const list = try pages.PageList.build(upd.doc);
+    for (try fields(a, upd.doc, list)) |field| {
+        const writes = field.kind == .text or field.kind == .combo or field.kind == .list;
+        for (field.widgets) |w| {
+            // What this update has written is up to date.
+            if (w.num == 0 or upd.changed.contains(w.num)) continue;
+            if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
+            const wd = upd.get(w.num).asDict() orelse continue;
+            const drawn = hasDrawing(upd.doc, wd);
+            if (writes) {
+                if (drawn and !appearance.isStale(upd.doc, wd)) continue;
+            } else if (drawn) continue;
+            if (field.kind == .checkbox or field.kind == .radio) {
+                try storeButtonStates(upd, field, w, wd);
+                continue;
+            }
+            const made = try appearance.make(a, upd.doc, wd, "Widget", w.rect, 0) orelse continue;
+            const ap = try upd.add(.{ .stream = try ownFonts(upd, made) });
+            try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
+        }
+    }
+    const off = try write.dictWith(a, acro, "NeedAppearances", .{ .boolean = false });
+    if (acro_value == .ref) {
+        try upd.set(acro_value.ref.num, .{ .dict = off });
+    } else try upd.set(root.ref.num, .{ .dict = try write.dictWith(a, cat, "AcroForm", .{ .dict = off }) });
+}
+
+/// Whether widget `wd` has a normal appearance that draws: a stream, or a
+/// dictionary of states of which one is.
+fn hasDrawing(doc: *Document, wd: Dict) bool {
+    const normal = doc.get(doc.getDict(wd, "AP") orelse return false, "N") orelse return false;
+    return normal == .stream or (normal == .dict and appearance.anyDrawing(doc, normal.dict));
+}
+
+/// Stores both states of a check box or radio button that has no drawing, so
+/// that it shows as it did and can still be turned on and off.
+fn storeButtonStates(upd: *Update, field: Field, widget: Widget, wd: Dict) Error!void {
+    const a = upd.allocator();
+    // The state's own name where there is one.
+    const on: []const u8 = if (widget.on_state.len > 0) widget.on_state else on: {
+        const as = if (upd.doc.getName(wd, "AS")) |s| (if (std.mem.eql(u8, s, "Off")) null else s) else null;
+        break :on as orelse "Yes";
+    };
+    var states: [2]object.Entry = undefined;
+    var shown = upd.doc.getName(wd, "AS");
+    for ([_][]const u8{ "Off", on }, &states) |state, *entry| {
+        const as_state = try write.dictWith(a, wd, "AS", .{ .name = state });
+        const made = try appearance.make(a, upd.doc, as_state, "Widget", widget.rect, 0) orelse return;
+        entry.* = .{ .key = try a.dupe(u8, state), .value = .{ .ref = try upd.add(.{ .stream = try ownFonts(upd, made) }) } };
+    }
+    // Without a state of its own, a check box shows the field's value, as it is
+    // drawn; a radio group's value does not say which button is meant.
+    if (shown == null) shown = if (field.kind == .checkbox and field.value.len > 0 and !std.mem.eql(u8, field.value, "Off")) on else "Off";
+    const normal = try write.makeDict(a, &.{.{ "N", .{ .dict = .{ .entries = try a.dupe(object.Entry, &states) } } }});
+    var changed = try write.dictWith(a, wd, "AP", .{ .dict = normal });
+    changed = try write.dictWith(a, changed, "AS", .{ .name = try a.dupe(u8, shown.?) });
+    try upd.set(widget.num, .{ .dict = changed });
+}
+
+/// An appearance made in memory names Helvetica as a dictionary of the program;
+/// in a file it is an object.
+fn ownFonts(upd: *Update, made: object.Stream) Error!object.Stream {
+    const a = upd.allocator();
+    const res = (made.dict.get("Resources") orelse return made).asDict() orelse return made;
+    const font_map = (res.get("Font") orelse return made).asDict() orelse return made;
+    const entries = try a.dupe(object.Entry, font_map.entries);
+    for (entries) |*e| if (e.value == .dict) {
+        // Added first: writing `.{ .ref = try upd.add(e.value) }` into
+        // `e.value` can change it while `add` is still reading it.
+        const font = e.value;
+        const ref = try upd.add(font);
+        e.value = .{ .ref = ref };
+    };
+    var out = made;
+    out.dict = try write.dictWith(a, made.dict, "Resources", .{ .dict = try write.dictWith(a, res, "Font", .{ .dict = .{ .entries = entries } }) });
+    return out;
 }
 
 /// Sets `/NeedAppearances true` in the AcroForm dictionary.
@@ -793,30 +986,115 @@ const byte_widths = blk: {
     break :blk out;
 };
 
-/// Appends `para`, WinAnsi bytes without line breaks, cut into lines no wider
-/// than `width` at `size` points: at spaces, or within a word that is too wide.
-pub fn wrapLine(a: Allocator, lines: *std.ArrayList([]const u8), para: []const u8, width: f64, size: f64) Allocator.Error!void {
+/// How the text of an appearance is written.
+pub const Face = union(enum) {
+    /// WinAnsi, with the font that `/DA` or `helvetica` gives and Helvetica's
+    /// widths: other characters become `?`.
+    win_ansi,
+    /// An embedded font, named by `DefaultAppearance.font`; codes are glyphs.
+    embedded: *const truetype.Font,
+};
+
+/// One character as it will be written.
+pub const Unit = struct {
+    /// The WinAnsi byte, or the glyph.
+    code: u16,
+    /// In 1/1000 em.
+    width: f64,
+    /// The character, for the font's record of what its glyphs stand for.
+    char: u21,
+};
+
+/// `utf8` as it will be written: a list of paragraphs, split at line breaks (CR
+/// LF and a lone CR count once), a tab becoming a space. With an embedded font
+/// a character it lacks is `error.MissingGlyph`.
+pub fn paragraphs(a: Allocator, face: Face, utf8: []const u8) (Allocator.Error || error{MissingGlyph})![]const []const Unit {
+    var out: std.ArrayList([]const Unit) = .empty;
+    var line: std.ArrayList(Unit) = .empty;
+    switch (face) {
+        .win_ansi => for (try toWinAnsi(a, utf8)) |byte| {
+            if (byte == '\n') {
+                try out.append(a, try line.toOwnedSlice(a));
+            } else try line.append(a, .{ .code = byte, .width = @floatFromInt(byte_widths[byte]), .char = 0 });
+        },
+        .embedded => |font| {
+            // Text that is not UTF-8 has nothing the font can be said to lack.
+            var view = std.unicode.Utf8View.init(utf8) catch return error.MissingGlyph;
+            var it = view.iterator();
+            var after_cr = false;
+            while (it.nextCodepoint()) |c| {
+                const was_cr = after_cr;
+                after_cr = c == '\r';
+                if (c == '\n' and was_cr) continue;
+                if (c == '\n' or c == '\r') {
+                    try out.append(a, try line.toOwnedSlice(a));
+                    continue;
+                }
+                const char: u21 = if (c == '\t') ' ' else c;
+                const glyph = font.glyphFor(char) orelse return error.MissingGlyph;
+                try line.append(a, .{ .code = glyph, .width = font.width(glyph), .char = char });
+            }
+        },
+    }
+    try out.append(a, try line.toOwnedSlice(a));
+    return out.toOwnedSlice(a);
+}
+
+/// The width of `units` at `size` points.
+pub fn unitsWidth(units: []const Unit, size: f64) f64 {
+    var w: f64 = 0;
+    for (units) |u| w += u.width;
+    return w * size / 1000.0;
+}
+
+/// Appends `para`, a paragraph, cut into lines no wider than `width` at `size`
+/// points: at spaces, or within a word that is too wide.
+pub fn wrapLine(a: Allocator, lines: *std.ArrayList([]const Unit), para: []const Unit, width: f64, size: f64) Allocator.Error!void {
+    const isSpace = struct {
+        fn of(u: Unit) bool {
+            // WinAnsi units carry no character: their space is code 32.
+            return u.char == ' ' or (u.char == 0 and u.code == ' ');
+        }
+    }.of;
     var start: usize = 0;
     var last_space: ?usize = null;
     // The width of para[start..i] in 1/1000 em, kept as the line grows.
-    var units: u64 = 0;
+    var total: f64 = 0;
     var i: usize = 0;
     while (i < para.len) : (i += 1) {
-        if (para[i] == ' ') last_space = i;
-        units += byte_widths[para[i]];
-        if (@as(f64, @floatFromInt(units)) * size / 1000.0 <= width or i == start) continue;
+        if (isSpace(para[i])) last_space = i;
+        total += para[i].width;
+        if (total * size / 1000.0 <= width or i == start) continue;
         const cut = last_space orelse i;
         const brk = if (cut > start) cut else i;
         try lines.append(a, para[start..brk]);
-        start = if (para[brk] == ' ') brk + 1 else brk;
+        start = if (isSpace(para[brk])) brk + 1 else brk;
         last_space = null;
         // Measure the new line from its start.
-        units = 0;
+        total = 0;
         i = start;
-        if (i < para.len) units = byte_widths[para[i]];
-        if (i < para.len and para[i] == ' ') last_space = i;
+        if (i < para.len) total = para[i].width;
+        if (i < para.len and isSpace(para[i])) last_space = i;
     }
     try lines.append(a, para[start..]);
+}
+
+/// Appends `units` as the string operand of a show operator.
+pub fn appendString(a: Allocator, content: *std.ArrayList(u8), face: Face, units: []const Unit) Allocator.Error!void {
+    switch (face) {
+        .win_ansi => {
+            const bytes = try a.alloc(u8, units.len);
+            for (units, bytes) |u, *b| b.* = @intCast(u.code);
+            var w: std.Io.Writer.Allocating = .fromArrayList(a, content);
+            defer content.* = w.toArrayList();
+            write.writeString(&w.writer, bytes) catch return error.OutOfMemory;
+        },
+        .embedded => {
+            try content.append(a, '<');
+            for (units) |u| try content.print(a, "{X:0>4}", .{u.code});
+            try content.append(a, '>');
+        },
+    }
 }
 
 /// What a field shows for `value`: a password field shows one `*` per character.
@@ -875,11 +1153,10 @@ fn colorOperator(doc: *Document, a: Allocator, c: []const Object, names: [3][]co
 /// A form XObject that draws `value` inside `rect` (placed at the widget's size).
 /// Shows `text` after moving by `dx`, `dy` from where the last such move left
 /// off: `Td` is relative to the previous line's start.
-fn showAt(a: Allocator, content: *std.ArrayList(u8), text: []const u8, dx: f64, dy: f64) Allocator.Error!void {
+fn showAt(a: Allocator, content: *std.ArrayList(u8), face: Face, units: []const Unit, dx: f64, dy: f64) Allocator.Error!void {
     try content.print(a, "{d:.2} {d:.2} Td\n", .{ dx, dy });
-    var sb: std.Io.Writer.Allocating = .init(a);
-    write.writeString(&sb.writer, text) catch return error.OutOfMemory;
-    try content.print(a, "{s} Tj\n", .{sb.written()});
+    try appendString(a, content, face, units);
+    try content.appendSlice(a, " Tj\n");
 }
 
 /// How a field's text is arranged.
@@ -890,13 +1167,13 @@ pub const TextLayout = struct {
     cells: ?u32 = null,
 };
 
-fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance) Error!Ref {
-    return upd.add(.{ .stream = try textForm(upd.allocator(), rect, style, value, layout, da) });
+fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance, face: Face) Error!Ref {
+    return upd.add(.{ .stream = try textForm(upd.allocator(), rect, style, value, layout, da, face) });
 }
 
 /// The appearance of a text field showing `value` in `rect`, as a form XObject
 /// allocated from `a`.
-pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance) Allocator.Error!object.Stream {
+pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance, face: Face) (Allocator.Error || error{MissingGlyph})!object.Stream {
     const multiline = layout.multiline;
     // Width and height of the content, which a turned widget swaps.
     const sideways = style.rotate == 90 or style.rotate == 270;
@@ -904,21 +1181,20 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
     const h = if (sideways) rect.width() else rect.height();
     const pad = 2.0;
 
-    const bytes = try toWinAnsi(a, try shownText(a, value, layout.password));
+    const paras = try paragraphs(a, face, try shownText(a, value, layout.password));
     const cell: f64 = if (layout.cells) |n| w / @as(f64, @floatFromInt(n)) else 0;
     var size: f64 = if (da.size > 0) da.size else if (multiline) 12 else std.math.clamp(h - 2 * pad, 4, 12);
     // An automatic size must also let the widest character fit its cell.
     if (layout.cells != null and da.size <= 0) {
-        for (0..bytes.len) |i| {
-            const width = textWidth(bytes[i..][0..1], 1);
+        for (paras) |para| for (para) |unit| {
+            const width = unit.width / 1000;
             if (width * size > cell) size = @max(4, cell / width);
-        }
+        };
     }
 
     // Lines: explicit breaks, and for multi-line fields a wrap at spaces.
-    var lines: std.ArrayList([]const u8) = .empty;
-    var paras = std.mem.splitScalar(u8, bytes, '\n');
-    while (paras.next()) |para| {
+    var lines: std.ArrayList([]const Unit) = .empty;
+    for (paras) |para| {
         if (!multiline) {
             try lines.append(a, para);
             continue;
@@ -947,29 +1223,31 @@ pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []con
     var prev_y: f64 = 0;
     if (layout.cells) |n| {
         // One character, centred, in each cell; /Q says which cells are used.
-        const used = @min(bytes.len, n);
+        // A comb field has no line breaks.
+        const first_line = paras[0];
+        const used = @min(first_line.len, n);
         const first: usize = switch (da.quad) {
             1 => (n - used) / 2,
             2 => n - used,
             else => 0,
         };
         for (0..used) |i| {
-            const one = bytes[i..][0..1];
+            const one = first_line[i..][0..1];
             // Rounded as it will be written, so that the relative moves of many
             // cells do not add their rounding errors up.
-            const x = @round((cell * (@as(f64, @floatFromInt(first + i)) + 0.5) - textWidth(one, size) / 2) * 100) / 100;
-            try showAt(a, &content, one, x - prev_x, y - prev_y);
+            const x = @round((cell * (@as(f64, @floatFromInt(first + i)) + 0.5) - unitsWidth(one, size) / 2) * 100) / 100;
+            try showAt(a, &content, face, one, x - prev_x, y - prev_y);
             prev_x = x;
             prev_y = y;
         }
     } else for (lines.items) |line| {
-        const lw = textWidth(line, size);
+        const lw = unitsWidth(line, size);
         const x: f64 = switch (da.quad) {
             1 => @max(pad, (w - lw) / 2),
             2 => @max(pad, w - pad - lw),
             else => pad,
         };
-        try showAt(a, &content, line, x - prev_x, y - prev_y);
+        try showAt(a, &content, face, line, x - prev_x, y - prev_y);
         prev_x = x;
         prev_y = y;
         y -= leading;
@@ -1009,7 +1287,7 @@ fn textAreaForm(a: Allocator, w: f64, h: f64, rotate: u16, content: []const u8, 
     return .{ .dict = dict, .data = content };
 }
 
-/// An entry of a list box as drawn, in WinAnsi.
+/// An entry of a list box as drawn.
 pub const ListRow = struct { text: []const u8, selected: bool };
 
 /// Most entries of a list box that are drawn.
@@ -1030,7 +1308,7 @@ fn listCapacity(h: f64, da_size: f64) usize {
 
 /// The appearance of a list box whose visible entries, from the top, are
 /// `rows`, as a form XObject allocated from `a`.
-pub fn listForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, rows: []const ListRow, da: DefaultAppearance) Allocator.Error!object.Stream {
+pub fn listForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, rows: []const ListRow, da: DefaultAppearance, face: Face) (Allocator.Error || error{MissingGlyph})!object.Stream {
     const sideways = style.rotate == 90 or style.rotate == 270;
     const w = if (sideways) rect.height() else rect.width();
     const h = if (sideways) rect.width() else rect.height();
@@ -1046,9 +1324,10 @@ pub fn listForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, rows: []cons
         if (y <= -leading) break;
         if (row.selected) try content.print(a, "q 0.6 0.757 0.855 rg 1 {d:.2} {d:.2} {d:.2} re f Q\n", .{ y, @max(w - 2, 0), leading });
         try content.print(a, "BT {s} {s} {d:.2} Tf 3 {d:.2} Td ", .{ da.color_ops, font_name.written(), size, y + size * 0.3 });
-        var string: std.Io.Writer.Allocating = .init(a);
-        write.writeString(&string.writer, row.text) catch return error.OutOfMemory;
-        try content.print(a, "{s} Tj ET\n", .{string.written()});
+        // A line break in an entry would end it.
+        const text = (try paragraphs(a, face, row.text))[0];
+        try appendString(a, &content, face, text);
+        try content.appendSlice(a, " Tj ET\n");
         y -= leading;
     }
     try content.appendSlice(a, "Q\nEMC\n");
@@ -1605,18 +1884,28 @@ test "wrapping a very long line takes linear time" {
     const a = arena.allocator();
     const long = try a.alloc(u8, 200_000);
     @memset(long, 'i');
-    var lines: std.ArrayList([]const u8) = .empty;
+    const plain = struct {
+        fn units(from: Allocator, text: []const u8) ![]const Unit {
+            return (try paragraphs(from, .win_ansi, text))[0];
+        }
+        fn expectLine(from: Allocator, want: []const u8, line: []const Unit) !void {
+            var out: std.ArrayList(u8) = .empty;
+            for (line) |u| try out.append(from, @intCast(u.code));
+            try testing.expectEqualStrings(want, out.items);
+        }
+    };
+    var lines: std.ArrayList([]const Unit) = .empty;
     // One line as wide as all of it: re-measuring per character takes minutes.
-    try wrapLine(a, &lines, long, 1e12, 10);
+    try wrapLine(a, &lines, try plain.units(a, long), 1e12, 10);
     try testing.expectEqual(@as(usize, 1), lines.items.len);
     lines.clearRetainingCapacity();
-    try wrapLine(a, &lines, "aaa bbb ccc", textWidth("aaa bbb", 10), 10);
+    try wrapLine(a, &lines, try plain.units(a, "aaa bbb ccc"), textWidth("aaa bbb", 10), 10);
     try testing.expectEqual(@as(usize, 2), lines.items.len);
-    try testing.expectEqualStrings("aaa bbb", lines.items[0]);
-    try testing.expectEqualStrings("ccc", lines.items[1]);
+    try plain.expectLine(a, "aaa bbb", lines.items[0]);
+    try plain.expectLine(a, "ccc", lines.items[1]);
     lines.clearRetainingCapacity();
     // A word wider than the line is cut where it must be.
-    try wrapLine(a, &lines, "abcdefgh", textWidth("abc", 10), 10);
+    try wrapLine(a, &lines, try plain.units(a, "abcdefgh"), textWidth("abc", 10), 10);
     try testing.expect(lines.items.len > 1);
 }
 
@@ -1786,11 +2075,11 @@ test "a comb field with a border colour has lines between its cells" {
     const a = arena.allocator();
     const rect: pages.Rect = .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 20 };
     const da: DefaultAppearance = .{ .font = helvetica };
-    const lined = try textForm(a, rect, .{ .border = "0 G" }, "12", .{ .cells = 4 }, da);
+    const lined = try textForm(a, rect, .{ .border = "0 G" }, "12", .{ .cells = 4 }, da, .win_ansi);
     for ([_][]const u8{ "25.00 0 m 25.00 20.00 l S", "50.00 0 m", "75.00 0 m" }) |want| try testing.expect(std.mem.indexOf(u8, lined.data, want) != null);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, lined.data, " l S"));
     for ([_]WidgetStyle{ .{}, .{ .border = "0 G", .border_width = 0 } }) |style| {
-        const plain = try textForm(a, rect, style, "12", .{ .cells = 4 }, da);
+        const plain = try textForm(a, rect, style, "12", .{ .cells = 4 }, da, .win_ansi);
         try testing.expectEqual(@as(usize, 0), std.mem.count(u8, plain.data, " l S"));
     }
 }

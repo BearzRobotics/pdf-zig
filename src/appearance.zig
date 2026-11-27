@@ -265,7 +265,7 @@ fn freeText(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect, rotate: u16
     const turn: u16 = if (own == 90 or own == 180 or own == 270) @intCast(own) else 0;
     const contents = try textOf(a, doc, d.get("Contents") orelse .null);
     const size = if (da.size > 0) da.size else 12;
-    return annot.freeTextForm(a, .{ rect.x0, rect.y0, rect.x1, rect.y1 }, turn, size, da.color_ops, contents, form.helvetica) catch |err| switch (err) {
+    return annot.freeTextForm(a, .{ rect.x0, rect.y0, rect.x1, rect.y1 }, turn, size, da.color_ops, contents, form.helvetica, .win_ansi) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         // Building in memory has nothing else to fail at.
         else => unreachable,
@@ -296,11 +296,15 @@ fn widgetAppearance(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect) All
         const comb = field.type[0] == 'T' and field.max_len != null and field.flags & ff_comb != 0 and
             field.flags & (ff_multiline | ff_password | ff_file_select) == 0;
         const da = try form.findDefaultAppearance(a, doc, d, try form.toWinAnsi(a, value));
-        return try form.textForm(a, rect, style, value, .{
+        return form.textForm(a, rect, style, value, .{
             .multiline = field.type[0] == 'T' and field.flags & ff_multiline != 0,
             .password = password,
             .cells = if (comb) field.max_len else null,
-        }, da);
+        }, da, .win_ansi) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // WinAnsi lacks nothing: it draws `?`.
+            error.MissingGlyph => unreachable,
+        };
     }
 
     // Not a combo box: a list box.
@@ -415,9 +419,11 @@ fn listBox(a: Allocator, doc: *Document, d: Dict, rect: pages.Rect, style: form.
             selected = true;
             break;
         };
-        const text = try form.toWinAnsi(a, pair[1]);
-        try all.appendSlice(a, text);
-        try rows.append(a, .{ .text = text, .selected = selected });
+        try all.appendSlice(a, try form.toWinAnsi(a, pair[1]));
+        try rows.append(a, .{ .text = pair[1], .selected = selected });
     }
-    return form.listForm(a, rect, style, rows.items, try form.findDefaultAppearance(a, doc, d, all.items));
+    return form.listForm(a, rect, style, rows.items, try form.findDefaultAppearance(a, doc, d, all.items), .win_ansi) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.MissingGlyph => unreachable,
+    };
 }
