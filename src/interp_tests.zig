@@ -557,3 +557,20 @@ test "a Lab /Range with minimum above maximum falls back to the default" {
         try testing.expect(c.r > 0.9 and c.g > 0.9);
     }
 }
+
+test "an extra Q in a form cannot pop the caller's graphics state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = "Q Q 0 1 0 rg 0 0 5 5 re f";
+    const form = try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [0 0 10 10] /Matrix [1 0 0 1 70 0] /Length {d} >>\nstream\n{s}\nendstream", .{ body.len, body });
+    const r = try render(try page(a, "q 1 0 0 rg 0 0 50 50 re W n /Fm Do 0 0 100 100 re f Q", "/XObject << /Fm 5 0 R >>", &.{form}, ""));
+    defer done(r);
+    // save, page clip, save, form clip, form fill, restore, page fill, restore
+    const want = [_]std.meta.Tag(display.Command){ .save, .clip, .save, .clip, .fill, .restore, .fill, .restore };
+    try testing.expectEqual(want.len, r.list.commands.len);
+    for (want, r.list.commands) |w, c| try testing.expectEqual(w, std.meta.activeTag(c));
+    try testing.expectEqual(@as(f64, 70), r.list.commands[4].fill.ctm.e);
+    try testing.expectEqual(@as(f32, 1), r.list.commands[6].fill.paint.color.r);
+    try testing.expectEqual(@as(f64, 0), r.list.commands[6].fill.ctm.e);
+}

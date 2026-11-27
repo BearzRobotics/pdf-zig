@@ -309,6 +309,9 @@ const Run = struct {
     /// CTM at the start of the current content stream: patterns are relative to it.
     base_ctm: Matrix = .identity,
     resources: Dict = .{},
+    /// `q` levels below this belong to the callers of the current content
+    /// stream, which its `Q` operators must not pop.
+    floor: usize = 0,
     ops: usize = 0,
     content_bytes: usize = 0,
     depth: u8 = 0,
@@ -342,6 +345,9 @@ const Run = struct {
         const saved_res = self.resources;
         const saved_base = self.base_ctm;
         const saved_depth = self.stack.items.len;
+        const saved_floor = self.floor;
+        self.floor = saved_depth;
+        defer self.floor = saved_floor;
         self.resources = resources;
         self.base_ctm = base;
         defer {
@@ -397,7 +403,7 @@ const Run = struct {
         const which = std.meta.stringToEnum(Opn, op.name) orelse return;
         switch (which) {
             .q => try self.save(),
-            .Q => try self.restore(),
+            .Q => if (self.stack.items.len > self.floor) try self.restore(),
             .cm => {
                 const m = Matrix{ .a = num(op, 0), .b = num(op, 1), .c = num(op, 2), .d = num(op, 3), .e = num(op, 4), .f = num(op, 5) };
                 self.gs.ctm = m.mul(self.gs.ctm);
