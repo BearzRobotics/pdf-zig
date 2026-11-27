@@ -38,11 +38,15 @@ pub const Page = struct {
     /// Clockwise rotation in degrees when displayed: 0, 90, 180 or 270.
     rotate: u16,
     resources: Dict,
+    /// `/UserUnit`: the length of one user space unit in points (1/72 inch).
+    /// The boxes above are in user space units.
+    user_unit: f64 = 1,
 
-    /// Width and height of the page as displayed (crop box, rotation applied).
+    /// Width and height in points of the page as displayed (crop box,
+    /// `/UserUnit` and rotation applied).
     pub fn displaySize(self: Page) struct { w: f64, h: f64 } {
-        const w = self.crop_box.width();
-        const h = self.crop_box.height();
+        const w = self.crop_box.width() * self.user_unit;
+        const h = self.crop_box.height() * self.user_unit;
         return if (self.rotate == 90 or self.rotate == 270) .{ .w = h, .h = w } else .{ .w = w, .h = h };
     }
 };
@@ -186,14 +190,27 @@ pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
     const rot_raw: i64 = if (e.inh.rotate) |r| (doc.resolve(r).asInt() orelse 0) else 0;
     // Reduced first: rounding down to a multiple of 90 overflows near minInt(i64).
     const rot: u16 = @intCast(@divTrunc(@mod(rot_raw, 360), 90) * 90);
+    const shown = if (crop.width() > 0 and crop.height() > 0) crop else media;
     return .{
         .num = e.num,
         .dict = e.dict,
         .media_box = media,
-        .crop_box = if (crop.width() > 0 and crop.height() > 0) crop else media,
+        .crop_box = shown,
+        .user_unit = userUnit(doc, e.dict, shown),
         .rotate = rot,
         .resources = if (e.inh.resources) |r| (doc.resolve(r).asDict() orelse .{}) else .{},
     };
+}
+
+/// The largest `/UserUnit` accepted, the limit Acrobat documents.
+const max_user_unit = 75_000;
+
+/// The page's `/UserUnit` (table 30; it is not inherited). A value that is not
+/// a positive number within bounds is taken as the default, 1.
+fn userUnit(doc: *Document, d: Dict, shown: Rect) f64 {
+    const v = doc.getNum(d, "UserUnit") orelse return 1;
+    if (!(v > 0 and v <= max_user_unit)) return 1;
+    return if (std.math.isFinite(shown.width() * v) and std.math.isFinite(shown.height() * v)) v else 1;
 }
 
 /// Content streams of a page joined into one buffer, separated by a newline

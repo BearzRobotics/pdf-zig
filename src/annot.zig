@@ -158,13 +158,14 @@ fn checkedMeta(meta: Meta) Error!Meta {
 const max_zigzags = 2000;
 
 /// A zigzag along the bottom edge of the quad `q` (top left, top right, bottom
-/// left, bottom right), rising towards its top.
-fn zigzag(a: Allocator, out: *std.ArrayList(u8), q: *const [8]f64) Allocator.Error!void {
+/// left, bottom right), rising towards its top. `point` is the length of one
+/// point in user space.
+fn zigzag(a: Allocator, out: *std.ArrayList(u8), q: *const [8]f64, point: f64) Allocator.Error!void {
     const length = std.math.hypot(q[6] - q[4], q[7] - q[5]);
     const height = std.math.hypot(q[0] - q[4], q[1] - q[5]);
     if (length <= 0) return;
     // In proportion to the text, within what stays legible.
-    const rise = std.math.clamp(height / 10, 1, 2.5);
+    const rise = std.math.clamp(height / 10, point, 2.5 * point);
     const up_x = if (height > 0) (q[0] - q[4]) / height * rise else 0;
     const up_y = if (height > 0) (q[1] - q[5]) / height * rise else 0;
     const steps: usize = @intFromFloat(std.math.clamp(@ceil(length / rise), 1, max_zigzags));
@@ -217,7 +218,9 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
     }
     // A line along an edge of the quads needs room for its own width, or the
     // appearance's box cuts it in half.
-    const margin: f64 = if (kind == .highlight) 0 else 1;
+    // Lines are one point wide on the page.
+    const point = 1 / page.user_unit;
+    const margin: f64 = if (kind == .highlight) 0 else point;
     const rect = [4]f64{ bx0 - margin, by0 - margin, bx1 + margin, by1 + margin };
 
     // The appearance: coloured quads multiplied onto the page, or lines.
@@ -232,11 +235,11 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
             }
         },
         else => {
-            try ap.print(a, "{d:.3} {d:.3} {d:.3} RG 1 w\n", .{ c[0], c[1], c[2] });
+            try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d} w\n", .{ c[0], c[1], c[2], point });
             for (0..rects.len) |i| {
                 const q = quads[i * 8 ..][0..8];
                 if (kind == .squiggly) {
-                    try zigzag(a, &ap, q);
+                    try zigzag(a, &ap, q, point);
                     continue;
                 }
                 // The bottom edge for an underline, the middle for a strike-out.
@@ -285,7 +288,8 @@ pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta_in: Meta) Er
     const p = inv.apply(x, y);
     // The icon is 20 x 20 points hanging down from the click (NoZoom and
     // NoRotate keep it that size and upright, anchored at the top left).
-    const rect = [4]f64{ p.x, p.y - 20, p.x + 20, p.y };
+    const side = 20 / page.user_unit;
+    const rect = [4]f64{ p.x, p.y - side, p.x + side, p.y };
 
     const c = meta.color;
     const ap = try std.fmt.allocPrint(a,
@@ -337,7 +341,8 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
     var by1 = -std.math.inf(f64);
     var ap: std.ArrayList(u8) = .empty;
     const c = meta.color;
-    try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d:.2} w 1 J 1 j\n", .{ c[0], c[1], c[2], width });
+    const line_width = width / page.user_unit;
+    try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d} w 1 J 1 j\n", .{ c[0], c[1], c[2], line_width });
     for (strokes, 0..) |st, si| {
         const nums = try a.alloc(f64, st.len * 2);
         for (st, 0..) |pt, i| {
@@ -355,7 +360,7 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
         try ap.appendSlice(a, "S\n");
         ink[si] = try write.numbers(a, nums);
     }
-    const pad = width / 2 + 1;
+    const pad = line_width / 2 + 1 / page.user_unit;
     const rect = [4]f64{ bx0 - pad, by0 - pad, bx1 + pad, by1 + pad };
 
     const form_dict = try write.makeDict(a, &.{
@@ -364,7 +369,7 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
         .{ "BBox", try write.numbers(a, &rect) },
     });
     const ap_form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
-    const bs = try write.makeDict(a, &.{.{ "W", .{ .real = width } }});
+    const bs = try write.makeDict(a, &.{.{ "W", .{ .real = line_width } }});
 
     var entries: std.ArrayList(object.Entry) = .empty;
     try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
@@ -400,8 +405,9 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
 
     const c = meta.color;
     const color_ops = try std.fmt.allocPrint(a, "{d:.3} {d:.3} {d:.3} rg", .{ c[0], c[1], c[2] });
-    const made = try freeTextAppearance(upd, rect, page.rotate, size, color_ops, meta.contents);
-    const da = try std.fmt.allocPrint(a, "/Helv {d:.2} Tf {s}", .{ size, color_ops });
+    const user_size = size / page.user_unit;
+    const made = try freeTextAppearance(upd, rect, page.rotate, user_size, color_ops, meta.contents);
+    const da = try std.fmt.allocPrint(a, "/Helv {d:.4} Tf {s}", .{ user_size, color_ops });
     const dr = try write.makeDict(a, &.{.{ "Font", .{ .dict = made.fonts } }});
     const border = try write.makeDict(a, &.{.{ "W", .{ .integer = 0 } }});
 
@@ -441,7 +447,8 @@ fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_
     };
 
     // Lines: the text's own breaks, then a wrap at spaces to fit the box.
-    const pad = 2.0;
+    // Two units, less for text under 8 units (a page with a large /UserUnit).
+    const pad = @min(2.0, size / 4);
     const bytes = try forms.toWinAnsi(a, contents);
     var lines: std.ArrayList([]const u8) = .empty;
     var paras = std.mem.splitScalar(u8, bytes, '\n');
@@ -450,7 +457,7 @@ fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_
     }
 
     var ap: std.ArrayList(u8) = .empty;
-    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.2} Tf {s}\n", .{ bw, bh, size, color_ops });
+    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.4} Tf {s}\n", .{ bw, bh, size, color_ops });
     const leading = size * 1.15;
     var baseline = bh - pad - size * 0.8;
     var first = true;

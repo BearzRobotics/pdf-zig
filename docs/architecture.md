@@ -45,7 +45,9 @@ the document (fonts, image streams), so it must not outlive the `Document`.
 Coordinates are in the page's default user space (origin bottom left, y up). Every drawing
 command carries the `ctm` that maps its coordinates to user space, and
 `DisplayList.base` maps user space to the displayed page (points, origin top left, y down,
-crop box and `/Rotate` applied). A point `p` is drawn at `p * ctm * base`, with the
+crop box, `/UserUnit` and `/Rotate` applied). `Page`'s boxes stay in user space units, each
+`Page.user_unit` points long. Sizes given to the annotation functions (ink width, text size)
+are points on the displayed page. A point `p` is drawn at `p * ctm * base`, with the
 row-vector convention of the specification.
 
 `save` and `restore` bracket the graphics state; `clip` narrows the clip until the matching

@@ -974,6 +974,68 @@ test "a shading that cannot be passed on marks the list incomplete" {
     }
 }
 
+test "/UserUnit scales the page, its text and new annotations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try page(a, "BT /F1 6 Tf 10 50 Td (A) Tj ET", helv, &.{helv_obj}, "/UserUnit 2 /CropBox [0 0 100 80]");
+    const r = try render(bytes);
+    defer done(r);
+    try testing.expectEqual(@as(f64, 200), r.list.width);
+    try testing.expectEqual(@as(f64, 160), r.list.height);
+    try testing.expectEqual(display.Point{ .x = 20, .y = 60 }, r.list.base.apply(10, 50));
+    const lay = try pdf.text.layout(a, &r.list);
+    // 6 units are 12 points.
+    try testing.expectApproxEqAbs(@as(f64, 12), lay.boxes[0].rect.y1 - lay.boxes[0].rect.y0, 1e-9);
+
+    // Sizes given to the annotation functions are points on the page.
+    const pl = try pdf.pages.PageList.build(&r.doc);
+    const p = pdf.pages.page(&r.doc, pl, 0).?;
+    var upd = try pdf.write.Update.init(testing.allocator, &r.doc);
+    defer upd.deinit();
+    _ = try pdf.annot.addNote(&upd, p, 30, 40, .{});
+    _ = try pdf.annot.addInk(&upd, p, &.{&.{ .{ .x = 100, .y = 100 }, .{ .x = 140, .y = 100 } }}, 4, .{});
+    const box = try pdf.annot.addFreeText(&upd, p, 20, 100, 60, 40, 12, .{ .contents = "hi" });
+    _ = try pdf.annot.addMarkup(&upd, p, .underline, &.{.{ .x0 = 20, .y0 = 20, .x1 = 80, .y1 = 32 }}, .{});
+    try pdf.annot.setContents(&upd, box.num, "hello", null);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+
+    const after = try render(out.written());
+    defer done(after);
+    const al = try pdf.pages.PageList.build(&after.doc);
+    const annots = try pdf.annot.list(a, &after.doc, pdf.pages.page(&after.doc, al, 0).?);
+    // The note is 20 points square (10 units).
+    try testing.expectEqual(pdf.pages.Rect{ .x0 = 15, .y0 = 50, .x1 = 25, .y1 = 60 }, annots[0].rect);
+    var ink_width: ?f64 = null;
+    var text_size: ?f64 = null;
+    var line_width: ?f64 = null;
+    for (after.list.commands) |c| switch (c) {
+        .stroke => |s| {
+            const w = s.style.width * s.ctm.a * after.list.base.a;
+            if (w > 2) ink_width = w else if (s.path.len == 2 and s.path[0].move.y == 64) line_width = w;
+        },
+        .text => |t| if (t.glyphs.len == 5) {
+            text_size = t.size * t.tm.mul(t.ctm).mul(after.list.base).a;
+        },
+        else => {},
+    };
+    try testing.expectApproxEqAbs(@as(f64, 4), ink_width.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 12), text_size.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1), line_width.?, 1e-9);
+}
+
+test "a /UserUnit that is not a usable number is taken as 1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "0", "-2", "/Big", "100000" }) |v| {
+        const extra = try std.fmt.allocPrint(arena.allocator(), "/UserUnit {s} /CropBox [0 0 100 80]", .{v});
+        const r = try render(try page(arena.allocator(), "", "", &.{}, extra));
+        defer done(r);
+        try testing.expectEqual(@as(f64, 100), r.list.width);
+    }
+}
+
 test "the text size on the page comes from the vertical axis of text space" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

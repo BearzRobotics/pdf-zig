@@ -78,7 +78,7 @@ filled; XFA forms are not read; no scripts run.
 | Encryption | the standard security handler: RC4 40-128 bit, AES-128, AES-256 (R5, R6), user password (`Options.password`, empty by default); other handlers give `error.UnsupportedEncryption`, a wrong password `error.PasswordRequired` |
 | File structure | header, cross-reference tables and streams, `/Prev` chains, hybrid files, object streams, incremental updates; **repair** by scanning when the table is damaged |
 | Filters | Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG and TIFF predictors. DCT, JPX, JBIG2 and CCITT are passed on by `Document.decodeStream`, which reports the first one in `rest` (`image.decode` decodes CCITT) |
-| Page tree | inherited `Resources`, `MediaBox`, `CropBox`, `Rotate`; wrong `/Count` and cycles tolerated |
+| Page tree | inherited `Resources`, `MediaBox`, `CropBox`, `Rotate`; `UserUnit`; wrong `/Count` and cycles tolerated |
 | Graphics | paths, strokes (width, caps, joins, dashes), fills (both rules), clipping, forms, inline images, image XObjects (referenced, not decoded), axial and radial shadings (sampled to colour stops), shading and tiling patterns, optional content (layers), annotation appearance streams, transparency values (`ca`, `CA`) and blend-mode names |
 | Colour | DeviceGray/RGB/CMYK, Cal*/ICC (as the device space), Lab, Indexed, Separation, DeviceN, Pattern; PDF functions of types 0, 2, 3 and 4 |
 | Text | simple fonts (Type 1, TrueType, Type 3), composite fonts (Type 0 with Identity or embedded CMaps), encodings (Standard, WinAnsi, MacRoman, Differences), `/ToUnicode`, `/Widths`, `/W`, the standard 14 metrics, text state and all text operators |

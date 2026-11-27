@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Pages with `/UserUnit` have their true size: `Page.displaySize` and `DisplayList.base`
+  give points. `Page` has `user_unit`.
+- A page with a function-based or mesh shading (types 1 and 4 to 7), which is skipped,
+  now has `DisplayList.incomplete` set.
+
 ## 0.3.1 (2026-11-27)
 
 Upgrade from 0.3.0 for the CMap fix. The only interface change is the new `form.Field.comb`.

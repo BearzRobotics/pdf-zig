@@ -197,12 +197,14 @@ pub const Renderer = struct {
 /// Maps default user space to the displayed page for `p` (see `display`).
 pub fn baseMatrix(p: pages.Page) Matrix {
     const c = p.crop_box;
-    return switch (p.rotate) {
+    const m: Matrix = switch (p.rotate) {
         90 => .{ .a = 0, .b = 1, .c = 1, .d = 0, .e = -c.y0, .f = -c.x0 },
         180 => .{ .a = -1, .b = 0, .c = 0, .d = 1, .e = c.x1, .f = -c.y0 },
         270 => .{ .a = 0, .b = -1, .c = -1, .d = 0, .e = c.y1, .f = c.x1 },
         else => .{ .a = 1, .b = 0, .c = 0, .d = -1, .e = -c.x0, .f = c.y1 },
     };
+    // From user space units to points.
+    return m.mul(Matrix.scale(p.user_unit, p.user_unit));
 }
 
 const Paint = display.Paint;
