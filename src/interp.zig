@@ -338,6 +338,14 @@ const Run = struct {
         return if (i < op.operands.len) (op.operands[i].asNum() orelse 0) else 0;
     }
 
+    /// Operand `i` truncated to an integer within [lo, hi]. The range is applied
+    /// before the conversion: the operand may be any number, infinity included.
+    fn intInRange(op: content.Op, i: usize, lo: i8, hi: i8) i8 {
+        const v = num(op, i);
+        if (std.math.isNan(v)) return 0;
+        return @intFromFloat(std.math.clamp(@trunc(v), @as(f64, @floatFromInt(lo)), @as(f64, @floatFromInt(hi))));
+    }
+
     fn save(self: *Run) Error!void {
         if (self.stack.items.len >= max_gs_depth) return;
         try self.stack.append(self.a, self.gs);
@@ -360,12 +368,12 @@ const Run = struct {
                 self.gs.ctm = m.mul(self.gs.ctm);
             },
             .w => self.gs.line.width = @abs(num(op, 0)),
-            .J => self.gs.line.cap = switch (@as(i64, @intFromFloat(@trunc(num(op, 0))))) {
+            .J => self.gs.line.cap = switch (intInRange(op, 0, 0, 3)) {
                 1 => .round,
                 2 => .square,
                 else => .butt,
             },
-            .j => self.gs.line.join = switch (@as(i64, @intFromFloat(@trunc(num(op, 0))))) {
+            .j => self.gs.line.join = switch (intInRange(op, 0, 0, 3)) {
                 1 => .round,
                 2 => .bevel,
                 else => .miter,
@@ -451,7 +459,7 @@ const Run = struct {
             .Tz => self.gs.th = num(op, 0) / 100.0,
             .TL => self.gs.tl = num(op, 0),
             .Tf => try self.setFont(op),
-            .Tr => self.gs.mode = @intCast(std.math.clamp(@as(i64, @intFromFloat(@trunc(num(op, 0)))), 0, 7)),
+            .Tr => self.gs.mode = @intCast(intInRange(op, 0, 0, 7)),
             .Ts => self.gs.rise = num(op, 0),
             .Td => self.moveText(num(op, 0), num(op, 1)),
             .TD => {

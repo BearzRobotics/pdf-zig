@@ -454,3 +454,24 @@ test "graphics off: only text is produced" {
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("ok\n", text);
 }
+
+test "huge, infinite and negative operands of J, j and Tr" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nines: [400]u8 = @splat('9'); // parses as infinity
+    const huge: []const u8 = &nines;
+    for ([_][]const u8{ "99999999999999999999", "-99999999999999999999", huge, try std.mem.concat(a, u8, &.{ "-", huge }) }) |v| {
+        const stream = try std.fmt.allocPrint(a, "{s} J {s} j {s} Tr 0 0 m 1 1 l S BT /F1 10 Tf (A) Tj ET", .{ v, v, v });
+        const r = try render(try page(a, stream, helv, &.{helv_obj}, ""));
+        defer done(r);
+        try testing.expectEqual(display.Cap.butt, r.list.commands[0].stroke.style.cap);
+        try testing.expectEqual(display.Join.miter, r.list.commands[0].stroke.style.join);
+        try testing.expectEqual(@as(u8, if (v[0] == '-') 0 else 7), r.list.commands[1].text.mode);
+    }
+    // Ordinary values, including fractions, still select what they did.
+    const r = try render(try page(a, "1 J 2.9 j 0 0 m 1 1 l S", "", &.{}, ""));
+    defer done(r);
+    try testing.expectEqual(display.Cap.round, r.list.commands[0].stroke.style.cap);
+    try testing.expectEqual(display.Join.bevel, r.list.commands[0].stroke.style.join);
+}
