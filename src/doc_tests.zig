@@ -339,3 +339,25 @@ test "repair finds objects that sit before the %PDF- header" {
     try testing.expect(doc.repaired);
     try testing.expectEqualStrings("Pages", doc.getName(doc.getObject(2).asDict().?, "Type").?);
 }
+
+test "page rotation is normalised for any integer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { []const u8, u16 }{
+        .{ "-9223372036854775807", 270 }, .{ "9223372036854775807", 0 },
+        .{ "-90", 270 },                  .{ "-45", 270 },
+        .{ "450", 90 },                   .{ "135", 90 },
+        .{ "360", 0 },                    .{ "180", 180 },
+    };
+    for (cases) |c| {
+        const bytes = try build(arena.allocator(), &.{
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            try std.fmt.allocPrint(arena.allocator(), "<< /Type /Page /Rotate {s} >>", .{c[0]}),
+        });
+        var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        const list = try pdf.pages.PageList.build(&doc);
+        try testing.expectEqual(c[1], pdf.pages.page(&doc, list, 0).?.rotate);
+    }
+}

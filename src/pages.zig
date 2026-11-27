@@ -144,7 +144,8 @@ pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
         .y1 = @min(c.y1, media.y1),
     } else media;
     const rot_raw: i64 = if (e.inh.rotate) |r| (doc.resolve(r).asInt() orelse 0) else 0;
-    const rot: u16 = @intCast(@mod(@divFloor(rot_raw, 90) * 90, 360));
+    // Reduced first: rounding down to a multiple of 90 overflows near minInt(i64).
+    const rot: u16 = @intCast(@divTrunc(@mod(rot_raw, 360), 90) * 90);
     return .{
         .num = e.num,
         .dict = e.dict,
