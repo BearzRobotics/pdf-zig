@@ -186,7 +186,10 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
             by1 = @max(by1, p.y);
         }
     }
-    const rect = [4]f64{ bx0, by0, bx1, by1 };
+    // A line along an edge of the quads needs room for its own width, or the
+    // appearance's box cuts it in half.
+    const margin: f64 = if (kind == .highlight) 0 else 1;
+    const rect = [4]f64{ bx0 - margin, by0 - margin, bx1 + margin, by1 + margin };
 
     // The appearance: coloured quads multiplied onto the page, or lines.
     var ap: std.ArrayList(u8) = .empty;
@@ -1012,4 +1015,26 @@ test "removing an annotation removes its popup too" {
     const left = upd.get(3).asDict().?.get("Annots").?.array;
     try testing.expectEqual(@as(usize, 1), left.len);
     try testing.expectEqual(@as(u32, 8), left[0].ref.num);
+}
+
+test "underlines and strike-outs lie inside the appearance's box" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, ""), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const rects = [_]text.Rect{.{ .x0 = 20, .y0 = 10, .x1 = 180, .y1 = 20 }};
+    for ([_]Kind{ .underline, .strikeout, .squiggly }) |kind| {
+        const ref = try addMarkup(&upd, pages.page(&doc, pl, 0).?, kind, &rects, .{});
+        const d = upd.get(ref.num).asDict().?;
+        const ap = upd.get(d.get("AP").?.dict.get("N").?.ref.num).stream;
+        // The text spans y 80 to 90 in user space; the 1 point line needs room.
+        for ([_][]const object.Object{ ap.dict.get("BBox").?.array, d.get("Rect").?.array }) |box| {
+            try testing.expect(box[1].real <= 79.5 and box[3].real >= 90.5);
+            try testing.expect(box[0].real <= 20 and box[2].real >= 180);
+        }
+    }
 }
