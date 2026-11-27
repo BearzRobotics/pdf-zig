@@ -257,7 +257,9 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
 
     // A single-line field has no line breaks; control characters are dropped.
     var clean: std.ArrayList(u8) = .empty;
-    for (value) |c| {
+    for (value, 0..) |c, i| {
+        // CR LF is one break; the LF stands for both.
+        if (c == '\r' and i + 1 < value.len and value[i + 1] == '\n') continue;
         if (c == '\n' or c == '\r') {
             try clean.append(a, if (field.multiline) '\n' else ' ');
         } else if (c >= 0x20 or c == '\t') try clean.append(a, c);
@@ -903,4 +905,29 @@ test "a password field's value is not stored in the file" {
     defer doc2.deinit();
     const widget = doc2.getObject(4).asDict().?;
     try testing.expect(widget.get("V") == null and widget.get("RV") == null);
+}
+
+test "setText counts and keeps CR LF as one line break" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_]struct { flags: []const u8, want: []const u8 }{
+        .{ .flags = "/Ff 4096", .want = "a\nb\nc\nd" },
+        .{ .flags = "", .want = "a b c d" },
+    }) |case| {
+        const bytes = try tests.buildFile(arena.allocator(), &.{
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>",
+            try std.fmt.allocPrint(arena.allocator(), "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) {s} /MaxLen 7 /Rect [10 10 190 90] >>", .{case.flags}),
+        });
+        var doc = try Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        const all = try fields(arena.allocator(), &doc, pl);
+        var upd = try Update.init(testing.allocator, &doc);
+        defer upd.deinit();
+        try setText(&upd, all[0], "a\r\nb\rc\nd");
+        try testing.expectEqualStrings(case.want, upd.get(4).asDict().?.get("V").?.string);
+    }
 }
