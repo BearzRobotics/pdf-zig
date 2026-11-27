@@ -905,7 +905,9 @@ const Run = struct {
             const data = self.contentData(proc.stream) catch continue;
             // Glyph space to user space: FontMatrix, then size, scaling and rise, then Tm and CTM.
             const trm = Matrix{ .a = self.gs.size * self.gs.th, .d = self.gs.size, .f = self.gs.rise };
-            const m = Matrix.translate(g.x, 0).mul(trm).mul(run_tm);
+            // The glyph's offset is already in text space (9.4.4): it comes after
+            // the size and scale, not before.
+            const m = trm.mul(Matrix.translate(g.x, 0)).mul(run_tm);
             const glyph_ctm = Matrix.fromArray(&f.font_matrix).mul(m).mul(self.gs.ctm);
             try self.save();
             self.gs.ctm = glyph_ctm;

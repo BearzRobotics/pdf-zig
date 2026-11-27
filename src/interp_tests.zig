@@ -574,3 +574,25 @@ test "an extra Q in a form cannot pop the caller's graphics state" {
     try testing.expectEqual(@as(f32, 1), r.list.commands[6].fill.paint.color.r);
     try testing.expectEqual(@as(f64, 0), r.list.commands[6].fill.ctm.e);
 }
+
+test "Type 3: every glyph of a run is placed by its own offset" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const proc = "500 0 d0 0 0 400 700 re f";
+    // Size 10, horizontal scale 50%, rise 3, with a TJ adjustment.
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 50 Tz 3 Ts 10 50 Td [(aa) -1000 (a)] TJ ET", "/Font << /F1 5 0 R >>", &.{
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /ga 6 0 R >> /Encoding << /Differences [97 /ga] >> /FirstChar 97 /Widths [500] >>",
+        try std.fmt.allocPrint(arena.allocator(), "<< /Length {d} >>\nstream\n{s}\nendstream", .{ proc.len, proc }),
+    }, ""));
+    defer done(r);
+    // Advance: 0.5 em * 10 * 0.5 = 2.5; the adjustment adds 1 em * 10 * 0.5 = 5.
+    const want = [_]f64{ 10, 12.5, 20 };
+    var n: usize = 0;
+    for (r.list.commands) |c| if (c == .fill) {
+        try testing.expectApproxEqAbs(want[n], c.fill.ctm.e, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 53), c.fill.ctm.f, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 0.005), c.fill.ctm.a, 1e-12);
+        n += 1;
+    };
+    try testing.expectEqual(want.len, n);
+}
