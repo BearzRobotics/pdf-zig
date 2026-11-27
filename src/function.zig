@@ -490,7 +490,10 @@ fn loadNew(doc: *Document, obj: Object, depth: u8) LoadError!Function {
             }
             var decode = try numArray(doc, d.get("Decode"));
             if (decode.len < range.len) decode = range;
-            const data = doc.streamData(o.stream) catch return error.BadFunction;
+            const data = doc.streamData(o.stream) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.BadFunction,
+            };
             return .{ .domain = domain, .range = range, .kind = .{ .sampled = .{
                 .size = size,
                 .bps = bps,
@@ -529,7 +532,10 @@ fn loadNew(doc: *Document, obj: Object, depth: u8) LoadError!Function {
         },
         4 => {
             if (o != .stream or range.len < 2) return error.BadFunction;
-            const text = doc.streamData(o.stream) catch return error.BadFunction;
+            const text = doc.streamData(o.stream) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.BadFunction,
+            };
             return .{ .domain = domain, .range = range, .kind = .{ .calculator = try compileCalculator(a, text) } };
         },
         else => return error.BadFunction,

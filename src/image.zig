@@ -268,7 +268,10 @@ fn applyMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
     const mw: u32 = @intCast(std.math.clamp(doc.getInt(mst.dict, "Width") orelse return px, 1, 1 << 20));
     const mh: u32 = @intCast(std.math.clamp(doc.getInt(mst.dict, "Height") orelse return px, 1, 1 << 20));
     if (@as(u64, mw) * mh > max_pixels) return px;
-    const dec = doc.decodeStreamIn(a, mst) catch return px;
+    const dec = doc.decodeStreamIn(a, mst) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return px, // a damaged mask
+    };
     if (dec.rest.len > 0) return px; // a JPEG soft mask: the caller would have to decode it
     const is_stencil = if (doc.get(mst.dict, "ImageMask")) |im| (im == .boolean and im.boolean) else false;
     const bpc: u8 = if (is_stencil) 1 else blk: {

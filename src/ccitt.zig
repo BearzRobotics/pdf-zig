@@ -209,7 +209,7 @@ pub fn decode(a: Allocator, data: []const u8, p: Params, max: usize) Error![]u8 
             }
             if (bits.left() == 0) break;
         }
-        const ok = if (two_d) codeLine2d(a, &bits, ref.items, &cur, cols) else codeLine1d(a, &bits, &cur, cols);
+        const ok = if (two_d) try codeLine2d(a, &bits, ref.items, &cur, cols) else try codeLine1d(a, &bits, &cur, cols);
         if (!ok and cur.items.len == 0 and bits.left() == 0) break;
         if (out.items.len + stride > max) return error.TooLarge;
         try appendRow(a, &out, cur.items, cols, stride);
@@ -251,21 +251,21 @@ fn appendRow(a: Allocator, out: *std.ArrayList(u8), changes: []const u32, cols: 
 }
 
 /// One-dimensional line: alternating white and black runs, starting with white.
-fn codeLine1d(a: Allocator, b: *Bits, cur: *std.ArrayList(u32), cols: usize) bool {
+fn codeLine1d(a: Allocator, b: *Bits, cur: *std.ArrayList(u32), cols: usize) Allocator.Error!bool {
     var x: usize = 0;
     var black = false;
     while (x < cols) {
         const run = readRun(b, black) orelse return false;
         x += run;
-        if (black == false and x < cols) cur.append(a, @intCast(x)) catch return false; // white to black
-        if (black == true and x < cols) cur.append(a, @intCast(x)) catch return false; // black to white
+        if (black == false and x < cols) try cur.append(a, @intCast(x)); // white to black
+        if (black == true and x < cols) try cur.append(a, @intCast(x)); // black to white
         black = !black;
     }
     return true;
 }
 
 /// Two-dimensional line (T.6): modes against the reference line `ref`.
-fn codeLine2d(a: Allocator, b: *Bits, ref: []const u32, cur: *std.ArrayList(u32), cols: usize) bool {
+fn codeLine2d(a: Allocator, b: *Bits, ref: []const u32, cur: *std.ArrayList(u32), cols: usize) Allocator.Error!bool {
     var a0: i64 = -1;
     var black = false; // the colour of the pixels at a0
     var steps: usize = 0;
@@ -291,8 +291,8 @@ fn codeLine2d(a: Allocator, b: *Bits, ref: []const u32, cur: *std.ArrayList(u32)
                 const start: i64 = if (a0 < 0) 0 else a0;
                 const p1 = start + r1;
                 const p2 = p1 + r2;
-                cur.append(a, @intCast(@min(p1, @as(i64, @intCast(cols))))) catch return false;
-                cur.append(a, @intCast(@min(p2, @as(i64, @intCast(cols))))) catch return false;
+                try cur.append(a, @intCast(@min(p1, @as(i64, @intCast(cols)))));
+                try cur.append(a, @intCast(@min(p2, @as(i64, @intCast(cols)))));
                 a0 = p2;
             },
             .v0, .vr1, .vr2, .vr3, .vl1, .vl2, .vl3 => {
@@ -307,7 +307,7 @@ fn codeLine2d(a: Allocator, b: *Bits, ref: []const u32, cur: *std.ArrayList(u32)
                 };
                 const a1 = std.math.clamp(b1 + d, 0, @as(i64, @intCast(cols)));
                 if (a1 <= a0 and a0 >= 0) return false;
-                cur.append(a, @intCast(a1)) catch return false;
+                try cur.append(a, @intCast(a1));
                 a0 = a1;
                 black = !black;
             },

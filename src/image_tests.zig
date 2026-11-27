@@ -260,3 +260,63 @@ test "Lab images use the Lab default decode ranges" {
     const explicit = try decodeFirst(a, &.{try imageBody(a, lab ++ " /Decode [0 100 -128 127 -128 127]", "\xff\x80\x80\x00\x80\x80\x80\xd0\x80")}, "");
     try testing.expectEqualSlices(u8, px.rgba, explicit.rgba);
 }
+
+test "out of memory while decoding fax data or masks is never a wrong picture" {
+    const bytes = @embedFile("fax_g4.pdf");
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    var rend = pdf.Renderer.init(&doc, .{});
+    defer rend.deinit();
+    var dl = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 0).?);
+    defer dl.deinit();
+    var img: pdf.display.Image = undefined;
+    for (dl.commands) |c| if (c == .image) {
+        img = c.image;
+    };
+    var good_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer good_arena.deinit();
+    const good = (try pdf.image.decode(&doc, good_arena.allocator(), img)).pixels;
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        // Fails one allocation only, so that later ones would succeed again.
+        var once: OneFailure = .{ .child = testing.allocator, .fail_at = fail_at };
+        var arena = std.heap.ArenaAllocator.init(once.allocator());
+        defer arena.deinit();
+        if (pdf.image.decode(&doc, arena.allocator(), img)) |res| {
+            try testing.expectEqualSlices(u8, good.rgba, res.pixels.rgba);
+        } else |err| try testing.expectEqual(error.OutOfMemory, err);
+        if (once.count <= fail_at) break;
+    }
+}
+
+/// Passes allocations on, except the one numbered `fail_at`.
+const OneFailure = struct {
+    child: Allocator,
+    fail_at: usize,
+    count: usize = 0,
+
+    fn allocator(self: *OneFailure) Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *OneFailure = @ptrCast(@alignCast(ctx));
+        defer self.count += 1;
+        if (self.count == self.fail_at) return null;
+        return self.child.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *OneFailure = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ra);
+    }
+};
