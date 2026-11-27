@@ -246,8 +246,10 @@ const Walk = struct {
 
         // The "on" state is the name in the normal appearance that is not Off.
         var on_state: []const u8 = "";
-        if (doc.getDict(wd, "AP")) |ap| if (doc.getDict(ap, "N")) |n| {
-            for (n.entries) |e| if (!std.mem.eql(u8, e.key, "Off")) {
+        // `/N` names states only when it is a dictionary of streams. A single
+        // appearance stream has a dictionary too, whose keys are not states.
+        if (doc.getDict(wd, "AP")) |ap| if (doc.get(ap, "N")) |normal| if (normal == .dict) {
+            for (normal.dict.entries) |e| if (!std.mem.eql(u8, e.key, "Off")) {
                 on_state = try self.a.dupe(u8, e.key);
                 break;
             };
@@ -1088,4 +1090,26 @@ test "check boxes: only those with the chosen on state are turned on" {
     for ([_]struct { u32, []const u8 }{ .{ 5, "A" }, .{ 6, "Off" }, .{ 7, "A" } }) |want| {
         try testing.expectEqualStrings(want[1], upd.get(want[0]).asDict().?.get("AS").?.name);
     }
+}
+
+test "a widget whose normal appearance is a single stream has no on state" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Subtype /Widget /FT /Btn /T (single) /Rect [0 0 9 9] /AP << /N 5 0 R >> >>",
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 9 9] /Length 0 >>\nstream\n\nendstream",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try testing.expectEqualStrings("", all[0].widgets[0].on_state);
+    try testing.expectError(error.NoAppearanceState, setChecked(&upd, all[0], 0, true));
 }
