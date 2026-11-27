@@ -445,8 +445,18 @@ const DefaultAppearance = struct {
     size: f64 = 0,
     color_ops: []const u8 = "0 g",
     quad: i64 = 0,
-    font: Ref,
+    /// A reference to a font of the document, or `helvetica`.
+    font: Object,
 };
+
+/// Helvetica in WinAnsi, for appearances made in memory. A constant of the
+/// program: the renderer caches fonts by the address of a direct dictionary.
+pub const helvetica: Object = .{ .dict = .{ .entries = &.{
+    .{ .key = "Type", .value = .{ .name = "Font" } },
+    .{ .key = "Subtype", .value = .{ .name = "Type1" } },
+    .{ .key = "BaseFont", .value = .{ .name = "Helvetica" } },
+    .{ .key = "Encoding", .value = .{ .name = "WinAnsiEncoding" } },
+} } };
 
 /// What a default appearance string (12.7.3.3) says.
 pub const ParsedDa = struct {
@@ -507,11 +517,9 @@ fn drawsWinAnsi(doc: *Document, font_dict: Dict, bytes: []const u8) Allocator.Er
     return true;
 }
 
-/// Reads `/DA` and `/Q` of the field and finds (or makes) a font for the
-/// WinAnsi `bytes` the appearance will show.
-fn defaultAppearance(upd: *Update, fd: Dict, bytes: []const u8) Error!DefaultAppearance {
-    const a = upd.allocator();
-    const doc = upd.doc;
+/// Reads `/DA` and `/Q` of the field and finds a font for the WinAnsi `bytes`
+/// the appearance will show: the document's, else `helvetica`. Allocated from `a`.
+pub fn findDefaultAppearance(a: Allocator, doc: *Document, fd: Dict, bytes: []const u8) Allocator.Error!DefaultAppearance {
     var da_text: []const u8 = "/Helv 0 Tf 0 g";
     var quad: i64 = 0;
     // /DA and /Q may be inherited from a parent or the AcroForm; look up the chain.
@@ -551,12 +559,15 @@ fn defaultAppearance(upd: *Update, fd: Dict, bytes: []const u8) Error!DefaultApp
             if (try drawsWinAnsi(doc, font_dict, bytes)) font_ref = fo.ref;
         };
     };
-    out.font = font_ref orelse try upd.add(.{ .dict = try write.makeDict(a, &.{
-        .{ "Type", .{ .name = "Font" } },
-        .{ "Subtype", .{ .name = "Type1" } },
-        .{ "BaseFont", .{ .name = "Helvetica" } },
-        .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
-    }) });
+    out.font = if (font_ref) |r| .{ .ref = r } else helvetica;
+    return out;
+}
+
+/// `findDefaultAppearance` for a file being filled, where Helvetica has to be
+/// an object of the file.
+fn defaultAppearance(upd: *Update, fd: Dict, bytes: []const u8) Error!DefaultAppearance {
+    var out = try findDefaultAppearance(upd.allocator(), upd.doc, fd, bytes);
+    if (out.font != .ref) out.font = .{ .ref = try upd.add(helvetica) };
     return out;
 }
 
@@ -665,7 +676,7 @@ fn shownText(a: Allocator, value: []const u8, password: bool) Allocator.Error![]
 }
 
 /// What a widget says about how it is drawn: `/MK` and its border.
-const WidgetStyle = struct {
+pub const WidgetStyle = struct {
     /// `/MK /R`: the content is turned this far counterclockwise.
     rotate: u16 = 0,
     /// Operators setting the fill and stroke colour of the background and border.
@@ -674,7 +685,7 @@ const WidgetStyle = struct {
     border_width: f64 = 1,
 };
 
-fn widgetStyle(doc: *Document, a: Allocator, wd: Dict) Allocator.Error!WidgetStyle {
+pub fn widgetStyle(doc: *Document, a: Allocator, wd: Dict) Allocator.Error!WidgetStyle {
     var style: WidgetStyle = .{};
     if (doc.getDict(wd, "MK")) |mk| {
         const turn = @mod(doc.getInt(mk, "R") orelse 0, 360);
@@ -720,7 +731,7 @@ fn showAt(a: Allocator, content: *std.ArrayList(u8), text: []const u8, dx: f64, 
 }
 
 /// How a field's text is arranged.
-const TextLayout = struct {
+pub const TextLayout = struct {
     multiline: bool = false,
     password: bool = false,
     /// The number of cells of a comb field.
@@ -728,7 +739,12 @@ const TextLayout = struct {
 };
 
 fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance) Error!Ref {
-    const a = upd.allocator();
+    return upd.add(.{ .stream = try textForm(upd.allocator(), rect, style, value, layout, da) });
+}
+
+/// The appearance of a text field showing `value` in `rect`, as a form XObject
+/// allocated from `a`.
+pub fn textForm(a: Allocator, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance) Allocator.Error!object.Stream {
     const multiline = layout.multiline;
     // Width and height of the content, which a turned widget swaps.
     const sideways = style.rotate == 90 or style.rotate == 270;
@@ -803,7 +819,7 @@ fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []c
     }
     try content.appendSlice(a, "ET\nQ\nEMC\n");
 
-    const fonts = try write.makeDict(a, &.{.{ da.font_name, .{ .ref = da.font } }});
+    const fonts = try write.makeDict(a, &.{.{ da.font_name, da.font }});
     const res = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
     const dict = try write.makeDict(a, &.{
         .{ "Type", .{ .name = "XObject" } },
@@ -818,7 +834,7 @@ fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []c
         }) },
         .{ "Resources", .{ .dict = res } },
     });
-    return upd.add(.{ .stream = .{ .dict = dict, .data = content.items } });
+    return .{ .dict = dict, .data = content.items };
 }
 
 /// `wd` with `/AP << /N ref >>`.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Annotations and form fields without a stored appearance are now drawn: text, combo and
+  list fields, check boxes, radio and push buttons, highlights and other text markup,
+  squares, circles, lines, polygons, ink, free text and notes. In a form with
+  `NeedAppearances`, text and choice fields with a value are made again. The file is not
+  changed. `interp.Options.generate_appearances` turns it off. Text extraction includes
+  such fields' values. New module `appearance`.
+- The `pdfsvg` example put the letters of a run too far apart.
 - `DisplayList.omissions` says what a page uses that is left out or only approximated.
   `incomplete` means what it did. New example `pdfsurvey`.
 

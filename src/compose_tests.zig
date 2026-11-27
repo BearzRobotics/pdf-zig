@@ -56,8 +56,9 @@ const Opened = struct {
         return pdf.pages.page(&self.doc, self.pages, i).?;
     }
 
+    /// The text of the page's own content and stored appearances.
     fn text(self: *Opened, a: Allocator, i: usize) ![]const u8 {
-        var rend = pdf.Renderer.init(&self.doc, .{});
+        var rend = pdf.Renderer.init(&self.doc, .{ .generate_appearances = false });
         defer rend.deinit();
         var dl = try rend.render(testing.allocator, self.page(i));
         defer dl.deinit();

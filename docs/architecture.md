@@ -23,6 +23,7 @@
 | `display.zig` | The display list types and `Matrix` |
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
+| `appearance.zig` | Appearances made while rendering, for annotations and fields that need one (decision 0004) |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
 | `compose.zig`, `compose_form.zig`, `compose_outline.zig`, `compose_pack.zig` | A new document from blank pages and pages of other documents: forms, bookmarks, and the compact output |
@@ -58,6 +59,12 @@ row-vector convention of the specification.
 of the run, and per glyph the character code, CID, offset along the run, advance and Unicode
 text. A Type 3 font draws its glyphs as the paths of its procedures and also emits the run as
 invisible text (mode 3) so it can be extracted.
+
+An annotation without a stored appearance, and a text or choice field whose form sets
+`NeedAppearances`, gets one made in memory (`appearance.zig`,
+`docs/decisions/0004-generated-appearances.md`), drawn like a stored one. Signature fields
+get no more than their background and border. Links, stamps, carets, attachments and
+sounds are not made.
 
 `DisplayList.omissions` says what the page uses that the list leaves out or only
 approximates. `incomplete` is set when content is missing: a stream that cannot be decoded,

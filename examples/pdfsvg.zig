@@ -116,7 +116,10 @@ pub fn main(init: std.process.Init) !u8 {
             if (t.mode == 3 or t.mode == 7) continue;
             for (t.glyphs) |g| {
                 if (g.text.len == 0 or g.text[0] == ' ') continue;
-                const glyph_m = display.Matrix.translate(g.x, 0).mul(.{ .a = t.size * t.h_scale, .d = t.size, .f = t.rise }).mul(t.tm).mul(t.ctm);
+                // The glyph's offset is already in text space (9.4.4): it comes
+                // after the size and scale.
+                const sized: display.Matrix = .{ .a = t.size * t.h_scale, .d = t.size, .f = t.rise };
+                const glyph_m = sized.mul(display.Matrix.translate(g.x, 0)).mul(t.tm).mul(t.ctm);
                 try w.writeAll("<text font-family=\"DejaVu Sans, sans-serif\" font-size=\"1\" fill=\"");
                 try rgb(w, t.fill);
                 try w.writeAll("\" transform=\"");

@@ -13,6 +13,7 @@
 //! vertical writing, text clipping modes, `d1` colour suppression in Type 3.
 
 const std = @import("std");
+const appearance = @import("appearance.zig");
 const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
 const doc_mod = @import("document.zig");
@@ -43,6 +44,10 @@ pub const Options = struct {
     max_content_bytes: usize = 512 << 20,
     /// Deepest nesting of forms, patterns and Type 3 glyphs.
     max_depth: u8 = 12,
+    /// Make appearances for annotations and form fields that have none, and
+    /// for fields whose form asks for it (`appearance.zig`). The file is not
+    /// changed.
+    generate_appearances: bool = true,
     /// Build paths, images, shadings and Type 3 glyph drawings. Turn this off
     /// to get only the text runs, which is several times faster and needs far
     /// less memory (text extraction, search).
@@ -1159,9 +1164,7 @@ const Run = struct {
 
     /// Whether an annotation of `subtype` is meant to be seen, so that one
     /// without an appearance is missed. Links and pop-ups are not.
-    fn shouldShow(self: *Run, d: Dict, subtype: []const u8) bool {
-        const rect = self.rectOf(d, "Rect") orelse return false;
-        if (!(rect[2] > rect[0] and rect[3] > rect[1])) return false;
+    fn shouldShow(subtype: []const u8) bool {
         for ([_][]const u8{ "Widget", "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Highlight", "Underline", "Squiggly", "StrikeOut", "Stamp", "Caret", "Ink", "FileAttachment", "Sound" }) |name| {
             if (std.mem.eql(u8, subtype, name)) return true;
         }
@@ -1172,6 +1175,11 @@ const Run = struct {
     fn annotations(self: *Run, p: pages.Page) Error!void {
         const doc_ = self.doc();
         const annots = doc_.getArray(p.dict, "Annots") orelse return;
+        const generate = self.r.options.generate_appearances;
+        var need_appearances = false;
+        if (generate) if (doc_.catalog()) |catalog| if (doc_.getDict(catalog, "AcroForm")) |acro| {
+            if (doc_.get(acro, "NeedAppearances")) |v| need_appearances = v == .boolean and v.boolean;
+        };
         for (annots) |item| {
             const ad = doc_.resolve(item).asDict() orelse continue;
             const flags = doc_.getInt(ad, "F") orelse 0;
@@ -1179,19 +1187,42 @@ const Run = struct {
             const sub = doc_.getName(ad, "Subtype") orelse "";
             if (std.mem.eql(u8, sub, "Popup")) continue;
             if (ad.get("OC")) |oc| if (self.r.hidden(oc)) continue;
-            const ap = doc_.getDict(ad, "AP") orelse {
-                if (self.shouldShow(ad, sub)) self.r.omissions.no_appearance = true;
-                continue;
+            // The stored appearance, if there is one to use.
+            var stored: ?object.Stream = null;
+            var num_id: u32 = 0;
+            var states = false;
+            if (doc_.getDict(ad, "AP")) |ap| if (doc_.get(ap, "N")) |normal| {
+                var n = normal;
+                if (n == .dict) {
+                    states = true;
+                    if (doc_.getName(ad, "AS")) |state| n = doc_.get(n.dict, state) orelse .null;
+                }
+                if (n == .stream) {
+                    stored = n.stream;
+                    if (ap.get("N")) |raw| if (raw == .ref) {
+                        num_id = raw.ref.num;
+                    };
+                }
             };
-            var n = doc_.get(ap, "N") orelse continue;
-            if (n == .dict) {
-                const state = doc_.getName(ad, "AS") orelse continue;
-                n = doc_.get(n.dict, state) orelse continue;
+            const stale = need_appearances and std.mem.eql(u8, sub, "Widget") and appearance.isStale(doc_, ad);
+            // A state without a drawing, as "Off" often is, shows nothing.
+            if (stored == null and states and !stale) continue;
+            if (stored == null or stale) {
+                const r = self.rectOf(ad, "Rect") orelse continue;
+                if (!(r[2] > r[0] and r[3] > r[1])) continue;
+                const made = if (generate) try appearance.make(self.scratch, doc_, ad, sub, .{ .x0 = r[0], .y0 = r[1], .x1 = r[2], .y1 = r[3] }, p.rotate) else null;
+                if (made) |st| {
+                    stored = st;
+                    num_id = 0;
+                } else if (stored == null) {
+                    if (shouldShow(sub)) self.r.omissions.no_appearance = true;
+                    continue;
+                }
             }
-            if (n != .stream) continue;
+            const form_stream = stored.?;
             const rect = self.rectOf(ad, "Rect") orelse continue;
-            const bbox = self.rectOf(n.stream.dict, "BBox") orelse continue;
-            const fm = self.matrixOf(n.stream.dict, "Matrix");
+            const bbox = self.rectOf(form_stream.dict, "BBox") orelse continue;
+            const fm = self.matrixOf(form_stream.dict, "Matrix");
             // Transformed appearance box (the bounding box of the matrix applied to BBox).
             const pts = [4]Point{ fm.apply(bbox[0], bbox[1]), fm.apply(bbox[2], bbox[1]), fm.apply(bbox[2], bbox[3]), fm.apply(bbox[0], bbox[3]) };
             var tx0 = pts[0].x;
@@ -1207,10 +1238,9 @@ const Run = struct {
             const sx = if (tx1 - tx0 == 0) 1 else (rect[2] - rect[0]) / (tx1 - tx0);
             const sy = if (ty1 - ty0 == 0) 1 else (rect[3] - rect[1]) / (ty1 - ty0);
             const a_m = Matrix{ .a = sx, .d = sy, .e = rect[0] - tx0 * sx, .f = rect[1] - ty0 * sy };
-            const num_id: u32 = if (ap.get("N")) |nn| (if (nn == .ref) nn.ref.num else 0) else 0;
             self.gs = .{};
             self.gs.ctm = a_m;
-            try self.formOp(n.stream, num_id);
+            try self.formOp(form_stream, num_id);
         }
     }
 };

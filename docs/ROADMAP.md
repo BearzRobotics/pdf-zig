@@ -69,6 +69,10 @@ this sample, ahead of forms. The viewer may already decode it itself: its code r
 
 ## Stage 1: forms
 
+**Progress:** appearances made while rendering are done (decision 0004). Open: writing a
+list box's appearance when it is filled, comb dividers, the pressed appearance, multiple
+selection, reset, flatten, and the font items.
+
 | Item | Size | Viewer work |
 |---|---|---|
 | **Make missing appearances while rendering** (12.5.5, 12.7.3.3), without changing the file: text and choice fields, check boxes and radio buttons, then markup, shape and note annotations; honour `NeedAppearances` | M | none |

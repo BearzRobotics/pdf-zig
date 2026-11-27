@@ -181,6 +181,60 @@ fn zigzag(a: Allocator, out: *std.ArrayList(u8), q: *const [8]f64, point: f64) A
     try out.appendSlice(a, "S\n");
 }
 
+/// The drawing of text markup over `quads` (eight numbers each, in user space):
+/// coloured quads for a highlight, else lines. `point` is the length of one
+/// point in user space.
+pub fn writeMarkup(a: Allocator, ap: *std.ArrayList(u8), kind: Kind, quads: []const f64, c: [3]f64, point: f64) Allocator.Error!void {
+    const count = quads.len / 8;
+    if (kind == .highlight) {
+        try ap.print(a, "/GS gs {d:.3} {d:.3} {d:.3} rg\n", .{ c[0], c[1], c[2] });
+        for (0..count) |i| {
+            const q = quads[i * 8 ..][0..8];
+            try ap.print(a, "{d:.3} {d:.3} m {d:.3} {d:.3} l {d:.3} {d:.3} l {d:.3} {d:.3} l h f\n", .{ q[0], q[1], q[2], q[3], q[6], q[7], q[4], q[5] });
+        }
+        return;
+    }
+    try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d} w\n", .{ c[0], c[1], c[2], point });
+    for (0..count) |i| {
+        const q = quads[i * 8 ..][0..8];
+        if (kind == .squiggly) {
+            try zigzag(a, ap, q, point);
+            continue;
+        }
+        // The bottom edge for an underline, the middle for a strike-out.
+        const mid = kind == .strikeout;
+        const lx = if (mid) (q[0] + q[4]) / 2 else q[4];
+        const ly = if (mid) (q[1] + q[5]) / 2 else q[5];
+        const rx = if (mid) (q[2] + q[6]) / 2 else q[6];
+        const ry = if (mid) (q[3] + q[7]) / 2 else q[7];
+        try ap.print(a, "{d:.3} {d:.3} m {d:.3} {d:.3} l S\n", .{ lx, ly, rx, ry });
+    }
+}
+
+/// The dictionary of a markup appearance covering `rect`, with the multiply
+/// blend mode that `writeMarkup` calls `/GS`.
+pub fn markupDict(a: Allocator, rect: [4]f64) Allocator.Error!Dict {
+    const gs = try write.makeDict(a, &.{ .{ "Type", .{ .name = "ExtGState" } }, .{ "BM", .{ .name = "Multiply" } } });
+    const gs_map = try write.makeDict(a, &.{.{ "GS", .{ .dict = gs } }});
+    const res = try write.makeDict(a, &.{.{ "ExtGState", .{ .dict = gs_map } }});
+    return write.makeDict(a, &.{
+        .{ "Type", .{ .name = "XObject" } },
+        .{ "Subtype", .{ .name = "Form" } },
+        .{ "BBox", try write.numbers(a, &rect) },
+        .{ "Resources", .{ .dict = res } },
+    });
+}
+
+/// The sticky note icon, 20 by 20, filled with `c`.
+pub fn noteIcon(a: Allocator, c: [3]f64) Allocator.Error![]u8 {
+    return std.fmt.allocPrint(a,
+        \\{d:.3} {d:.3} {d:.3} rg 0.35 0.3 0 RG 1 w
+        \\0.5 4.5 19 15 re B
+        \\0.2 g 4 15 m 16 15 l S 4 11 m 16 11 l S 4 7 m 11 7 l S
+        \\
+    , .{ c[0], c[1], c[2] });
+}
+
 /// Adds a text markup annotation over `rects` (displayed-page rectangles, as
 /// `text.Layout.rectsFor` returns them). Returns the new annotation.
 pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text.Rect, meta_in: Meta) Error!Ref {
@@ -223,45 +277,10 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
     const margin: f64 = if (kind == .highlight) 0 else point;
     const rect = [4]f64{ bx0 - margin, by0 - margin, bx1 + margin, by1 + margin };
 
-    // The appearance: coloured quads multiplied onto the page, or lines.
     var ap: std.ArrayList(u8) = .empty;
     const c = meta.color;
-    switch (kind) {
-        .highlight => {
-            try ap.print(a, "/GS gs {d:.3} {d:.3} {d:.3} rg\n", .{ c[0], c[1], c[2] });
-            for (0..rects.len) |i| {
-                const q = quads[i * 8 ..][0..8];
-                try ap.print(a, "{d:.3} {d:.3} m {d:.3} {d:.3} l {d:.3} {d:.3} l {d:.3} {d:.3} l h f\n", .{ q[0], q[1], q[2], q[3], q[6], q[7], q[4], q[5] });
-            }
-        },
-        else => {
-            try ap.print(a, "{d:.3} {d:.3} {d:.3} RG {d} w\n", .{ c[0], c[1], c[2], point });
-            for (0..rects.len) |i| {
-                const q = quads[i * 8 ..][0..8];
-                if (kind == .squiggly) {
-                    try zigzag(a, &ap, q, point);
-                    continue;
-                }
-                // The bottom edge for an underline, the middle for a strike-out.
-                const mid = kind == .strikeout;
-                const lx = if (mid) (q[0] + q[4]) / 2 else q[4];
-                const ly = if (mid) (q[1] + q[5]) / 2 else q[5];
-                const rx = if (mid) (q[2] + q[6]) / 2 else q[6];
-                const ry = if (mid) (q[3] + q[7]) / 2 else q[7];
-                try ap.print(a, "{d:.3} {d:.3} m {d:.3} {d:.3} l S\n", .{ lx, ly, rx, ry });
-            }
-        },
-    }
-    const gs = try write.makeDict(a, &.{ .{ "Type", .{ .name = "ExtGState" } }, .{ "BM", .{ .name = "Multiply" } } });
-    const gs_map = try write.makeDict(a, &.{.{ "GS", .{ .dict = gs } }});
-    const res = try write.makeDict(a, &.{.{ "ExtGState", .{ .dict = gs_map } }});
-    const form_dict = try write.makeDict(a, &.{
-        .{ "Type", .{ .name = "XObject" } },
-        .{ "Subtype", .{ .name = "Form" } },
-        .{ "BBox", try write.numbers(a, &rect) },
-        .{ "Resources", .{ .dict = res } },
-    });
-    const form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
+    try writeMarkup(a, &ap, kind, quads, c, point);
+    const form = try upd.add(.{ .stream = .{ .dict = try markupDict(a, rect), .data = ap.items } });
 
     var entries: std.ArrayList(object.Entry) = .empty;
     try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
@@ -292,12 +311,7 @@ pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta_in: Meta) Er
     const rect = [4]f64{ p.x, p.y - side, p.x + side, p.y };
 
     const c = meta.color;
-    const ap = try std.fmt.allocPrint(a,
-        \\{d:.3} {d:.3} {d:.3} rg 0.35 0.3 0 RG 1 w
-        \\0.5 4.5 19 15 re B
-        \\0.2 g 4 15 m 16 15 l S 4 11 m 16 11 l S 4 7 m 11 7 l S
-        \\
-    , .{ c[0], c[1], c[2] });
+    const ap = try noteIcon(a, c);
     const form_dict = try write.makeDict(a, &.{
         .{ "Type", .{ .name = "XObject" } },
         .{ "Subtype", .{ .name = "Form" } },
@@ -431,10 +445,19 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
 const FreeTextAppearance = struct { form: Ref, fonts: Dict };
 
 /// The appearance of a text box covering `rect` (user space) on a page turned
-/// `rotate` degrees: `contents` laid out as it will be read, then turned in
-/// user space so that the page's rotation brings it upright.
+/// `rotate` degrees, with its font added to the file.
 fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8) Error!FreeTextAppearance {
     const a = upd.allocator();
+    const font_ref = try upd.add(forms.helvetica);
+    const form = try freeTextForm(a, rect, rotate, size, color_ops, contents, .{ .ref = font_ref });
+    const fonts = try write.makeDict(a, &.{.{ "Helv", .{ .ref = font_ref } }});
+    return .{ .form = try upd.add(.{ .stream = form }), .fonts = fonts };
+}
+
+/// The appearance of a text box: `contents` laid out as it will be read, then
+/// turned in user space so that the page's rotation brings it upright. `font`
+/// is Helvetica in WinAnsi.
+pub fn freeTextForm(a: Allocator, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8, font: Object) Allocator.Error!object.Stream {
     const sideways = rotate == 90 or rotate == 270;
     // The box's width and height as displayed.
     const bw = if (sideways) rect[3] - rect[1] else rect[2] - rect[0];
@@ -473,14 +496,7 @@ fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_
     }
     try ap.appendSlice(a, "ET Q\n");
 
-    const font = try write.makeDict(a, &.{
-        .{ "Type", .{ .name = "Font" } },
-        .{ "Subtype", .{ .name = "Type1" } },
-        .{ "BaseFont", .{ .name = "Helvetica" } },
-        .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
-    });
-    const font_ref = try upd.add(.{ .dict = font });
-    const fonts = try write.makeDict(a, &.{.{ "Helv", .{ .ref = font_ref } }});
+    const fonts = try write.makeDict(a, &.{.{ "Helv", font }});
     const res = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
     const form_dict = try write.makeDict(a, &.{
         .{ "Type", .{ .name = "XObject" } },
@@ -489,8 +505,7 @@ fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_
         .{ "Matrix", try write.numbers(a, &matrix) },
         .{ "Resources", .{ .dict = res } },
     });
-    const form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
-    return .{ .form = form, .fonts = fonts };
+    return .{ .dict = form_dict, .data = ap.items };
 }
 
 fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) Allocator.Error!void {
