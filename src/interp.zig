@@ -907,7 +907,8 @@ const Run = struct {
                 .glyphs = glyphs.items,
             } });
         }
-        if (f.subtype == .type3 and self.r.options.graphics) try self.type3Run(f, glyphs.items, run_tm);
+        // Modes 3 and 7 neither fill nor stroke (table 106).
+        if (f.subtype == .type3 and self.r.options.graphics and self.gs.mode != 3 and self.gs.mode != 7) try self.type3Run(f, glyphs.items, run_tm);
         self.tm = Matrix.translate(x, 0).mul(self.tm);
     }
 

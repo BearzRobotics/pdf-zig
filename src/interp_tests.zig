@@ -819,3 +819,15 @@ test "text operators in a Type 3 glyph do not move the page's text" {
     try testing.expectApproxEqAbs(@as(f64, 15), last.tm.e, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 50), last.tm.f, 1e-9);
 }
+
+test "Type 3 glyphs are not painted in the invisible rendering modes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_]struct { u8, usize }{ .{ 0, 1 }, .{ 3, 0 }, .{ 7, 0 } }) |case| {
+        const stream = try std.fmt.allocPrint(arena.allocator(), "BT /T 10 Tf {d} Tr 10 50 Td (a) Tj ET", .{case[0]});
+        const r = try render(try type3Page(arena.allocator(), stream, "500 0 d0 0 0 400 700 re f"));
+        defer done(r);
+        try testing.expectEqual(case[1], countKind(r.list, .fill));
+        try testing.expectEqual(@as(usize, 1), countKind(r.list, .text));
+    }
+}
