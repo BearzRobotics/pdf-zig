@@ -492,3 +492,15 @@ test "no run-length code is the start of another" {
         };
     }
 }
+
+test "mixed coding without end-of-line codes: each row still has its tag bit" {
+    // Eight rows from Ghostscript's encoder with the end-of-line codes cut out,
+    // which leaves each row's tag bit. Poppler and MuPDF decode this too. (The
+    // encoder itself, asked for no end-of-line codes, also drops the tag bits,
+    // and nothing then says which rows are one-dimensional.)
+    const data = "\xd8\xb6\xe2\x6a\xcc\xda\x11\xb6\x1e\x6b\xdb\xbc\xe0\x8a\x1c\xa1\xc2\x23\xa0\x45\x0e\x12\x84\x44\x44\x45\x89\xa8\x2e";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try decode(arena.allocator(), data, .{ .k = 4, .columns = 16, .rows = 8 }, 1 << 10);
+    try std.testing.expectEqualSlices(u8, "\xf0\x0f\xf0\x0f\x0f\xf0\x3c\x3c\x3c\x3c\xaa\xaa\xff\xff\x00\x00", out);
+}

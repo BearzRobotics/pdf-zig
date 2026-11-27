@@ -114,8 +114,6 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 - Image codecs: DCT, JPX and JBIG2 data is not decoded (`image.decode` returns it with the
   codec name, for the viewer to decode and pass to `image.fromSamples`; a mask in one of
   them is reported as `Pixels.pending_mask`). JBIG2 has no decoder.
-- CCITT with mixed one- and two-dimensional coding (`/K` above 0) and no end-of-line codes
-  is unverified: Ghostscript, Poppler and MuPDF disagreed on a test of it.
 - Text clipping modes (4 to 7) and `d1` colour suppression in Type 3 glyphs.
 - Symbol and ZapfDingbats built-in encodings and widths (a typical width is used);
   MacExpertEncoding; `a_b` ligature glyph names.
