@@ -99,14 +99,14 @@ pub const Document = struct {
     /// Reads all of `r` (up to `Options.max_bytes`) and opens it. The document
     /// owns the bytes.
     pub fn openReader(gpa: Allocator, r: *Io.Reader, options: Options) Error!Document {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer arena.deinit();
-        const bytes = r.allocRemaining(arena.allocator(), .limited(options.max_bytes)) catch |err| switch (err) {
+        var doc: Document = .{ .arena = std.heap.ArenaAllocator.init(gpa), .data = "", .options = options };
+        // Frees through `doc.arena`, the arena that loading goes on to grow.
+        errdefer doc.arena.deinit();
+        doc.data = r.allocRemaining(doc.arena.allocator(), .limited(options.max_bytes)) catch |err| switch (err) {
             error.StreamTooLong => return error.InputTooLarge,
             error.OutOfMemory => return error.OutOfMemory,
             error.ReadFailed => return error.ReadFailed,
         };
-        var doc: Document = .{ .arena = arena, .data = bytes, .options = options };
         try doc.load();
         return doc;
     }

@@ -416,3 +416,16 @@ test "page tree: a shared /Kids array is expanded once" {
     const list = try pdf.pages.PageList.build(&doc);
     try testing.expectEqual(@as(usize, 1), list.entries.len);
 }
+
+test "openReader frees everything when opening fails" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Enough parsed data that opening has to grow the document's arena.
+    const zeros = try a.alloc(u8, 200_000);
+    for (zeros, 0..) |*c, i| c.* = if (i % 2 == 0) '0' else ' ';
+    const bytes = try std.fmt.allocPrint(a, "%PDF-1.7\n1 0 obj\n[{s}]\nendobj\n", .{zeros});
+    var r: std.Io.Reader = .fixed(bytes);
+    // testing.allocator reports any leak.
+    try testing.expectError(error.NoCatalog, pdf.Document.openReader(testing.allocator, &r, .{}));
+}
