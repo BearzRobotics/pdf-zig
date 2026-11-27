@@ -952,3 +952,20 @@ test "a display list says when something was left out" {
     defer dl.deinit();
     try testing.expect(dl.incomplete);
 }
+
+test "the text size on the page comes from the vertical axis of text space" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Sheared: the x axis maps to (0, 40) and the em height is 5 across it.
+    const r = try render(try page(arena.allocator(), "BT /F1 1 Tf 40 0 0 5 10 50 Tm (A) Tj 40 0 0 5 10 38 Tm (B) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .content);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("A\nB\n", got);
+    const sheared = try render(try page(arena.allocator(), "BT /F1 1 Tf 10 40 0 5 10 50 Tm (A) Tj 10 40 0 5 10 38 Tm (B) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(sheared);
+    var lay = try pdf.text.layout(testing.allocator, &sheared.list);
+    defer lay.deinit(testing.allocator);
+    // Size 5, not 40: lines 12 apart stay apart.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lay.text, "\n"));
+}

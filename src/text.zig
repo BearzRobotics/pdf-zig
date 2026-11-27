@@ -148,8 +148,9 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
         if (g.text.len == 0) continue;
         const p0 = to_page.apply(g.x, t.rise);
         const p1 = to_page.apply(g.x + g.advance * t.size * t.h_scale, t.rise);
-        // Size on the page: the vertical scale of the combined matrix times the font size.
-        const vscale = @sqrt(to_page.b * to_page.b + to_page.d * to_page.d);
+        // Size on the page: the length of the image of the unit y vector, (c, d),
+        // times the font size.
+        const vscale = @sqrt(to_page.c * to_page.c + to_page.d * to_page.d);
         // The box spans the advance and, vertically, a descent of 0.2 and an
         // ascent of 0.8 of the font size, which fits most fonts closely enough
         // to show a selection.
