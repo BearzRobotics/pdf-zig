@@ -23,6 +23,10 @@ pub const Options = struct {
     max_objects: u32 = 8_000_000,
     /// Largest stream after decoding.
     max_stream_bytes: usize = 512 << 20,
+    /// Most decoded stream data (intermediate stages included) that is kept in
+    /// the document itself, by `decodeStream` and what uses it: object streams,
+    /// CMaps, functions and the like.
+    max_retained_bytes: u64 = 2 << 30,
     /// Most `/Prev` sections followed.
     max_sections: usize = 4096,
     /// The user password of an encrypted file (the empty password opens most).
@@ -64,6 +68,10 @@ const ObjStm = struct {
     nums: []const u32,
     offsets: []const usize,
     first: usize,
+    /// Where the data of entry `i` must end: the next larger offset.
+    ends: []const usize,
+    /// The first entry with the same offset as entry `i`.
+    same: []const u32,
 };
 
 pub const Document = struct {
@@ -78,6 +86,11 @@ pub const Document = struct {
     trailer: Dict = .{},
     cache: std.AutoHashMapUnmanaged(u32, Object) = .empty,
     objstms: std.AutoHashMapUnmanaged(u32, ?ObjStm) = .empty,
+    /// Objects parsed from object streams, by stream and entry. Entries that
+    /// share an offset share the object, so a stream's data is parsed once.
+    objstm_objects: std.AutoHashMapUnmanaged(u64, Object) = .empty,
+    /// Decoded bytes counted against `Options.max_retained_bytes`.
+    retained_bytes: u64 = 0,
     repaired: bool = false,
     /// Set for an encrypted file once the key is derived.
     crypt: ?crypt.Crypt = null,
@@ -439,10 +452,14 @@ pub const Document = struct {
             // The index can be wrong in damaged files: search by number.
             i = std.mem.indexOfScalar(u32, stm.nums, num) orelse return .null;
         }
-        const at = stm.first + stm.offsets[i];
+        const at = stm.first +| stm.offsets[i];
         if (at >= stm.data.len) return .null;
-        var p = object.Parser.init(self.a(), stm.data, at);
-        return p.parseObject() catch .null;
+        const key = (@as(u64, stream_num) << 32) | stm.same[i];
+        if (self.objstm_objects.get(key)) |o| return o;
+        var p = object.Parser.init(self.a(), stm.data[0..@min(stm.data.len, stm.first +| stm.ends[i])], at);
+        const o = p.parseObject() catch .null;
+        self.objstm_objects.put(self.a(), key, o) catch {};
+        return o;
     }
 
     fn objStm(self: *Document, num: u32) ?ObjStm {
@@ -466,8 +483,10 @@ pub const Document = struct {
         const data = self.streamData(st) catch return null;
         if (@as(usize, @intCast(first)) > data.len) return null;
         var p = object.Parser.init(self.a(), data, 0);
-        const nums = self.a().alloc(u32, @intCast(n)) catch return null;
-        const offs = self.a().alloc(usize, @intCast(n)) catch return null;
+        // A number and an offset take at least three bytes.
+        const most: usize = @min(@as(usize, @intCast(n)), data.len / 3 + 1);
+        const nums = self.a().alloc(u32, most) catch return null;
+        const offs = self.a().alloc(usize, most) catch return null;
         var count: usize = 0;
         while (count < nums.len) : (count += 1) {
             const a1 = p.parseObject() catch break;
@@ -478,7 +497,36 @@ pub const Document = struct {
             nums[count] = @intCast(@min(on, std.math.maxInt(u32)));
             offs[count] = @intCast(oo);
         }
-        return .{ .data = data, .nums = nums[0..count], .offsets = offs[0..count], .first = @intCast(first) };
+        const spans = self.objStmSpans(offs[0..count], data.len) catch return null;
+        return .{ .data = data, .nums = nums[0..count], .offsets = offs[0..count], .first = @intCast(first), .ends = spans.ends, .same = spans.same };
+    }
+
+    const Spans = struct { ends: []const usize, same: []const u32 };
+
+    /// For each entry of an object stream, where its object ends and which
+    /// entry stands for all those at the same offset.
+    fn objStmSpans(self: *Document, offsets: []const usize, len: usize) Allocator.Error!Spans {
+        const order = try self.a().alloc(u32, offsets.len);
+        for (order, 0..) |*slot, i| slot.* = @intCast(i);
+        std.mem.sort(u32, order, offsets, struct {
+            fn lt(offs: []const usize, x: u32, y: u32) bool {
+                return if (offs[x] != offs[y]) offs[x] < offs[y] else x < y;
+            }
+        }.lt);
+        const ends = try self.a().alloc(usize, offsets.len);
+        const same = try self.a().alloc(u32, offsets.len);
+        var start: usize = 0;
+        while (start < order.len) {
+            var next = start + 1;
+            while (next < order.len and offsets[order[next]] == offsets[order[start]]) next += 1;
+            const end = if (next < order.len) offsets[order[next]] else len;
+            for (order[start..next]) |i| {
+                ends[i] = end;
+                same[i] = order[start];
+            }
+            start = next;
+        }
+        return .{ .ends = ends, .same = same };
     }
 
     /// Follows references until a direct object (at most 32 hops).
@@ -580,6 +628,7 @@ pub const Document = struct {
     fn forgetCached(self: *Document) Allocator.Error!void {
         self.cache = .empty;
         self.objstms = .empty;
+        self.objstm_objects = .empty;
         if (self.crypt) |c| if (c.encrypt_obj != 0) try self.cache.put(self.a(), c.encrypt_obj, .{ .dict = self.encrypt_dict });
     }
 
@@ -669,7 +718,11 @@ pub const Document = struct {
     /// are left in `rest`. Memory is owned by the document and lives until
     /// `deinit`; use `decodeStreamIn` for data that is needed only briefly.
     pub fn decodeStream(self: *Document, st: Stream) Error!filters.Result {
-        return self.decodeStreamIn(self.a(), st);
+        if (self.retained_bytes > self.options.max_retained_bytes) return error.TooLarge;
+        const r = try self.decodeStreamIn(self.a(), st);
+        self.retained_bytes +|= r.work + (if (st.encrypted) st.data.len else 0);
+        if (self.retained_bytes > self.options.max_retained_bytes) return error.TooLarge;
+        return r;
     }
 
     /// Like `decodeStream`, but the decoded data (and intermediate buffers) are

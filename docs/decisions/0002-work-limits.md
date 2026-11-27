@@ -25,6 +25,19 @@ operation rather than per nesting level, and is far above what real files need.
   cell or Type 3 glyph. Each distinct stream is decoded once per page and kept
   until the page is done. A page over the limit gives `error.LimitExceeded`.
 
+- **Filter chains** (`filters.zig`): at most 16 filters, and the stages
+  together may produce about twice `max_stream_bytes`.
+- **Page contents** (`pages.zig`): for a `/Contents` array,
+  `max_stream_bytes` bounds what all parts produce, intermediate stages
+  included, and each part's intermediates are freed.
+- **Object streams** (`document.zig`): `/N` is bounded by the data's length;
+  each object ends where the next larger offset starts, and entries sharing an
+  offset share one object, so a stream's data is parsed once.
+- **Retained data** (`Options.max_retained_bytes`, 2 GiB): what `decodeStream`
+  keeps for the life of the document. `decodeStreamIn` is not counted.
+- **Repair** (`document.zig`): once failed parses have read several times the
+  file, a parse ends at the next `obj` or `trailer`.
+
 ## Alternatives considered
 
 - Decode into an arena per invocation and free it on return: less memory held at

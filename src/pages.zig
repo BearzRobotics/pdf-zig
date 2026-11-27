@@ -175,12 +175,23 @@ pub fn contents(doc: *Document, a: Allocator, p: Page) (Allocator.Error || doc_m
     var out: std.ArrayList(u8) = .empty;
     switch (c) {
         .stream => |s| try out.appendSlice(a, try doc.streamDataIn(a, s)),
-        .array => |arr| for (arr) |item| {
-            const r = doc.resolve(item);
-            if (r != .stream) continue;
-            try out.appendSlice(a, try doc.streamDataIn(a, r.stream));
-            try out.append(a, '\n');
-            if (out.items.len > doc.options.max_stream_bytes) return error.TooLarge;
+        .array => |arr| {
+            // Each part is decoded into memory of its own and freed once it has
+            // been appended. The limit counts all that decoding produces, so
+            // repeating a part that decodes to little is not free.
+            var part = std.heap.ArenaAllocator.init(doc.arena.child_allocator);
+            defer part.deinit();
+            var work: usize = 0;
+            for (arr) |item| {
+                const r = doc.resolve(item);
+                if (r != .stream) continue;
+                _ = part.reset(.retain_capacity);
+                const decoded = try doc.decodeStreamIn(part.allocator(), r.stream);
+                try out.appendSlice(a, decoded.data);
+                try out.append(a, '\n');
+                work +|= @max(decoded.work, decoded.data.len);
+                if (work > doc.options.max_stream_bytes or out.items.len > doc.options.max_stream_bytes) return error.TooLarge;
+            }
         },
         else => {},
     }

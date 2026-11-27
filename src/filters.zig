@@ -33,6 +33,8 @@ pub const Result = struct {
     /// Filters that were not applied: empty, or the first image codec and any
     /// filters after it.
     rest: []const Filter,
+    /// Bytes produced by all the stages applied, intermediate ones included.
+    work: usize = 0,
 };
 
 fn canonical(name: []const u8) []const u8 {
@@ -52,14 +54,23 @@ fn isImageCodec(name: []const u8) bool {
 
 /// Applies `filters` in order. Allocations come from `a` (intermediate buffers
 /// are not freed; use an arena). `max` bounds every intermediate result.
+/// Most filters applied to one stream. Real files use one or two.
+pub const max_chain = 16;
+
 pub fn decode(a: Allocator, data: []const u8, filters: []const Filter, max: usize) Error!Result {
     var cur = data;
+    // Bytes produced by all stages, and how many stages there were.
+    var work: usize = 0;
+    var stages: usize = 0;
     for (filters, 0..) |f, i| {
         const name = canonical(f.name);
         // A `/Crypt` filter only says how the data was encrypted; the document
         // has already decrypted it (7.4.10).
         if (std.mem.eql(u8, name, "Crypt")) continue;
-        if (isImageCodec(name)) return .{ .data = cur, .rest = filters[i..] };
+        if (isImageCodec(name)) return .{ .data = cur, .rest = filters[i..], .work = work };
+        // Every stage's output stays allocated, so the chain is limited too.
+        stages += 1;
+        if (stages > max_chain or work / 2 > max) return error.TooLarge;
         if (std.mem.eql(u8, name, "FlateDecode")) {
             cur = try predict(a, try flateDecode(a, cur, max), f.parms, max);
         } else if (std.mem.eql(u8, name, "LZWDecode")) {
@@ -72,8 +83,9 @@ pub fn decode(a: Allocator, data: []const u8, filters: []const Filter, max: usiz
         } else if (std.mem.eql(u8, name, "RunLengthDecode")) {
             cur = try runLengthDecode(a, cur, max);
         } else return error.UnsupportedFilter;
+        work +|= cur.len;
     }
-    return .{ .data = cur, .rest = &.{} };
+    return .{ .data = cur, .rest = &.{}, .work = work };
 }
 
 fn intParm(d: object.Dict, key: []const u8, default: i64) i64 {

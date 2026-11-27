@@ -587,3 +587,85 @@ test "repair still reads objects that contain what looks like another object" {
     try testing.expectEqualStrings("8 0 obj trailer << >> data\n", doc.getObject(3).stream.data);
     try testing.expectEqualStrings("a trailer", doc.trailer.get("T").?.string);
 }
+
+test "limits: a long filter chain is refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const chain: [40][]const u8 = @splat("/AHx");
+    const body = try std.fmt.allocPrint(a, "<< /Length 1 /Filter [{s}] >>\nstream\n>\nendstream", .{try std.mem.join(a, " ", &chain)});
+    var doc = try pdf.Document.open(testing.allocator, try build(a, &(simple ++ .{body})), .{});
+    defer doc.deinit();
+    try testing.expectError(error.TooLarge, doc.decodeStream(doc.getObject(4).stream));
+}
+
+test "limits: page contents that repeat a stream are bounded by what is decoded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 100,000 bytes of RunLength end-of-data markers, hex encoded: they decode to
+    // nothing, so only the intermediate stage has any size.
+    const hex = try a.alloc(u8, 200_000);
+    for (hex, 0..) |*c, i| c.* = if (i % 2 == 0) '8' else '0';
+    const stream = try std.fmt.allocPrint(a, "<< /Length {d} /Filter [/AHx /RL] >>\nstream\n{s}\nendstream", .{ hex.len, hex });
+    const refs: [200][]const u8 = @splat("4 0 R");
+    const bytes = try build(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        try std.fmt.allocPrint(a, "<< /Type /Page /Contents [{s}] >>", .{try std.mem.join(a, " ", &refs)}),
+        stream,
+    });
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{ .max_stream_bytes = 1 << 20 });
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var scratch = std.heap.ArenaAllocator.init(counting.allocator());
+    defer scratch.deinit();
+    try testing.expectError(error.TooLarge, pdf.pages.contents(&doc, scratch.allocator(), pdf.pages.page(&doc, list, 0).?));
+    try testing.expect(counting.allocated_bytes < 4 << 20);
+}
+
+/// A file without cross-reference data: catalog, page tree and `extra`.
+fn looseFile(a: Allocator, extra: []const u8) ![]u8 {
+    return std.fmt.allocPrint(a, "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] >>\nendobj\n{s}", .{extra});
+}
+
+test "limits: an object stream's /N is bounded by its data" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var streams: std.ArrayList(u8) = .empty;
+    for (10..110) |i| try streams.print(a, "{d} 0 obj\n<< /Type /ObjStm /N 1000000 /First 0 /Length 0 >>\nstream\n\nendstream\nendobj\n", .{i});
+    try testing.expect(try openCost(try looseFile(a, streams.items)) < 4 << 20);
+}
+
+test "limits: object stream entries sharing an offset share one parsed object" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var header: std.ArrayList(u8) = .empty;
+    for (0..500) |i| try header.print(a, "{d} 0 ", .{i + 10});
+    const big: [100_000]u8 = @splat('x');
+    const data = try std.fmt.allocPrint(a, "{s}({s})", .{ header.items, &big });
+    const stm = try std.fmt.allocPrint(a, "3 0 obj\n<< /Type /ObjStm /N 500 /First {d} /Length {d} >>\nstream\n{s}\nendstream\nendobj\n", .{ header.items.len, data.len, data });
+    const bytes = try looseFile(a, stm);
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var doc = try pdf.Document.open(counting.allocator(), bytes, .{});
+    defer doc.deinit();
+    for (10..510) |n| try testing.expectEqual(@as(usize, big.len), doc.getObject(@intCast(n)).string.len);
+    try testing.expect(counting.allocated_bytes < 4 << 20);
+}
+
+test "limits: the document keeps a bounded amount of decoded data" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(testing.allocator, try build(a, &(simple ++ .{"<< /Length 20 /Filter /AHx >>\nstream\n41414141414141414141\nendstream"})), .{ .max_retained_bytes = 25 });
+    defer doc.deinit();
+    const st = doc.getObject(4).stream;
+    _ = try doc.decodeStream(st);
+    _ = try doc.decodeStream(st);
+    try testing.expectError(error.TooLarge, doc.decodeStream(st));
+    // Decoding into the caller's own allocator is not counted.
+    _ = try doc.decodeStreamIn(a, st);
+}
