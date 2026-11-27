@@ -81,6 +81,8 @@ pub const Document = struct {
     repaired: bool = false,
     /// Set for an encrypted file once the key is derived.
     crypt: ?crypt.Crypt = null,
+    /// The encryption dictionary, when `crypt` is set.
+    encrypt_dict: Dict = .{},
     /// How many objects are being read inside one another. Reading an object can
     /// need others (a stream's `/Length`, the object stream it is stored in).
     depth: u8 = 0,
@@ -532,9 +534,16 @@ pub const Document = struct {
         c.encrypt_obj = if (enc_ref == .ref) enc_ref.ref.num else 0;
         self.crypt = c;
         // Objects read so far were not decrypted: forget them.
+        self.encrypt_dict = enc;
+        try self.forgetCached();
+    }
+
+    /// Empties the object caches. The encryption dictionary, which is never
+    /// decrypted, goes back in.
+    fn forgetCached(self: *Document) Allocator.Error!void {
         self.cache = .empty;
         self.objstms = .empty;
-        if (c.encrypt_obj != 0) try self.cache.put(self.a(), c.encrypt_obj, .{ .dict = enc });
+        if (self.crypt) |c| if (c.encrypt_obj != 0) try self.cache.put(self.a(), c.encrypt_obj, .{ .dict = self.encrypt_dict });
     }
 
     /// Decrypts the strings of `v` (and marks streams) for object `num gen`.
@@ -733,6 +742,10 @@ pub const Document = struct {
                 self.xref.put(self.a(), on, .{ .compressed = .{ .stream_num = sn, .index = @intCast(idx) } }) catch return error.OutOfMemory;
             }
         }
+
+        // Anything read while the table was incomplete (an indirect /Length held
+        // in an object stream) may have been cached as missing.
+        try self.forgetCached();
 
         // Prefer the last trailer that names a Root, then merge the rest under it.
         var ordered: std.ArrayList(Dict) = .empty;

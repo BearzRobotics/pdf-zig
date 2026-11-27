@@ -459,3 +459,16 @@ test "hybrid file: /XRefStm supplies the objects its table marks free" {
     // Object 0, free in the table and absent from the stream, stays free.
     try testing.expect(doc.getObject(0) == .null);
 }
+
+test "repair: a stream length stored in an object stream is not remembered as missing" {
+    // No cross-reference data at all, so the file is scanned.
+    const bytes = "%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" ++
+        "2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n" ++
+        "3 0 obj\n<< /Length 5 0 R >>\nstream\nhello\nendstream\nendobj\n" ++
+        "4 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 5 >>\nstream\n5 0 5\nendstream\nendobj\n";
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expect(doc.repaired);
+    try testing.expectEqual(@as(?i64, 5), doc.getObject(5).asInt());
+    try testing.expectEqualStrings("hello", doc.getObject(3).stream.data);
+}
