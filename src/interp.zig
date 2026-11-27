@@ -33,6 +33,10 @@ pub const Options = struct {
     max_ops: usize = 8_000_000,
     /// Most commands in one display list.
     max_commands: usize = 4_000_000,
+    /// Most bytes of content interpreted for one page. A form, pattern cell or
+    /// Type 3 glyph counts every time it is run, so this bounds repeated use of
+    /// streams that execute few or no operators.
+    max_content_bytes: usize = 512 << 20,
     /// Deepest nesting of forms, patterns and Type 3 glyphs.
     max_depth: u8 = 12,
     /// Build paths, images, shadings and Type 3 glyph drawings. Turn this off
@@ -54,6 +58,11 @@ pub const Renderer = struct {
     /// Decoded content streams and operands: reset after every page, so that
     /// rendering many pages does not keep every page's content in memory.
     scratch: ?std.heap.ArenaAllocator = null,
+    /// Streams already decoded for the current page, keyed by where their raw
+    /// data is. The values live in `scratch`.
+    decoded: std.AutoHashMapUnmanaged(StreamKey, []const u8) = .empty,
+
+    const StreamKey = struct { ptr: usize, len: usize };
 
     pub fn init(doc: *Document, options: Options) Renderer {
         return .{ .doc = doc, .options = options };
@@ -74,7 +83,11 @@ pub const Renderer = struct {
         list.base = baseMatrix(p);
 
         if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(gpa);
-        defer _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
+        self.decoded = .empty;
+        defer {
+            self.decoded = .empty;
+            _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
+        }
         const scratch = self.scratch.?.allocator();
         var run: Run = .{ .r = self, .a = list.arena.allocator(), .scratch = scratch };
         const data = try pages.contents(self.doc, scratch, p);
@@ -287,6 +300,7 @@ const Run = struct {
     base_ctm: Matrix = .identity,
     resources: Dict = .{},
     ops: usize = 0,
+    content_bytes: usize = 0,
     depth: u8 = 0,
     /// Marked-content nesting: how many open sections hide their content.
     hidden_depth: u32 = 0,
@@ -324,6 +338,8 @@ const Run = struct {
             self.resources = saved_res;
             self.base_ctm = saved_base;
         }
+        if (data.len > self.r.options.max_content_bytes -| self.content_bytes) return error.LimitExceeded;
+        self.content_bytes += data.len;
         var sc = content.Scanner.init(self.scratch, data);
         while (try sc.next()) |op| {
             self.ops += 1;
@@ -332,6 +348,15 @@ const Run = struct {
         }
         // A stream that leaves `q` open must not leak state into its parent.
         while (self.stack.items.len > saved_depth) try self.restore();
+    }
+
+    /// The decoded data of a stream run as content, decoded once per page.
+    fn contentData(self: *Run, st: object.Stream) doc_mod.Error![]const u8 {
+        const key: Renderer.StreamKey = .{ .ptr = @intFromPtr(st.data.ptr), .len = st.data.len };
+        if (self.r.decoded.get(key)) |data| return data;
+        const data = try self.doc().streamDataIn(self.scratch, st);
+        try self.r.decoded.put(self.scratch, key, data);
+        return data;
     }
 
     fn num(op: content.Op, i: usize) f64 {
@@ -670,18 +695,20 @@ const Run = struct {
         cell.* = .{ .arena = std.heap.ArenaAllocator.init(self.a) };
         var sub: Run = .{ .r = self.r, .a = cell.arena.allocator(), .scratch = self.scratch, .depth = self.depth + 1 };
         sub.ops = self.ops;
+        sub.content_bytes = self.content_bytes;
         sub.gs = .{};
         if (rgb) |c| {
             sub.gs.fill.paint = .{ .color = c };
             sub.gs.stroke.paint = .{ .color = c };
         }
         const res = doc_.getDict(pd, "Resources") orelse self.resources;
-        const data = doc_.streamDataIn(self.scratch, po.stream) catch "";
+        const data = self.contentData(po.stream) catch "";
         sub.interpret(data, res, .identity) catch |err| switch (err) {
             error.LimitExceeded => {},
             else => |e| return e,
         };
         self.ops = sub.ops;
+        self.content_bytes = sub.content_bytes;
         cell.commands = sub.commands.items;
         cell.width = bbox[2] - bbox[0];
         cell.height = bbox[3] - bbox[1];
@@ -856,7 +883,7 @@ const Run = struct {
             const gname = f.names[g.code] orelse continue;
             const proc = doc_.get(f.char_procs, gname) orelse continue;
             if (proc != .stream) continue;
-            const data = doc_.streamDataIn(self.scratch, proc.stream) catch continue;
+            const data = self.contentData(proc.stream) catch continue;
             // Glyph space to user space: FontMatrix, then size, scaling and rise, then Tm and CTM.
             const trm = Matrix{ .a = self.gs.size * self.gs.th, .d = self.gs.size, .f = self.gs.rise };
             const m = Matrix.translate(g.x, 0).mul(trm).mul(run_tm);
@@ -939,7 +966,7 @@ const Run = struct {
             _ = self.active_forms.remove(num_id);
         };
         const doc_ = self.doc();
-        const data = doc_.streamDataIn(self.scratch, st) catch return;
+        const data = self.contentData(st) catch return;
         const res = doc_.getDict(st.dict, "Resources") orelse self.resources;
         const m = self.matrixOf(st.dict, "Matrix");
         try self.save();

@@ -475,3 +475,43 @@ test "huge, infinite and negative operands of J, j and Tr" {
     try testing.expectEqual(display.Cap.round, r.list.commands[0].stroke.style.cap);
     try testing.expectEqual(display.Join.bevel, r.list.commands[0].stroke.style.join);
 }
+
+/// Renders the first page of `bytes` and returns how many bytes were requested
+/// from the allocator while doing it.
+fn renderCost(bytes: []const u8, options: pdf.interp.Options) !usize {
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var rend = pdf.Renderer.init(&doc, options);
+    defer rend.deinit();
+    var dl = try rend.render(counting.allocator(), pdf.pages.page(&doc, pl, 0).?);
+    dl.deinit();
+    return counting.allocated_bytes;
+}
+
+test "a form or Type 3 glyph used many times is decoded once and counted every time" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 100,000 spaces, hex encoded: no operators, so only a byte budget can count it.
+    const hex = try a.alloc(u8, 200_000);
+    for (hex, 0..) |*c, i| c.* = if (i % 2 == 0) '2' else '0';
+    const form = try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [0 0 1 1] /Filter /ASCIIHexDecode /Length {d} >>\nstream\n{s}>\nendstream", .{ hex.len + 1, hex });
+    const uses = 500;
+    const dos = try std.mem.join(a, " ", &(@as([uses][]const u8, @splat("/F Do"))));
+    const forms = try page(a, dos, "/XObject << /F 5 0 R >>", &.{form}, "");
+
+    const glyphs: [uses]u8 = @splat('a');
+    const type3 = try page(a, try std.fmt.allocPrint(a, "BT /F1 10 Tf ({s}) Tj ET", .{&glyphs}), "/Font << /F1 5 0 R >>", &.{
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /ga 6 0 R >> /Encoding << /Differences [97 /ga] >> /FirstChar 97 /Widths [500] >>",
+        form,
+    }, "");
+
+    for ([_][]const u8{ forms, type3 }) |bytes| {
+        // 500 uses of 100 KB would be 50 MB if each use decoded again.
+        try testing.expect(try renderCost(bytes, .{}) < 8 << 20);
+        // And the page's content budget counts each use.
+        try testing.expectError(error.LimitExceeded, renderCost(bytes, .{ .max_content_bytes = 1 << 20 }));
+    }
+}
