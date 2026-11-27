@@ -356,6 +356,19 @@ pub fn remove(upd: *write.Update, num: u32) EditError!void {
     if (prev == null) parent = if (next) |n| try write.dictWith(a, parent, "First", .{ .ref = n }) else try write.dictWithout(a, parent, "First");
     if (next == null) parent = if (prev) |p| try write.dictWith(a, parent, "Last", .{ .ref = p }) else try write.dictWithout(a, parent, "Last");
     try upd.set(at.parent.num, .{ .dict = try recount(upd, parent) });
+
+    // Every ancestor counts its visible descendants, so each is counted again,
+    // from the parent upwards.
+    var child = at.parent;
+    var levels: usize = 0;
+    while (child.num != outlines.num and levels < max_depth) : (levels += 1) {
+        var walked: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        try walked.put(a, outlines.num, {});
+        const above = (try locate(upd, outlines, child.num, 0, &walked) orelse break).parent;
+        const d = upd.get(above.num).asDict() orelse break;
+        try upd.set(above.num, .{ .dict = try recount(upd, d) });
+        child = above;
+    }
 }
 
 /// The `/Count` of `d`, direct or indirect.
@@ -692,4 +705,33 @@ test "add appends after the real last bookmark, whatever /Last says" {
         try testing.expect(doc.getObject(3).asDict().?.get("Next") == null);
         try testing.expectEqual(@as(?i64, 4), doc.getObject(4).asDict().?.get("Count").?.asInt());
     }
+}
+
+test "remove updates the counts of all ancestors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // root > part (open) > chapter (open) > two sections
+    const bytes = try @import("interp_tests.zig").buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /First 5 0 R /Last 5 0 R /Count 4 >>",
+        "<< /Title (part) /Parent 4 0 R /First 6 0 R /Last 6 0 R /Count 3 >>",
+        "<< /Title (chapter) /Parent 5 0 R /First 7 0 R /Last 8 0 R /Count 2 >>",
+        "<< /Title (s1) /Parent 6 0 R /Next 8 0 R >>",
+        "<< /Title (s2) /Parent 6 0 R /Prev 7 0 R >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try remove(&upd, 7);
+    for ([_]struct { u32, i64 }{ .{ 6, 1 }, .{ 5, 2 }, .{ 4, 3 } }) |want| {
+        try testing.expectEqual(want[1], upd.get(want[0]).asDict().?.get("Count").?.asInt().?);
+    }
+    try remove(&upd, 8);
+    try testing.expect(upd.get(6).asDict().?.get("Count") == null);
+    try testing.expectEqual(@as(i64, 2), upd.get(4).asDict().?.get("Count").?.asInt().?);
+    try testing.expectError(error.NoSuchItem, remove(&upd, 7));
 }
