@@ -196,6 +196,12 @@ fn gapNeedsSpace(prev: Item, next: Item) bool {
     return gap > 0.15 * @max(prev.size, next.size);
 }
 
+/// The pen went back well before where the previous glyph started, as between
+/// two words drawn out of order. Kerning and overstriking stay closer.
+fn jumpsBack(prev: Item, next: Item) bool {
+    return next.x0 < prev.x0 - 0.5 * @max(prev.size, next.size);
+}
+
 fn endsWithSpace(s: []const u8) bool {
     return s.len > 0 and s[s.len - 1] == ' ';
 }
@@ -206,7 +212,7 @@ fn contentOrder(a: Allocator, items: []const Item, out: *std.ArrayList(u8)) Allo
         if (prev) |p| {
             if (@abs(it.y - p.y) > 0.5 * @max(p.size, it.size)) {
                 try out.append(a, '\n');
-            } else if (gapNeedsSpace(p, it) and !endsWithSpace(p.text) and !startsWithSpace(it.text)) {
+            } else if ((gapNeedsSpace(p, it) or jumpsBack(p, it)) and !endsWithSpace(p.text) and !startsWithSpace(it.text)) {
                 try out.append(a, ' ');
             }
         }

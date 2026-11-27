@@ -984,3 +984,13 @@ test "the box of a tilted glyph covers all four corners" {
     try testing.expectApproxEqAbs(@as(f64, want), b.x1 - b.x0, 0.01);
     try testing.expectApproxEqAbs(@as(f64, want), b.y1 - b.y0, 0.01);
 }
+
+test "content order separates words drawn from right to left" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 100 50 Td (world) Tj -80 0 Td (hello) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const got = try pdf.text.extract(testing.allocator, &r.list, .content);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("world hello\n", got);
+}
