@@ -88,14 +88,16 @@ fn inflate(a: Allocator, data: []const u8, container: flate.Container, max: usiz
     var window: [flate.max_window_len]u8 = undefined;
     var dec: flate.Decompress = .init(&in, container, &window);
     var out: std.ArrayList(u8) = .empty;
-    var buf: [4096]u8 = undefined;
     while (true) {
-        const n = dec.reader.readSliceShort(&buf) catch break; // damaged: keep what we have
-        if (out.items.len + n > max) return error.TooLarge;
-        try out.appendSlice(a, buf[0..n]);
-        if (n < buf.len) break;
+        // The decompressor leaves what it produced in its buffer even when
+        // it then fails, so a damaged or truncated stream keeps all of it.
+        const more = if (dec.reader.fillMore()) true else |_| false;
+        const chunk = dec.reader.buffered();
+        if (chunk.len > max - out.items.len) return error.TooLarge;
+        try out.appendSlice(a, chunk);
+        dec.reader.toss(chunk.len);
+        if (!more) return out.items;
     }
-    return out.items;
 }
 
 fn flateDecode(a: Allocator, data: []const u8, max: usize) Error![]const u8 {
@@ -426,7 +428,9 @@ test "FlateDecode, raw deflate, truncated data and the size limit" {
     const z = [_]u8{ 0x78, 0x9c, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x27, 0x01, 0x68, 0x03, 0x08, 0xb1 };
     try std.testing.expectEqualStrings("hello hello hello hello", try run(a, "FlateDecode", &z));
     // Damaged tail: the part before the damage is still returned (no crash).
-    _ = try run(a, "Fl", z[0..9]);
+    try std.testing.expectEqualStrings("hello h", try run(a, "Fl", z[0..11]));
+    // Raw deflate, without the zlib header and checksum.
+    try std.testing.expectEqualStrings("hello hello hello hello", try run(a, "FlateDecode", z[2 .. z.len - 4]));
     try std.testing.expectError(error.TooLarge, decode(a, &z, &.{.{ .name = "FlateDecode" }}, 5));
     try std.testing.expectError(error.UnsupportedFilter, run(a, "NoSuchDecode", "x"));
 }
@@ -504,4 +508,19 @@ test "PNG predictor: a huge row with almost no data costs only the data" {
     const short = try predict(arena.allocator(), "\x02abc", .{ .entries = &entries }, 512 << 20);
     try std.testing.expectEqualStrings("abc", short);
     try std.testing.expect(counting.allocated_bytes < 1 << 16);
+}
+
+test "FlateDecode: a truncated stream keeps everything decoded before the cut" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A zlib stream of one stored block of 10,000 bytes.
+    var z: std.ArrayList(u8) = .empty;
+    try z.appendSlice(a, &.{ 0x78, 0x01, 0x01, 0x10, 0x27, 0xef, 0xd8 });
+    for (0..10_000) |i| try z.append(a, @truncate(i));
+    for ([_]usize{ 100, 4000, 4103, 5000, 9000 }) |cut| {
+        const out = try run(a, "FlateDecode", z.items[0..cut]);
+        try std.testing.expectEqualSlices(u8, z.items[7..cut], out);
+    }
+    try std.testing.expectError(error.TooLarge, decode(a, z.items[0..9000], &.{.{ .name = "FlateDecode" }}, 8000));
 }
