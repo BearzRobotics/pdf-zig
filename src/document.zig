@@ -816,12 +816,16 @@ pub const Document = struct {
 
     fn filterListIn(self: *Document, alloc: Allocator, dict: Dict) Allocator.Error![]const filters.Filter {
         var list: std.ArrayList(filters.Filter) = .empty;
-        const f = self.get(dict, "Filter") orelse self.get(dict, "F") orelse return list.items;
-        const parms = self.get(dict, "DecodeParms") orelse self.get(dict, "DP");
+        // Inline images' `/F` and `/DP` are expanded by the content scanner; in
+        // a stream dictionary `/F` names an external file.
+        const f = self.get(dict, "Filter") orelse return list.items;
+        const parms = self.get(dict, "DecodeParms");
         switch (f) {
             .name => |n| try list.append(alloc, .{ .name = n, .parms = self.parmsAt(alloc, parms, 0) }),
             .array => |arr| for (arr, 0..) |item, i| {
-                const name = self.resolve(item).asName() orelse continue;
+                // Leaving one out would decode the data wrongly: decoding
+                // fails on the empty name instead.
+                const name = self.resolve(item).asName() orelse "";
                 try list.append(alloc, .{ .name = name, .parms = self.parmsAt(alloc, parms, i) });
             },
             else => {},

@@ -67,7 +67,12 @@ pub fn decode(a: Allocator, data: []const u8, filters: []const Filter, max: usiz
         // A `/Crypt` filter only says how the data was encrypted; the document
         // has already decrypted it (7.4.10).
         if (std.mem.eql(u8, name, "Crypt")) continue;
-        if (isImageCodec(name)) return .{ .data = cur, .rest = filters[i..], .work = work };
+        if (isImageCodec(name)) {
+            // The codec's full name, however the file abbreviated it.
+            const rest = try a.dupe(Filter, filters[i..]);
+            for (rest) |*left| left.name = canonical(left.name);
+            return .{ .data = cur, .rest = rest, .work = work };
+        }
         // Every stage's output stays allocated, so the chain is limited too.
         stages += 1;
         if (stages > max_chain or work / 2 > max) return error.TooLarge;
@@ -236,7 +241,10 @@ fn asciiHexDecode(a: Allocator, data: []const u8, max: usize) Error![]const u8 {
             hi = null;
         } else hi = v;
     }
-    if (hi) |h| try out.append(a, h * 16);
+    if (hi) |h| {
+        if (out.items.len + 1 > max) return error.TooLarge;
+        try out.append(a, h * 16);
+    }
     return out.items;
 }
 
@@ -272,6 +280,7 @@ fn ascii85Decode(a: Allocator, data: []const u8, max: usize) Error![]const u8 {
         for (0..5) |k| v = v * 85 + (if (k < n) group[k] else 84);
         const w: u32 = @truncate(v);
         const bytes = [4]u8{ @intCast(w >> 24), @intCast((w >> 16) & 255), @intCast((w >> 8) & 255), @intCast(w & 255) };
+        if (out.items.len + n - 1 > max) return error.TooLarge;
         try out.appendSlice(a, bytes[0 .. n - 1]);
     }
     return out.items;
@@ -575,4 +584,11 @@ test "TIFF predictor with 1, 2 and 4 bits per component" {
         };
         try std.testing.expectEqualSlices(u8, c.out, try predict(a, c.in, .{ .entries = &entries }, 100));
     }
+}
+
+test "the size limit holds for the last bytes of the ASCII filters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.TooLarge, decode(arena.allocator(), "9jqo^BlbD~>", &.{.{ .name = "A85" }}, 5));
+    try std.testing.expectError(error.TooLarge, decode(arena.allocator(), "41424>", &.{.{ .name = "AHx" }}, 2));
 }

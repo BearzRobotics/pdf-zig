@@ -882,3 +882,20 @@ test "a page tree node without kids is not a page" {
         try testing.expectEqual(case[1], (try pdf.pages.PageList.build(&doc)).entries.len);
     }
 }
+
+test "filter names: canonical in the result, damage not skipped, /F not a filter" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(testing.allocator, try build(a, &(simple ++ .{
+        "<< /Filter [/AHx /DCT] /Length 5 >>\nstream\n6162>\nendstream",
+        "<< /Filter [99 0 R /AHx] /Length 5 >>\nstream\n6162>\nendstream",
+        // /F names an external file in a stream dictionary.
+        "<< /F (elsewhere.bin) /Length 2 >>\nstream\nab\nendstream",
+    })), .{});
+    defer doc.deinit();
+    const image = try doc.decodeStream(doc.getObject(4).stream);
+    try testing.expectEqualStrings("DCTDecode", image.rest[0].name);
+    try testing.expectError(error.UnsupportedFilter, doc.decodeStream(doc.getObject(5).stream));
+    try testing.expectEqualStrings("ab", try doc.streamData(doc.getObject(6).stream));
+}
