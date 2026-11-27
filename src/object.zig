@@ -274,6 +274,7 @@ pub const Parser = struct {
     fn parseLiteralString(self: *Parser) ParseError![]const u8 {
         self.pos += 1; // (
         var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.a);
         var depth: usize = 1;
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
@@ -330,6 +331,7 @@ pub const Parser = struct {
     fn parseHexString(self: *Parser) ParseError![]const u8 {
         self.pos += 1; // <
         var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.a);
         var hi: ?u8 = null;
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];

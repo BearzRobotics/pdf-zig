@@ -28,11 +28,16 @@ const max_operands = 512;
 pub const Scanner = struct {
     p: object.Parser,
     operands: std.ArrayList(Object) = .empty,
+    /// How many bytes may still be read again while resynchronising after
+    /// damage. Retrying from the next byte after a failed object finds what
+    /// follows the damage, but an unterminated string reads to the end of the
+    /// stream, so thousands of them would cost the square of the length.
+    rescan_left: usize,
 
     /// `a` is used for strings, arrays and dictionaries; it should be an arena
     /// that lives as long as the operations are used.
     pub fn init(a: Allocator, src: []const u8) Scanner {
-        return .{ .p = object.Parser.init(a, src, 0) };
+        return .{ .p = object.Parser.init(a, src, 0), .rescan_left = 4 * src.len + 65536 };
     }
 
     /// The next operation, or null at the end. Syntax errors are skipped one
@@ -50,7 +55,16 @@ pub const Scanner = struct {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
                         self.p.depth = before_depth;
-                        self.p.pos = save + 1; // resynchronise after the damage
+                        // Resynchronise after the damage: from the next byte
+                        // while the budget lasts, then from where reading failed.
+                        const read = self.p.pos - save;
+                        if (read <= self.rescan_left) {
+                            self.rescan_left -= read;
+                            self.p.pos = save + 1;
+                        } else {
+                            self.rescan_left = 0;
+                            self.p.pos = @max(self.p.pos, save + 1);
+                        }
                         continue;
                     },
                 };
@@ -227,4 +241,33 @@ test "damaged streams are skipped, not fatal" {
         for (&buf) |*b| b.* = rnd.int(u8);
         _ = try collect(arena.allocator(), &buf);
     }
+}
+
+test "runs of unterminated constructs take memory in proportion to the stream" {
+    const n = 20_000;
+    for ([_]u8{ '(', '[', '<' }) |opener| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const src = try arena.allocator().alloc(u8, n);
+        @memset(src, opener);
+        _ = try collect(arena.allocator(), src);
+        try std.testing.expect(arena.queryCapacity() < 64 * n);
+    }
+}
+
+test "scanning resumes after damage, also once the rescan budget is spent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A single unterminated string: every operator after it is still found.
+    const one = try collect(a, "(never closed\n1 2 m 3 4 l S");
+    try std.testing.expectEqualStrings("S", one[one.len - 1].name);
+    try std.testing.expectEqualStrings("l", one[one.len - 2].name);
+    // Thousands of them, then well-formed operators after a closing run.
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendNTimes(a, '(', 5000);
+    try src.appendNTimes(a, ')', 5000);
+    try src.appendSlice(a, " 5 6 m S");
+    const many = try collect(a, src.items);
+    try std.testing.expectEqualStrings("S", many[many.len - 1].name);
 }
