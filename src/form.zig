@@ -354,7 +354,8 @@ pub fn setChecked(upd: *Update, field: Field, widget: usize, on: bool) Error!voi
     for (field.widgets, 0..) |w, i| {
         const state: []const u8 = if (field.kind == .radio)
             (if (i == widget) w.on_state else "Off")
-        else if (on) w.on_state else "Off";
+            // Check boxes that share the chosen state go on together.
+        else if (on and std.mem.eql(u8, w.on_state, chosen)) w.on_state else "Off";
         if (w.num == field.num) {
             fd = try write.dictWith(a, fd, "AS", .{ .name = try a.dupe(u8, state) });
         } else if (w.num != 0) {
@@ -1058,4 +1059,33 @@ test "a font name needing escapes is found and written correctly" {
     const ap = upd.get(upd.get(4).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
     try testing.expect(std.mem.indexOf(u8, ap.data, "/Arial#20Bold 12.00 Tf") != null);
     try testing.expectEqual(@as(u32, 5), ap.dict.get("Resources").?.dict.get("Font").?.dict.get("Arial Bold").?.ref.num);
+}
+
+test "check boxes: only those with the chosen on state are turned on" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 8 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /FT /Btn /T (multi) /Kids [5 0 R 6 0 R 7 0 R] >>",
+        "<< /Subtype /Widget /Parent 4 0 R /Rect [0 0 9 9] /AP << /N << /A 9 0 R /Off 9 0 R >> >> >>",
+        "<< /Subtype /Widget /Parent 4 0 R /Rect [0 0 9 9] /AP << /N << /B 9 0 R /Off 9 0 R >> >> >>",
+        "<< /Subtype /Widget /Parent 4 0 R /Rect [0 0 9 9] /AP << /N << /A 9 0 R /Off 9 0 R >> >> >>",
+        "<< /Subtype /Widget /FT /Btn /T (single) /Rect [0 0 9 9] /AP << /N 9 0 R >> >>",
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 9 9] /Length 0 >>\nstream\n\nendstream",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setChecked(&upd, findField(all, "multi").?, 0, true);
+    // The boxes that share the on state go on together; the other stays off.
+    for ([_]struct { u32, []const u8 }{ .{ 5, "A" }, .{ 6, "Off" }, .{ 7, "A" } }) |want| {
+        try testing.expectEqualStrings(want[1], upd.get(want[0]).asDict().?.get("AS").?.name);
+    }
 }
