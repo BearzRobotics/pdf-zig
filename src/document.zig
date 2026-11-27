@@ -152,13 +152,17 @@ pub const Document = struct {
             visited.put(self.a(), off, {}) catch return false;
             sections += 1;
             if (sections > self.options.max_sections) return false;
-            const t = self.readXrefSection(off) orelse return false;
+            var table_free: std.ArrayList(u32) = .empty;
+            const t = self.readXrefSection(off, &table_free) orelse return false;
             trailers.append(self.a(), t) catch return false;
             // Hybrid-reference files: the stream's entries come before /Prev (7.5.8.4).
             if (t.get("XRefStm")) |xs| if (xs.asInt()) |xo| if (xo >= 0 and !visited.contains(@intCast(xo))) {
                 visited.put(self.a(), @intCast(xo), {}) catch return false;
-                _ = self.readXrefSection(@intCast(xo)) orelse return false;
+                _ = self.readXrefSection(@intCast(xo), &table_free) orelse return false;
             };
+            // A hybrid file's table marks the objects hidden from old readers
+            // as free; the stream above has already supplied those.
+            for (table_free.items) |num| self.addEntry(num, .free);
             offset = if (t.get("Prev")) |p| (if (p.asInt()) |pi| (if (pi >= 0) @as(?u64, @intCast(pi)) else null) else null) else null;
         }
         if (trailers.items.len == 0) return false;
@@ -193,12 +197,13 @@ pub const Document = struct {
 
     /// One cross-reference section (a table with its trailer, or a stream).
     /// Adds entries that are not already known (newer sections come first).
-    fn readXrefSection(self: *Document, offset: u64) ?Dict {
+    /// The free entries of a table are returned in `table_free` and not added.
+    fn readXrefSection(self: *Document, offset: u64, table_free: *std.ArrayList(u32)) ?Dict {
         const pos = self.base + offset;
         if (pos >= self.data.len) return null;
         var p = object.Parser.init(self.a(), self.data, pos);
         p.skipWs();
-        if (p.eatKeyword("xref")) return self.readXrefTable(&p);
+        if (p.eatKeyword("xref")) return self.readXrefTable(&p, table_free);
         return self.readXrefStream(pos);
     }
 
@@ -208,7 +213,7 @@ pub const Document = struct {
         if (!gop.found_existing) gop.value_ptr.* = e;
     }
 
-    fn readXrefTable(self: *Document, p: *object.Parser) ?Dict {
+    fn readXrefTable(self: *Document, p: *object.Parser, table_free: *std.ArrayList(u32)) ?Dict {
         while (true) {
             const save = p.pos;
             const t1 = p.token() orelse return null;
@@ -231,7 +236,7 @@ pub const Document = struct {
                 if (kind.len == 1 and kind[0] == 'n') {
                     self.addEntry(num, .{ .in_use = .{ .offset = off, .gen = @intCast(@min(gen, 65535)) } });
                 } else if (kind.len == 1 and kind[0] == 'f') {
-                    self.addEntry(num, .free);
+                    table_free.append(self.a(), num) catch return null;
                 } else return null;
             }
         }

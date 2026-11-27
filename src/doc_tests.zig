@@ -429,3 +429,33 @@ test "openReader frees everything when opening fails" {
     // testing.allocator reports any leak.
     try testing.expectError(error.NoCatalog, pdf.Document.openReader(testing.allocator, &r, .{}));
 }
+
+test "hybrid file: /XRefStm supplies the objects its table marks free" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Object 3 lives in object stream 4 and is listed only by the xref stream 5.
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "%PDF-1.5\n");
+    var off: [6]usize = @splat(0);
+    const bodies = [_]struct { usize, []const u8 }{
+        .{ 1, "<< /Type /Catalog /Pages 2 0 R >>" },
+        .{ 2, "<< /Type /Pages /Kids [] /Count 0 >>" },
+        .{ 4, "<< /Type /ObjStm /N 1 /First 4 /Length 12 >>\nstream\n3 0 (hidden)\nendstream" },
+        .{ 5, "<< /Type /XRef /Size 6 /Index [3 1] /W [1 1 1] /Length 3 >>\nstream\n\x02\x04\x00\nendstream" },
+    };
+    for (bodies) |b| {
+        off[b[0]] = out.items.len;
+        try out.print(a, "{d} 0 obj\n{s}\nendobj\n", .{ b[0], b[1] });
+    }
+    const table = out.items.len;
+    try out.appendSlice(a, "xref\n0 6\n0000000000 65535 f \n");
+    for (1..6) |i| try out.print(a, "{d:0>10} 00000 {c} \n", .{ off[i], @as(u8, if (i == 3) 'f' else 'n') });
+    try out.print(a, "trailer\n<< /Size 6 /Root 1 0 R /XRefStm {d} >>\nstartxref\n{d}\n%%EOF\n", .{ off[5], table });
+    var doc = try pdf.Document.open(testing.allocator, out.items, .{});
+    defer doc.deinit();
+    try testing.expect(!doc.repaired);
+    try testing.expectEqualStrings("hidden", doc.getObject(3).string);
+    // Object 0, free in the table and absent from the stream, stays free.
+    try testing.expect(doc.getObject(0) == .null);
+}
