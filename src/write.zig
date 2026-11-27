@@ -341,7 +341,10 @@ pub const Update = struct {
         if (doc.repaired) return error.Repaired;
         try doc.checkMemory(self.oom_at_init);
         const prev = lastStartxref(doc.data) orelse return error.Repaired;
-        const use_stream = if (doc.trailer.get("Type")) |t| (t == .name and std.mem.eql(u8, t.name, "XRef")) else false;
+        // The same form as the file's last section. (The merged trailer mixes
+        // the keys of all revisions, so it cannot say.)
+        const last_section = std.mem.trimStart(u8, doc.data[@min(doc.data.len, doc.base +| prev)..], &std.ascii.whitespace);
+        const use_stream = !std.mem.startsWith(u8, last_section, "xref");
 
         var sec: Io.Writer.Allocating = .init(gpa);
         defer sec.deinit();
@@ -740,4 +743,25 @@ test "text strings: PDFDocEncoding, UTF-8 and language escapes" {
         defer a.free(got);
         try testing.expectEqualStrings(c[1], got);
     }
+}
+
+test "the update's cross-reference form follows the file's last section" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // A classic update on top of a file whose trailer says it was a stream.
+    const base = try tests.page(aa, "0 g", "", &.{}, "");
+    const bytes = try std.mem.replaceOwned(u8, aa, base, "/Root 1 0 R >>", "/Root 1 0 R /Type /XRef >>");
+    var doc = try document.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    _ = try upd.add(.null);
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try upd.write(a, &out.writer);
+    const added = out.written()[bytes.len..];
+    try testing.expect(std.mem.indexOf(u8, added, "\nxref\n") != null);
+    try testing.expect(std.mem.indexOf(u8, added, "/XRef") == null);
 }
