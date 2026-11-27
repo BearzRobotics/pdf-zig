@@ -68,6 +68,7 @@ pub const Document = struct {
     data: []const u8,
     options: Options,
     /// Offset of `%PDF-` in the file; cross-reference offsets are relative to it.
+    /// Zero once the file has been repaired (the rebuilt offsets are absolute).
     base: usize = 0,
     xref: std.AutoHashMapUnmanaged(u32, XrefEntry) = .empty,
     trailer: Dict = .{},
@@ -633,6 +634,9 @@ pub const Document = struct {
     /// and `trailer` (the usual recovery of viewers). Replaces the table.
     pub fn rebuild(self: *Document) Error!void {
         self.repaired = true;
+        // The scan records positions in the whole file, so that objects before
+        // the `%PDF-` header are kept too.
+        self.base = 0;
         self.xref = .empty;
         self.cache = .empty;
         self.objstms = .empty;
@@ -661,7 +665,7 @@ pub const Document = struct {
             const gen = std.fmt.parseInt(u32, d[gen_start..gen_end], 10) catch continue;
             if (num >= self.options.max_objects) continue;
             // Later definitions of an object replace earlier ones.
-            self.xref.put(self.a(), num, .{ .in_use = .{ .offset = j - self.base, .gen = @intCast(@min(gen, 65535)) } }) catch return error.OutOfMemory;
+            self.xref.put(self.a(), num, .{ .in_use = .{ .offset = j, .gen = @intCast(@min(gen, 65535)) } }) catch return error.OutOfMemory;
         }
 
         // Trailer dictionaries: `trailer << ... >>` and the dictionaries of xref streams.

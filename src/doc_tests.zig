@@ -330,3 +330,12 @@ test "xref stream /Index and /Size larger than u32 do not crash" {
         try testing.expectError(error.NoCatalog, pdf.Document.open(testing.allocator, bytes, .{}));
     }
 }
+
+test "repair finds objects that sit before the %PDF- header" {
+    // No usable xref, so the file is scanned; the objects come before the header.
+    const bytes = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n%PDF-1.7\n";
+    var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    try testing.expect(doc.repaired);
+    try testing.expectEqualStrings("Pages", doc.getName(doc.getObject(2).asDict().?, "Type").?);
+}
