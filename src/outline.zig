@@ -291,25 +291,33 @@ pub fn remove(upd: *write.Update, num: u32) EditError!void {
     try upd.set(at.parent.num, .{ .dict = try recount(upd, parent) });
 }
 
+/// The `/Count` of `d`, direct or indirect.
+fn countOf(upd: *write.Update, d: Dict) ?i64 {
+    const v = d.get("Count") orelse return null;
+    return switch (v) {
+        .ref => |r| upd.get(r.num).asInt(),
+        else => v.asInt(),
+    };
+}
+
 /// `d` with `/Count` set from its children: the number of visible descendants
 /// (open children count themselves and their own `/Count`). The sign of the old
-/// count says whether `d` is open; no count means open for the root.
+/// count says whether `d` is open; no count means open for the root. The result
+/// is at most `max_items`, whatever the counts in the file claim.
 fn recount(upd: *write.Update, d: Dict) EditError!Dict {
     const a = upd.allocator();
     var n: i64 = 0;
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
     var cursor = refOf(d.get("First"));
-    var steps: usize = 0;
-    while (cursor) |c| : (steps += 1) {
-        if (steps > max_items) break;
-        n += 1;
+    while (cursor) |c| {
+        if (seen.count() >= max_items or (try seen.getOrPut(a, c.num)).found_existing) break;
         const cd = upd.get(c.num).asDict() orelse break;
-        if (cd.get("Count")) |cnt| if (cnt.asInt()) |v| {
-            if (v > 0) n += v;
-        };
+        const below = std.math.clamp(countOf(upd, cd) orelse 0, 0, max_items);
+        n = @min(n + 1 + below, max_items);
         cursor = refOf(cd.get("Next"));
     }
     if (n == 0) return write.dictWithout(a, d, "Count");
-    const closed = if (d.get("Count")) |cnt| (cnt.asInt() orelse 1) < 0 else false;
+    const closed = (countOf(upd, d) orelse 1) < 0;
     return write.dictWith(a, d, "Count", .{ .integer = if (closed) -n else n });
 }
 
@@ -498,4 +506,27 @@ test "remove takes the parent and the previous item from the tree, not from the 
     try testing.expectEqual(@as(?i64, 2), upd.get(4).asDict().?.get("Count").?.asInt());
     // It is gone: a second call must not find it.
     try testing.expectError(error.NoSuchItem, remove(&upd, 6));
+}
+
+test "recount survives hostile /Count values and /Next loops" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try tests.buildFile(arena.allocator(), &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+        "<< /First 5 0 R /Last 6 0 R >>",
+        "<< /Title (a) /Parent 4 0 R /Count 9223372036854775807 /Next 6 0 R >>",
+        // An indirect /Count, and a /Next that loops back.
+        "<< /Title (b) /Parent 4 0 R /Count 7 0 R /Next 5 0 R >>",
+        "9223372036854775807",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    _ = try add(&upd, 3, "c", null);
+    const count = upd.get(4).asDict().?.get("Count").?.asInt().?;
+    try testing.expect(count >= 2 and count <= max_items);
 }
