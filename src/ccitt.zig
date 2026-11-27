@@ -260,13 +260,17 @@ fn codeLine2d(a: Allocator, b: *Bits, ref: []const u32, cur: *std.ArrayList(u32)
     var a0: i64 = -1;
     var black = false; // the colour of the pixels at a0
     var steps: usize = 0;
+    // The first change on the reference line right of a0. Both only move
+    // forward, so one pass over the line serves all its modes.
+    var right: usize = 0;
     while (a0 < @as(i64, @intCast(cols))) {
         steps += 1;
         if (steps > cols * 2 + 16) return false;
         // b1: the first change on the reference line right of a0 to the colour opposite of `black`;
         // changes alternate: even index = white to black.
-        var bi: usize = if (black) 1 else 0;
-        while (bi < ref.len and @as(i64, ref[bi]) <= a0) bi += 2;
+        while (right < ref.len and @as(i64, ref[right]) <= a0) right += 1;
+        const parity: usize = if (black) 1 else 0;
+        const bi = if (right % 2 == parity) right else right + 1;
         const b1: i64 = if (bi < ref.len) ref[bi] else @intCast(cols);
         const b2: i64 = if (bi + 1 < ref.len) ref[bi + 1] else @intCast(cols);
         const mode = readMode(b) orelse return false;
@@ -387,4 +391,22 @@ test "the size limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.TooLarge, decode(arena.allocator(), "", .{ .k = -1, .columns = 1000, .rows = 1000 }, 100));
+}
+
+test "Group 4 rows with very many changes decode in linear time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cols = 1 << 19;
+    // Row 1: horizontal mode with runs of one, over and over. Each later row
+    // repeats it with one V0 per change. Searching the reference line from its
+    // start for every mode would take minutes.
+    var bits: std.ArrayList(u8) = .empty;
+    for (0..cols / 2) |_| try bits.appendSlice(a, "001" ++ "000111" ++ "010");
+    for (0..3 * cols) |_| try bits.append(a, '1');
+    const out = try decode(a, try packBits(a, bits.items), .{ .k = -1, .columns = cols, .rows = 4 }, 1 << 20);
+    const stride = cols / 8;
+    for (0..4) |row| {
+        for (out[row * stride ..][0..stride]) |byte| try std.testing.expectEqual(@as(u8, 0xAA), byte);
+    }
 }
