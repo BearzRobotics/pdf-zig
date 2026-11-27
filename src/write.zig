@@ -219,6 +219,8 @@ pub const Error = error{
     Encrypted,
     /// The file's cross-reference data was damaged and rebuilt when it was opened.
     Repaired,
+    /// No object number is left below `Options.max_objects`.
+    TooManyObjects,
     /// An object number that is neither in the file nor handed out by `add`.
     InvalidObject,
     OutOfMemory,
@@ -241,7 +243,11 @@ pub const Update = struct {
         if (doc.crypt != null) return error.Encrypted;
         if (doc.repaired) return error.Repaired;
         var top: u32 = 0;
-        if (doc.trailer.get("Size")) |s| top = @intCast(@max(0, @min(s.asInt() orelse 0, std.math.maxInt(u32) - 1)));
+        // `/Size` may be above the highest number in use. It is not followed to
+        // where new numbers would reach the limit on reading the file back.
+        if (doc.trailer.get("Size")) |s| if (std.math.cast(u32, s.asInt() orelse 0)) |size| {
+            if (size <= doc.options.max_objects -| 65536) top = size;
+        };
         var it = doc.xref.keyIterator();
         while (it.next()) |k| top = @max(top, k.* + 1);
         return .{ .doc = doc, .arena = std.heap.ArenaAllocator.init(gpa), .next = top, .oom_at_init = doc.oom_events };
@@ -258,8 +264,9 @@ pub const Update = struct {
     }
 
     /// Adds a new indirect object and returns its reference.
-    pub fn add(self: *Update, o: Object) Allocator.Error!Ref {
+    pub fn add(self: *Update, o: Object) (Allocator.Error || error{TooManyObjects})!Ref {
         const num = self.next;
+        if (num >= self.doc.options.max_objects) return error.TooManyObjects;
         self.next += 1;
         try self.changed.put(self.allocator(), num, o);
         return .{ .num = num };
@@ -323,6 +330,8 @@ pub const Update = struct {
             sw.writeAll("\nendobj\n") catch return error.WriteFailed;
         }
 
+        // A cross-reference stream is an object itself.
+        if (use_stream and self.next >= doc.options.max_objects) return error.TooManyObjects;
         const size = self.next + @intFromBool(use_stream);
         const xref_pos = file_len + sw.end;
         if (use_stream) {
@@ -611,4 +620,48 @@ test "a repair that happens during editing stops the write" {
     defer out.deinit();
     try testing.expectError(error.Repaired, upd.write(a, &out.writer));
     try testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "a trailer /Size beyond the object limit is not used to number new objects" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const good = try tests.page(aa, "0 g", "", &.{}, "");
+    for ([_][]const u8{ "4294967295", "9000000", "8000000", "-1" }) |size| {
+        const bytes = try std.mem.replaceOwned(u8, aa, good, "/Size 5", try std.fmt.allocPrint(aa, "/Size {s}", .{size}));
+        var doc = try document.Document.open(a, bytes, .{});
+        defer doc.deinit();
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        const first = try upd.add(.{ .integer = 1 });
+        const second = try upd.add(.{ .integer = 2 });
+        try testing.expectEqual(@as(u32, 5), first.num);
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        var doc2 = try document.Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        try testing.expectEqual(@as(?i64, 2), doc2.getObject(second.num).asInt());
+    }
+    // An honest /Size above the highest object number is still respected.
+    const bytes = try std.mem.replaceOwned(u8, aa, good, "/Size 5", "/Size 40");
+    var doc = try document.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    try testing.expectEqual(@as(u32, 40), (try upd.add(.null)).num);
+}
+
+test "adding past the object limit is an error" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try document.Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, ""), .{ .max_objects = 7 });
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    _ = try upd.add(.null);
+    _ = try upd.add(.null);
+    try testing.expectError(error.TooManyObjects, upd.add(.null));
 }
