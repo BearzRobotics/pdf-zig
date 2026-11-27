@@ -322,8 +322,9 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
 
 /// Adds a text box: `meta.contents` written in Helvetica at `size` points in
 /// `meta.color`, wrapped to the box (`x`, `y`, `w`, `h` on the displayed page,
-/// from its top left). Line breaks are kept; characters outside WinAnsi are
-/// drawn as `?` (the text itself keeps them).
+/// from its top left) and upright however the page is rotated. Line breaks are
+/// kept; characters outside WinAnsi are drawn as `?` (the text itself keeps
+/// them).
 pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta: Meta) Error!Ref {
     if (page.num == 0) return error.DirectPage;
     if (w <= 0 or h <= 0 or size <= 0) return error.BadGeometry;
@@ -332,12 +333,52 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
     const p0 = inv.apply(x, y);
     const p1 = inv.apply(x + w, y + h);
     const rect = [4]f64{ @min(p0.x, p1.x), @min(p0.y, p1.y), @max(p0.x, p1.x), @max(p0.y, p1.y) };
-    const bw = rect[2] - rect[0];
-    const bh = rect[3] - rect[1];
+
+    const c = meta.color;
+    const color_ops = try std.fmt.allocPrint(a, "{d:.3} {d:.3} {d:.3} rg", .{ c[0], c[1], c[2] });
+    const made = try freeTextAppearance(upd, rect, page.rotate, size, color_ops, meta.contents);
+    const da = try std.fmt.allocPrint(a, "/Helv {d:.2} Tf {s}", .{ size, color_ops });
+    const dr = try write.makeDict(a, &.{.{ "Font", .{ .dict = made.fonts } }});
+    const border = try write.makeDict(a, &.{.{ "W", .{ .integer = 0 } }});
+
+    var entries: std.ArrayList(object.Entry) = .empty;
+    try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
+    try entries.append(a, .{ .key = "Subtype", .value = .{ .name = "FreeText" } });
+    try entries.append(a, .{ .key = "Rect", .value = try write.numbers(a, &rect) });
+    try entries.append(a, .{ .key = "DA", .value = .{ .string = da } });
+    try entries.append(a, .{ .key = "DR", .value = .{ .dict = dr } });
+    try entries.append(a, .{ .key = "BS", .value = .{ .dict = border } });
+    try entries.append(a, .{ .key = "F", .value = .{ .integer = 4 } }); // Print
+    if (page.rotate != 0) try entries.append(a, .{ .key = "Rotate", .value = .{ .integer = page.rotate } });
+    try appendMeta(a, &entries, meta);
+    const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = made.form } }});
+    try entries.append(a, .{ .key = "AP", .value = .{ .dict = ap_dict } });
+    const annot = try upd.add(.{ .dict = .{ .entries = entries.items } });
+    try attachToPage(upd, page, annot);
+    return annot;
+}
+
+const FreeTextAppearance = struct { form: Ref, fonts: Dict };
+
+/// The appearance of a text box covering `rect` (user space) on a page turned
+/// `rotate` degrees: `contents` laid out as it will be read, then turned in
+/// user space so that the page's rotation brings it upright.
+fn freeTextAppearance(upd: *Update, rect: [4]f64, rotate: u16, size: f64, color_ops: []const u8, contents: []const u8) Error!FreeTextAppearance {
+    const a = upd.allocator();
+    const sideways = rotate == 90 or rotate == 270;
+    // The box's width and height as displayed.
+    const bw = if (sideways) rect[3] - rect[1] else rect[2] - rect[0];
+    const bh = if (sideways) rect[2] - rect[0] else rect[3] - rect[1];
+    const matrix: [6]f64 = switch (rotate) {
+        90 => .{ 0, 1, -1, 0, rect[2], rect[1] },
+        180 => .{ -1, 0, 0, -1, rect[2], rect[3] },
+        270 => .{ 0, -1, 1, 0, rect[0], rect[3] },
+        else => .{ 1, 0, 0, 1, rect[0], rect[1] },
+    };
 
     // Lines: the text's own breaks, then a wrap at spaces to fit the box.
     const pad = 2.0;
-    const bytes = try forms.toWinAnsi(a, meta.contents);
+    const bytes = try forms.toWinAnsi(a, contents);
     var lines: std.ArrayList([]const u8) = .empty;
     var paras = std.mem.splitScalar(u8, bytes, '\n');
     while (paras.next()) |para| {
@@ -359,9 +400,8 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
         try lines.append(a, para[start..]);
     }
 
-    const c = meta.color;
     var ap: std.ArrayList(u8) = .empty;
-    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.2} Tf {d:.3} {d:.3} {d:.3} rg\n", .{ bw, bh, size, c[0], c[1], c[2] });
+    try ap.print(a, "q 0 0 {d:.2} {d:.2} re W n\nBT /Helv {d:.2} Tf {s}\n", .{ bw, bh, size, color_ops });
     const leading = size * 1.15;
     var baseline = bh - pad - size * 0.8;
     var first = true;
@@ -390,28 +430,11 @@ pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f6
         .{ "Type", .{ .name = "XObject" } },
         .{ "Subtype", .{ .name = "Form" } },
         .{ "BBox", try write.numbers(a, &.{ 0, 0, bw, bh }) },
-        .{ "Matrix", try write.numbers(a, &.{ 1, 0, 0, 1, rect[0], rect[1] }) },
+        .{ "Matrix", try write.numbers(a, &matrix) },
         .{ "Resources", .{ .dict = res } },
     });
-    const ap_form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
-    const da = try std.fmt.allocPrint(a, "/Helv {d:.2} Tf {d:.3} {d:.3} {d:.3} rg", .{ size, c[0], c[1], c[2] });
-    const dr = try write.makeDict(a, &.{.{ "Font", .{ .dict = fonts } }});
-    const border = try write.makeDict(a, &.{.{ "W", .{ .integer = 0 } }});
-
-    var entries: std.ArrayList(object.Entry) = .empty;
-    try entries.append(a, .{ .key = "Type", .value = .{ .name = "Annot" } });
-    try entries.append(a, .{ .key = "Subtype", .value = .{ .name = "FreeText" } });
-    try entries.append(a, .{ .key = "Rect", .value = try write.numbers(a, &rect) });
-    try entries.append(a, .{ .key = "DA", .value = .{ .string = da } });
-    try entries.append(a, .{ .key = "DR", .value = .{ .dict = dr } });
-    try entries.append(a, .{ .key = "BS", .value = .{ .dict = border } });
-    try entries.append(a, .{ .key = "F", .value = .{ .integer = 4 } }); // Print
-    try appendMeta(a, &entries, meta);
-    const ap_dict = try write.makeDict(a, &.{.{ "N", .{ .ref = ap_form } }});
-    try entries.append(a, .{ .key = "AP", .value = .{ .dict = ap_dict } });
-    const annot = try upd.add(.{ .dict = .{ .entries = entries.items } });
-    try attachToPage(upd, page, annot);
-    return annot;
+    const form = try upd.add(.{ .stream = .{ .dict = form_dict, .data = ap.items } });
+    return .{ .form = form, .fonts = fonts };
 }
 
 fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) Allocator.Error!void {
@@ -756,4 +779,39 @@ test "an /Annots array behind a chain of references keeps its entries" {
     var upd2 = try Update.init(a, &doc2);
     defer upd2.deinit();
     try remove(&upd2, pages.page(&doc2, pl2, 0).?, note.num);
+}
+
+test "a text box is upright and in place on rotated pages" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    for ([_]u16{ 0, 90, 180, 270 }) |rotate| {
+        const bytes = try tests.page(aa, "", "", &.{}, try std.fmt.allocPrint(aa, "/Rotate {d}", .{rotate}));
+        var doc = try Document.open(a, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        _ = try addFreeText(&upd, pages.page(&doc, pl, 0).?, 10, 20, 90, 40, 10, .{ .contents = "UPRIGHT BOX", .color = .{ 0, 0, 0 } });
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        var doc2 = try Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        const pl2 = try pages.PageList.build(&doc2);
+        var rend = interp.Renderer.init(&doc2, .{});
+        defer rend.deinit();
+        var dl = try rend.render(a, pages.page(&doc2, pl2, 0).?);
+        defer dl.deinit();
+        var lay = try text.layout(a, &dl);
+        defer lay.deinit(a);
+        try testing.expectEqualStrings("UPRIGHT BOX", std.mem.trim(u8, lay.text, "\n"));
+        // The first letter is at the top left of the requested box, on the
+        // displayed page, and the last is to its right on the same line.
+        const first = lay.boxes[0].rect;
+        const last = lay.boxes[lay.boxes.len - 1].rect;
+        try testing.expect(first.x0 > 10 and first.x0 < 15 and first.y0 > 18 and first.y1 < 36);
+        try testing.expect(last.x0 > first.x1 and last.x1 < 100 and @abs(last.y0 - first.y0) < 0.5);
+    }
 }
