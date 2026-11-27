@@ -67,6 +67,8 @@ pub const Renderer = struct {
 
     /// What the current page's display list and pattern cells hold so far.
     produced: struct { commands: usize = 0, glyphs: usize = 0, segments: usize = 0 } = .{},
+    /// Becomes `DisplayList.incomplete` for the current page.
+    left_out: bool = false,
 
     const StreamKey = struct { ptr: usize, len: usize };
 
@@ -93,6 +95,7 @@ pub const Renderer = struct {
         if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.arena.child_allocator);
         self.decoded = .empty;
         self.produced = .{};
+        self.left_out = false;
         defer {
             self.decoded = .empty;
             _ = self.scratch.?.reset(.{ .retain_with_limit = 4 << 20 });
@@ -107,6 +110,7 @@ pub const Renderer = struct {
         // Missing content must not pass for success.
         try self.doc.checkMemory(oom_before);
         list.commands = run.commands.items;
+        list.incomplete = self.left_out;
         return list;
     }
 
@@ -302,7 +306,8 @@ const Opn = enum {
     EX,
 };
 
-const max_gs_depth = 256;
+/// Deepest graphics state stack: `q` nesting, with forms and Type 3 glyphs.
+const max_gs_depth = 4096;
 
 const Run = struct {
     r: *Renderer,
@@ -419,7 +424,8 @@ const Run = struct {
     }
 
     fn save(self: *Run) Error!void {
-        if (self.stack.items.len >= max_gs_depth) return;
+        // Ignoring the save would restore the wrong state later.
+        if (self.stack.items.len >= max_gs_depth) return error.LimitExceeded;
         try self.stack.append(self.a, self.gs);
         try self.emit(.save);
     }
@@ -731,7 +737,10 @@ const Run = struct {
             return .{ .shading = .{ .shading = shading, .matrix = m } };
         }
         if (ptype != 1 or po != .stream) return .none;
-        if (self.depth >= self.r.options.max_depth) return .none;
+        if (self.depth >= self.r.options.max_depth) {
+            self.r.left_out = true;
+            return .none;
+        }
         const key: u64 = (@as(u64, num_id) << 32) | (if (rgb) |c| (@as(u64, @intFromFloat(c.r * 255)) << 16 | @as(u64, @intFromFloat(c.g * 255)) << 8 | @as(u64, @intFromFloat(c.b * 255)) | (1 << 24)) else 0);
         const bbox = self.rectOf(pd, "BBox") orelse return .none;
         const xstep = doc_.getNum(pd, "XStep") orelse (bbox[2] - bbox[0]);
@@ -750,7 +759,10 @@ const Run = struct {
             sub.gs.stroke.paint = .{ .color = c };
         }
         const res = doc_.getDict(pd, "Resources") orelse self.resources;
-        const data = self.contentData(po.stream) catch "";
+        const data = self.contentData(po.stream) catch blk: {
+            self.r.left_out = true;
+            break :blk "";
+        };
         try sub.interpret(data, res, .identity);
         self.ops = sub.ops;
         self.content_bytes = sub.content_bytes;
@@ -806,13 +818,16 @@ const Run = struct {
             .array => |arr| for (arr) |item| {
                 const fn_ = function.loadKept(doc_, item, true) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.BadFunction => continue,
+                    error.BadFunction => {
+                        self.r.left_out = true;
+                        continue;
+                    },
                 };
                 try funcs.append(self.a, fn_);
             },
             else => if (function.loadKept(doc_, sd.get("Function").?, true)) |f1| try funcs.append(self.a, f1) else |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.BadFunction => {},
+                error.BadFunction => self.r.left_out = true,
             },
         };
         const n_stops = 64;
@@ -931,14 +946,21 @@ const Run = struct {
 
     /// Type 3 glyphs are content streams run with the font matrix (9.6.5).
     fn type3Run(self: *Run, f: *const font_mod.Font, glyphs: []const display.Glyph, run_tm: Matrix) Error!void {
-        if (self.depth >= self.r.options.max_depth) return;
+        // A glyph is drawn inside its own q and Q, like a form.
+        if (self.depth >= self.r.options.max_depth) {
+            self.r.left_out = true;
+            return;
+        }
         const doc_ = self.doc();
         for (glyphs) |g| {
             if (g.code >= 256) continue;
             const gname = f.names[g.code] orelse continue;
             const proc = doc_.get(f.char_procs, gname) orelse continue;
             if (proc != .stream) continue;
-            const data = self.contentData(proc.stream) catch continue;
+            const data = self.contentData(proc.stream) catch {
+                self.r.left_out = true;
+                continue;
+            };
             // Glyph space to user space: FontMatrix, then size, scaling and rise, then Tm and CTM.
             const trm = Matrix{ .a = self.gs.size * self.gs.th, .d = self.gs.size, .f = self.gs.rise };
             // The glyph's offset is already in text space (9.4.4): it comes after
@@ -1023,7 +1045,10 @@ const Run = struct {
     }
 
     fn formOp(self: *Run, st: object.Stream, num_id: u32) Error!void {
-        if (self.depth >= self.r.options.max_depth) return;
+        if (self.depth >= self.r.options.max_depth) {
+            self.r.left_out = true;
+            return;
+        }
         if (num_id != 0) {
             if (self.active_forms.contains(num_id)) return; // a form that draws itself
             try self.active_forms.put(self.a, num_id, {});
@@ -1032,7 +1057,10 @@ const Run = struct {
             _ = self.active_forms.remove(num_id);
         };
         const doc_ = self.doc();
-        const data = self.contentData(st) catch return;
+        const data = self.contentData(st) catch {
+            self.r.left_out = true;
+            return;
+        };
         const res = doc_.getDict(st.dict, "Resources") orelse self.resources;
         const m = self.matrixOf(st.dict, "Matrix");
         try self.save();

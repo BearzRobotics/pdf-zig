@@ -28,6 +28,10 @@ operation rather than per nesting level, and is far above what real files need.
 - **Output** (`interp.Options.max_commands`, `max_glyphs`,
   `max_path_segments`): counted once for the page, pattern cells included. A
   limit reached inside a cell fails the page.
+- **Graphics state** (`interp.zig`): 4096 levels. A deeper `q` fails the page
+  rather than being ignored, which would restore the wrong state later.
+  Forms, patterns and Type 3 glyphs nested beyond `max_depth` are left out and
+  `DisplayList.incomplete` is set, as it is for content that cannot be decoded.
 - **Filter chains** (`filters.zig`): at most 16 filters, and the stages
   together may produce about twice `max_stream_bytes`.
 - **Page contents** (`pages.zig`): for a `/Contents` array,

@@ -221,6 +221,10 @@ pub const DisplayList = struct {
     /// Size of the displayed page in points.
     width: f64 = 0,
     height: f64 = 0,
+    /// Something on the page was left out: a stream that could not be decoded,
+    /// a function that could not be read, or nesting beyond the limits. The
+    /// rest of the page was interpreted as usual.
+    incomplete: bool = false,
 
     pub fn deinit(self: *DisplayList) void {
         self.arena.deinit();

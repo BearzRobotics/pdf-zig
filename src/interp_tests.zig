@@ -907,3 +907,48 @@ test "marked content opened or closed in a form stays in the form" {
     defer done(r2);
     try testing.expectEqual(@as(usize, 1), countKind(r2.list, .fill));
 }
+
+test "deeply nested q keeps the right state, and too deep is an error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qs: [256][]const u8 = @splat("q");
+    const stream = try std.fmt.allocPrint(a, "{s} 0 1 0 rg q 1 0 0 rg Q 0 0 1 1 re f", .{try std.mem.join(a, " ", &qs)});
+    const r = try render(try page(a, stream, "", &.{}, ""));
+    defer done(r);
+    for (r.list.commands) |c| if (c == .fill) {
+        try testing.expectEqual(@as(f32, 1), c.fill.paint.color.g);
+        try testing.expectEqual(@as(f32, 0), c.fill.paint.color.r);
+    };
+    try testing.expectEqual(countKind(r.list, .save), countKind(r.list, .restore));
+    const too_many: [5000][]const u8 = @splat("q");
+    try testing.expectError(error.LimitExceeded, renderCost(try page(a, try std.mem.join(a, " ", &too_many), "", &.{}, ""), .{}));
+}
+
+test "a display list says when something was left out" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const good = "<< /Subtype /Form /BBox [0 0 9 9] /Length 12 >>\nstream\n0 0 1 1 re f\nendstream";
+    const bad = "<< /Subtype /Form /BBox [0 0 9 9] /Filter /NoSuchDecode /Length 1 >>\nstream\nx\nendstream";
+    {
+        const r = try render(try page(a, "/F Do", "/XObject << /F 5 0 R >>", &.{good}, ""));
+        defer done(r);
+        try testing.expect(!r.list.incomplete);
+    }
+    {
+        const r = try render(try page(a, "/F Do 0 0 1 1 re f", "/XObject << /F 5 0 R >>", &.{bad}, ""));
+        defer done(r);
+        try testing.expect(r.list.incomplete);
+        try testing.expectEqual(@as(usize, 1), countKind(r.list, .fill));
+    }
+    // A form nested deeper than max_depth is left out, and said to be.
+    var doc = try pdf.Document.open(testing.allocator, try page(a, "/F Do", "/XObject << /F 5 0 R >>", &.{good}, ""), .{});
+    defer doc.deinit();
+    const pl = try pdf.pages.PageList.build(&doc);
+    var rend = pdf.Renderer.init(&doc, .{ .max_depth = 0 });
+    defer rend.deinit();
+    var dl = try rend.render(testing.allocator, pdf.pages.page(&doc, pl, 0).?);
+    defer dl.deinit();
+    try testing.expect(dl.incomplete);
+}
