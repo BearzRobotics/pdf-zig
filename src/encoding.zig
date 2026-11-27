@@ -3,9 +3,10 @@
 //!
 //! An encoding maps a one-byte character code to a Unicode code point. The
 //! tables cover the Latin repertoire of StandardEncoding, WinAnsiEncoding and
-//! MacRomanEncoding. Glyph names outside the Latin set are handled only in the
-//! forms `uniXXXX`, `uXXXX..XXXXXX` and `a_b` ligature names; anything else has
-//! no Unicode value here (text then comes from `/ToUnicode`).
+//! MacRomanEncoding. Names come from the Adobe Glyph List; beyond it the forms
+//! `uniXXXX` and `uXXXX..XXXXXX` are read. A glyph here stands for one code
+//! point, so of `uniXXXXYYYY` only the first is taken, and `a_b` ligature
+//! names have no value (text then comes from `/ToUnicode`).
 
 const std = @import("std");
 const agl = @import("agl.zig");
@@ -89,12 +90,29 @@ pub fn unicodeOfName(name: []const u8) ?u21 {
     if (base.len == 1 and base[0] > 0x20 and base[0] < 0x7F) return base[0];
     if (agl.glyphNameToUnicode(base)) |u| return u;
     if (std.mem.startsWith(u8, base, "uni") and base.len >= 7) {
-        return std.fmt.parseInt(u21, base[3..7], 16) catch null;
+        return scalarFromHex(base[3..7]);
     }
     if (base.len >= 5 and base[0] == 'u' and base.len <= 7) {
-        return std.fmt.parseInt(u21, base[1..], 16) catch null;
+        return scalarFromHex(base[1..]);
     }
     return null;
+}
+
+/// The code point written in `digits`, which the glyph naming convention
+/// requires to be upper-case hexadecimal; null for surrogates and values past
+/// the end of Unicode. (So the word `uface` is not U+FACE.)
+fn scalarFromHex(digits: []const u8) ?u21 {
+    var value: u32 = 0;
+    for (digits) |c| {
+        const digit: u8 = switch (c) {
+            '0'...'9' => c - '0',
+            'A'...'F' => c - 'A' + 10,
+            else => return null,
+        };
+        value = value * 16 + digit;
+    }
+    if (value > 0x10FFFF or (value >= 0xD800 and value < 0xE000)) return null;
+    return @intCast(value);
 }
 
 /// The glyph name for a code point (the first match in `names`), or null.
@@ -269,5 +287,13 @@ test "every WinAnsi, MacRoman and Standard code with a value has a glyph name" {
                 return error.TestUnexpectedResult;
             }
         }
+    }
+}
+
+test "uni and u glyph names need upper-case hex naming a real character" {
+    try std.testing.expectEqual(@as(?u21, 0xFACE), unicodeOfName("uniFACE"));
+    try std.testing.expectEqual(@as(?u21, 0x1F600), unicodeOfName("u1F600"));
+    for ([_][]const u8{ "uface", "unifaCE", "uni+041", "u+0041", "uD800", "uniDFFF", "u110000", "uFFFFFF" }) |name| {
+        try std.testing.expectEqual(@as(?u21, null), unicodeOfName(name));
     }
 }
