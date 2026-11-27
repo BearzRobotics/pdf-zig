@@ -447,7 +447,9 @@ pub const Update = struct {
         try all_nums.append(gpa, own);
         try all_offsets.append(gpa, xref_pos);
 
-        // /W [1 4 2]: type, offset, generation.
+        // /W [1 4 2]: type, offset, generation; eight bytes of offset for
+        // files past 4 GiB. The stream's own offset is the largest.
+        const offset_width: u4 = if (xref_pos > std.math.maxInt(u32)) 8 else 4;
         var data: std.ArrayList(u8) = .empty;
         var index: std.ArrayList(Object) = .empty;
         var i: usize = 0;
@@ -457,13 +459,16 @@ pub const Update = struct {
             try index.append(a, .{ .integer = all_nums.items[i] });
             try index.append(a, .{ .integer = @intCast(j - i) });
             for (i..j) |k| {
-                const off: u32 = @intCast(all_offsets.items[k]);
                 const gen = self.generation(all_nums.items[k]);
-                try data.appendSlice(a, &.{ 1, @intCast(off >> 24), @intCast((off >> 16) & 0xFF), @intCast((off >> 8) & 0xFF), @intCast(off & 0xFF), @intCast(gen >> 8), @intCast(gen & 0xFF) });
+                var offset: [8]u8 = undefined;
+                std.mem.writeInt(u64, &offset, all_offsets.items[k], .big);
+                try data.append(a, 1);
+                try data.appendSlice(a, offset[8 - @as(usize, offset_width) ..]);
+                try data.appendSlice(a, &.{ @intCast(gen >> 8), @intCast(gen & 0xFF) });
             }
             i = j;
         }
-        const widths = try a.dupe(Object, &.{ .{ .integer = 1 }, .{ .integer = 4 }, .{ .integer = 2 } });
+        const widths = try a.dupe(Object, &.{ .{ .integer = 1 }, .{ .integer = offset_width }, .{ .integer = 2 } });
         var entries: std.ArrayList(Entry) = .empty;
         try entries.append(a, .{ .key = "Type", .value = .{ .name = "XRef" } });
         try entries.append(a, .{ .key = "Size", .value = .{ .integer = size } });

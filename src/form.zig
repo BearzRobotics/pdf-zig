@@ -570,9 +570,10 @@ fn winAnsiByte(u: u21) u8 {
 /// a tab becomes a space.
 pub fn toWinAnsi(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
     var view = std.unicode.Utf8View.init(utf8) catch {
         for (utf8) |c| try out.append(a, if (c == '\n' or (c >= 0x20 and c < 0x80)) c else '?');
-        return out.items;
+        return out.toOwnedSlice(a);
     };
     var it = view.iterator();
     var prev_cr = false;
@@ -586,7 +587,7 @@ pub fn toWinAnsi(a: Allocator, utf8: []const u8) Allocator.Error![]u8 {
             else => try out.append(a, winAnsiByte(cp)),
         }
     }
-    return out.items;
+    return out.toOwnedSlice(a);
 }
 
 test "line breaks survive the WinAnsi conversion, so multi-line fields break" {
@@ -1310,4 +1311,17 @@ test "widgets that cannot be updated are reported, and keep their place" {
     // A list box loses the appearance that showed its old selection.
     try setChoice(&upd, findField(all, "list").?, "b");
     try testing.expect(upd.get(8).asDict().?.get("AP") == null);
+}
+
+test "toWinAnsi returns memory the caller can free, also when it fails" {
+    // testing.allocator checks the size of every free.
+    const out = try toWinAnsi(testing.allocator, "caf\u{e9} and more text to make the list grow past its length");
+    testing.allocator.free(out);
+    const invalid = try toWinAnsi(testing.allocator, "bad \xff utf-8");
+    testing.allocator.free(invalid);
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(a: Allocator) !void {
+            a.free(try toWinAnsi(a, "some text\r\nthat needs several allocations to be converted into bytes"));
+        }
+    }.run, .{});
 }
