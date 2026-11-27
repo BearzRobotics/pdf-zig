@@ -183,16 +183,25 @@ pub fn decode(a: Allocator, data: []const u8, p: Params, max: usize) Error![]u8 
     var cur: std.ArrayList(u32) = .empty;
     defer cur.deinit(a);
 
+    // Whether the rows begin with end-of-line codes, as the first one shows.
+    const marked = p.k >= 0 and blk: {
+        var first: Bits = .{ .data = data };
+        break :blk first.eol();
+    };
     var row: usize = 0;
     const limit: usize = if (p.rows > 0) p.rows else std.math.maxInt(usize);
     while (row < limit and bits.left() > 0) : (row += 1) {
-        if (p.byte_align) bits.alignByte();
+        // With end-of-line codes the fill bits come before each code, which
+        // then ends on a byte boundary: aligning first would cut into it.
+        // Without them the padding of the last row is skipped.
+        if (p.byte_align and !marked) bits.alignByte();
         cur.clearRetainingCapacity();
         var two_d = p.k < 0;
         if (p.k >= 0) {
             // Group 3: an optional end-of-line, then for K > 0 a tag bit.
-            _ = bits.eol();
+            const found = bits.eol();
             while (bits.eol()) {} // fill and repeated EOLs (a run of RTC)
+            if (p.byte_align and marked and !found) bits.alignByte();
             if (p.k > 0) {
                 if (bits.left() < 1) break;
                 two_d = bits.peek(1) == 0;
@@ -409,4 +418,14 @@ test "Group 4 rows with very many changes decode in linear time" {
     for (0..4) |row| {
         for (out[row * stride ..][0..stride]) |byte| try std.testing.expectEqual(@as(u8, 0xAA), byte);
     }
+}
+
+test "Group 3 with end-of-line codes and byte-aligned rows" {
+    // Ghostscript's CCITTFaxEncode of the rows C7 E0 (8 columns) with
+    // EndOfLine and EncodedByteAlign: fill bits end each EOL on a byte.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const data = "\x00\x01\x7a\x00\x01\x83";
+    const out = try decode(arena.allocator(), data, .{ .k = 0, .columns = 8, .rows = 2, .byte_align = true }, 1 << 10);
+    try std.testing.expectEqualSlices(u8, &.{ 0xC7, 0xE0 }, out);
 }
