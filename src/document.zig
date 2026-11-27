@@ -86,6 +86,12 @@ pub const Document = struct {
     /// How many objects are being read inside one another. Reading an object can
     /// need others (a stream's `/Length`, the object stream it is stored in).
     depth: u8 = 0,
+    /// Bytes read by object parses that then failed. A damaged construct can
+    /// run to the end of the file, so thousands of candidates would cost the
+    /// square of its length; see `parseWindow`.
+    failed_bytes: usize = 0,
+    /// The last search for `endstream`: nothing from `from` up to `at`.
+    endstream_search: struct { from: usize = 1, at: usize = 0 } = .{},
     /// Guards against references that lead back to the object being read.
     reading: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
@@ -323,7 +329,12 @@ pub const Document = struct {
         const gen = std.fmt.parseInt(u32, t2, 10) catch return null;
         if (expect) |e| if (e != num) return null;
 
-        const value = p.parseObject() catch return null;
+        p.src = self.parseWindow(p.pos);
+        const value = p.parseObject() catch {
+            self.failed_bytes +|= p.pos - pos;
+            return null;
+        };
+        p.src = self.data;
         if (value != .dict) return .{ .num = num, .gen = @intCast(@min(gen, 65535)), .value = value };
 
         const save = p.pos;
@@ -341,6 +352,31 @@ pub const Document = struct {
         return .{ .num = num, .gen = @intCast(@min(gen, 65535)), .value = .{ .stream = .{ .dict = dict, .data = data } } };
     }
 
+    /// The part of the file an object starting at `pos` is parsed in. That is
+    /// the whole file until failed parses have read several times its length.
+    /// From then on it ends at the next `obj` or `trailer`, which cuts off only
+    /// an object that has such a word inside a string.
+    fn parseWindow(self: *const Document, pos: usize) []const u8 {
+        if (self.failed_bytes <= 4 * self.data.len + 65536) return self.data;
+        var end = pos;
+        while (end < self.data.len) : (end += 1) {
+            if (std.mem.startsWith(u8, self.data[end..], "obj")) return self.data[0 .. end + 3];
+            if (std.mem.startsWith(u8, self.data[end..], "trailer")) break;
+        }
+        return self.data[0..end];
+    }
+
+    /// The position of the first `endstream` at or after `start`, or the length
+    /// of the file. Remembered, so that many streams without one do not each
+    /// search the rest of the file.
+    fn findEndstream(self: *Document, start: usize) usize {
+        const last = self.endstream_search;
+        if (start >= last.from and start <= last.at) return last.at;
+        const at = std.mem.indexOfPos(u8, self.data, start, "endstream") orelse self.data.len;
+        self.endstream_search = .{ .from = start, .at = at };
+        return at;
+    }
+
     /// The raw bytes of a stream whose data begins at `start`. `/Length` is used
     /// when it is right (`endstream` follows); otherwise the data runs to the
     /// next `endstream`.
@@ -356,7 +392,8 @@ pub const Document = struct {
                 }
             }
         }
-        const idx = std.mem.indexOfPos(u8, self.data, start, "endstream") orelse return self.data[start..];
+        const idx = self.findEndstream(start);
+        if (idx == self.data.len) return self.data[start..];
         var end = idx;
         if (end > start and self.data[end - 1] == '\n') end -= 1;
         if (end > start and self.data[end - 1] == '\r') end -= 1;
@@ -707,8 +744,11 @@ pub const Document = struct {
         i = 0;
         while (std.mem.indexOfPos(u8, d, i, "trailer")) |at| {
             i = at + 7;
-            var p = object.Parser.init(self.a(), d, at + 7);
-            const o = p.parseObject() catch continue;
+            var p = object.Parser.init(self.a(), self.parseWindow(at + 7), at + 7);
+            const o = p.parseObject() catch {
+                self.failed_bytes +|= p.pos - at;
+                continue;
+            };
             if (o.asDict()) |t| try trailers.append(self.a(), .{ .at = at, .value = t });
         }
         var it = self.xref.iterator();

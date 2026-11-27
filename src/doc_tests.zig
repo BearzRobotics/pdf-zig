@@ -547,3 +547,43 @@ fn pageText(a: Allocator, doc: *pdf.Document) ![]const u8 {
     defer dl.deinit();
     return pdf.text.extract(a, &dl, .reading);
 }
+
+/// Bytes requested from the allocator while `bytes` is opened.
+fn openCost(bytes: []const u8) !usize {
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    if (pdf.Document.open(counting.allocator(), bytes, .{})) |opened| {
+        var doc = opened;
+        doc.deinit();
+    } else |_| {}
+    return counting.allocated_bytes;
+}
+
+test "repair takes memory in proportion to the file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 3000;
+    // Every candidate starts a string that never ends.
+    for ([_][]const u8{ "trailer(\n", "{d} 0 obj (\n", "{d} 0 obj <<>> stream\n", "trailer [\n", "{d} 0 obj [[[[\n" }) |pattern| {
+        var file: std.ArrayList(u8) = .empty;
+        try file.appendSlice(a, "%PDF-1.7\n");
+        for (1..n) |i| {
+            var parts = std.mem.splitSequence(u8, pattern, "{d}");
+            try file.appendSlice(a, parts.first());
+            if (parts.next()) |rest| try file.print(a, "{d}{s}", .{ i, rest });
+        }
+        try testing.expect(try openCost(file.items) < 100 * file.items.len);
+    }
+}
+
+test "repair still reads objects that contain what looks like another object" {
+    // The title of object 2 mentions "7 0 obj" and "trailer".
+    var doc = try pdf.Document.open(testing.allocator, "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" ++
+        "2 0 obj\n<< /Type /Pages /Kids [] /Note (see 7 0 obj and the trailer below) /N 3 >>\nendobj\n" ++
+        "3 0 obj\n<< /Length 27 >>\nstream\n8 0 obj trailer << >> data\n\nendstream\nendobj\ntrailer\n<< /Root 1 0 R /T (a trailer) >>\n", .{});
+    defer doc.deinit();
+    try testing.expectEqual(@as(?i64, 3), doc.getObject(2).asDict().?.get("N").?.asInt());
+    try testing.expectEqualStrings("see 7 0 obj and the trailer below", doc.getObject(2).asDict().?.get("Note").?.string);
+    try testing.expectEqualStrings("8 0 obj trailer << >> data\n", doc.getObject(3).stream.data);
+    try testing.expectEqualStrings("a trailer", doc.trailer.get("T").?.string);
+}
