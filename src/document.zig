@@ -113,6 +113,8 @@ pub const Document = struct {
     color_spaces: std.AutoHashMapUnmanaged(usize, color.Space) = .empty,
     functions: std.AutoHashMapUnmanaged(usize, function.Function) = .empty,
     fonts: std.AutoHashMapUnmanaged(usize, *const font.Font) = .empty,
+    /// Decoded `/CIDToGIDMap` streams, by where their raw data is.
+    gid_maps: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
     /// How often an allocation has failed. Reading goes through functions that
     /// answer with a value, where a failure looks like a missing object.
     /// Nothing produced while this changed is cached, and the operations that

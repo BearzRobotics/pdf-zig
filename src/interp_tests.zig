@@ -764,3 +764,25 @@ test "a function tree that repeats references is loaded once per function" {
     const bytes = try page(a, "/CS0 cs 0.5 sc 0 0 1 1 re f", "/ColorSpace << /CS0 [/Separation /S /DeviceGray 5 0 R] >>", objects.items, "");
     try testing.expect(try renderCost(bytes, .{}) < 1 << 20);
 }
+
+test "gidOfCid decodes the CID to glyph map once" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 128 KiB of map, hex encoded; CID 1 is glyph 0x0102.
+    const hex = try a.alloc(u8, 262_144);
+    @memset(hex, '0');
+    @memcpy(hex[4..8], "0102");
+    const r = try render(try page(a, "BT /F1 10 Tf <0001> Tj ET", helv, &.{
+        "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /CIDToGIDMap 6 0 R >>] >>",
+        try std.fmt.allocPrint(a, "<< /Filter /AHx /Length {d} >>\nstream\n{s}>\nendstream", .{ hex.len + 1, hex }),
+    }, ""));
+    defer done(r);
+    const f = r.list.commands[0].text.font;
+    const before = r.doc.arena.queryCapacity();
+    for (0..500) |_| try testing.expectEqual(@as(u32, 0x0102), f.gidOfCid(&r.doc, 1));
+    try testing.expectEqual(@as(u32, 0), f.gidOfCid(&r.doc, 2));
+    // Past the end of the map: no glyph.
+    try testing.expectEqual(@as(u32, 0), f.gidOfCid(&r.doc, 70_000));
+    try testing.expect(r.doc.arena.queryCapacity() - before < 512 << 10);
+}

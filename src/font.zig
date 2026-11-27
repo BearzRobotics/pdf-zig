@@ -381,10 +381,26 @@ pub const Font = struct {
         return self.missing_width;
     }
 
+    /// Two bytes for each of the 65536 CIDs.
+    const max_gid_map = 2 * 65536;
+
+    /// The decoded `/CIDToGIDMap`, decoded when first asked for.
+    fn gidMap(doc: *Document, st: object.Stream) doc_mod.Error![]const u8 {
+        const key = @intFromPtr(st.data.ptr);
+        if (doc.gid_maps.get(key)) |map| return map;
+        var scratch = std.heap.ArenaAllocator.init(doc.arena.child_allocator);
+        defer scratch.deinit();
+        const decoded = try doc.streamDataIn(scratch.allocator(), st);
+        const a = doc.arena.allocator();
+        const map = try a.dupe(u8, decoded[0..@min(decoded.len, max_gid_map)]);
+        try doc.gid_maps.put(a, key, map);
+        return map;
+    }
+
     /// The glyph index a CID selects in a CIDFontType2 font (the CIDToGIDMap).
     pub fn gidOfCid(self: *const Font, doc: *Document, cid: u32) u32 {
         const st = self.cid_to_gid orelse return cid;
-        const data = doc.streamData(st) catch return cid;
+        const data = gidMap(doc, st) catch return cid;
         const at = @as(usize, cid) * 2;
         if (at + 1 >= data.len) return 0;
         return (@as(u32, data[at]) << 8) | data[at + 1];
