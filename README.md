@@ -64,8 +64,9 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 
 Form limits: a filled text field gets a new appearance with the widget's background,
 border and rotation. It uses the font `/DA` names if that font can write the text,
-else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text). Comb
-fields are not laid out as combs, and a widget's pressed appearance is dropped. The value
+else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text). A comb
+field gets one character per cell (without dividing lines). A widget's pressed appearance
+is dropped. The value
 of a password field is not stored in the file. A choice field stores the option's export
 value, and only an editable combo box takes other text. Signature fields are listed, not
 filled; XFA forms are not read; no scripts run.

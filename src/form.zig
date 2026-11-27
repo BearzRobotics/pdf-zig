@@ -47,6 +47,8 @@ const ff_radio: u32 = 1 << 15;
 const ff_push_button: u32 = 1 << 16;
 const ff_combo: u32 = 1 << 17;
 const ff_edit: u32 = 1 << 18;
+const ff_file_select: u32 = 1 << 20;
+const ff_comb: u32 = 1 << 24;
 
 /// One place a field is drawn.
 pub const Widget = struct {
@@ -76,6 +78,8 @@ pub const Field = struct {
     multiline: bool,
     password: bool,
     max_len: ?u32,
+    /// The text is laid out in `max_len` equal cells.
+    comb: bool,
     /// Choices of a combo or list box (display text).
     options: []const []const u8,
     /// The export value of each choice, which is what `value` and `/V` hold. It
@@ -222,6 +226,7 @@ const Walk = struct {
             try exports.append(a, exported);
         };
 
+        const max_len: ?u32 = if (inh.max_len) |m| (if (m > 0 and m < 1 << 24) @as(?u32, @intCast(m)) else null) else null;
         try self.out.append(a, .{
             .num = if (node == .ref) node.ref.num else 0,
             .name = name,
@@ -231,7 +236,9 @@ const Walk = struct {
             .required = ff & ff_required != 0,
             .multiline = ff & ff_multiline != 0,
             .password = ff & ff_password != 0,
-            .max_len = if (inh.max_len) |m| (if (m > 0 and m < 1 << 24) @as(?u32, @intCast(m)) else null) else null,
+            .max_len = max_len,
+            // Comb counts only with /MaxLen and none of these flags (table 228).
+            .comb = kind == .text and max_len != null and ff & ff_comb != 0 and ff & (ff_multiline | ff_password | ff_file_select) == 0,
             .options = try options.toOwnedSlice(a),
             .exports = try exports.toOwnedSlice(a),
             .editable = ff & ff_edit != 0,
@@ -337,7 +344,11 @@ fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) E
     for (field.widgets) |w| {
         if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
         const wd = upd.get(w.num).asDict() orelse continue;
-        const ap = try textAppearance(upd, w.rect, try widgetStyle(upd.doc, a, wd), shown, field.multiline, field.password, da);
+        const ap = try textAppearance(upd, w.rect, try widgetStyle(upd.doc, a, wd), shown, .{
+            .multiline = field.multiline,
+            .password = field.password,
+            .cells = if (field.comb) field.max_len else null,
+        }, da);
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
     }
 }
@@ -698,16 +709,42 @@ fn colorOperator(doc: *Document, a: Allocator, c: []const Object, names: [3][]co
 }
 
 /// A form XObject that draws `value` inside `rect` (placed at the widget's size).
-fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, multiline: bool, password: bool, da: DefaultAppearance) Error!Ref {
+/// Shows `text` after moving by `dx`, `dy` from where the last such move left
+/// off: `Td` is relative to the previous line's start.
+fn showAt(a: Allocator, content: *std.ArrayList(u8), text: []const u8, dx: f64, dy: f64) Allocator.Error!void {
+    try content.print(a, "{d:.2} {d:.2} Td\n", .{ dx, dy });
+    var sb: std.Io.Writer.Allocating = .init(a);
+    write.writeString(&sb.writer, text) catch return error.OutOfMemory;
+    try content.print(a, "{s} Tj\n", .{sb.written()});
+}
+
+/// How a field's text is arranged.
+const TextLayout = struct {
+    multiline: bool = false,
+    password: bool = false,
+    /// The number of cells of a comb field.
+    cells: ?u32 = null,
+};
+
+fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []const u8, layout: TextLayout, da: DefaultAppearance) Error!Ref {
     const a = upd.allocator();
+    const multiline = layout.multiline;
     // Width and height of the content, which a turned widget swaps.
     const sideways = style.rotate == 90 or style.rotate == 270;
     const w = if (sideways) rect.height() else rect.width();
     const h = if (sideways) rect.width() else rect.height();
     const pad = 2.0;
 
-    const bytes = try toWinAnsi(a, try shownText(a, value, password));
-    const size: f64 = if (da.size > 0) da.size else if (multiline) 12 else std.math.clamp(h - 2 * pad, 4, 12);
+    const bytes = try toWinAnsi(a, try shownText(a, value, layout.password));
+    const cell: f64 = if (layout.cells) |n| w / @as(f64, @floatFromInt(n)) else 0;
+    var size: f64 = if (da.size > 0) da.size else if (multiline) 12 else std.math.clamp(h - 2 * pad, 4, 12);
+    // An automatic size must also let the widest character fit its cell.
+    if (layout.cells != null and da.size <= 0) {
+        for (0..bytes.len) |i| {
+            const width = textWidth(bytes[i..][0..1], 1);
+            if (width * size > cell) size = @max(4, cell / width);
+        }
+    }
 
     // Lines: explicit breaks, and for multi-line fields a wrap at spaces.
     var lines: std.ArrayList([]const u8) = .empty;
@@ -734,18 +771,31 @@ fn textAppearance(upd: *Update, rect: pages.Rect, style: WidgetStyle, value: []c
     var y: f64 = if (multiline) h - pad - size else (h - size) / 2 + size * 0.22;
     var prev_x: f64 = 0;
     var prev_y: f64 = 0;
-    for (lines.items) |line| {
+    if (layout.cells) |n| {
+        // One character, centred, in each cell; /Q says which cells are used.
+        const used = @min(bytes.len, n);
+        const first: usize = switch (da.quad) {
+            1 => (n - used) / 2,
+            2 => n - used,
+            else => 0,
+        };
+        for (0..used) |i| {
+            const one = bytes[i..][0..1];
+            // Rounded as it will be written, so that the relative moves of many
+            // cells do not add their rounding errors up.
+            const x = @round((cell * (@as(f64, @floatFromInt(first + i)) + 0.5) - textWidth(one, size) / 2) * 100) / 100;
+            try showAt(a, &content, one, x - prev_x, y - prev_y);
+            prev_x = x;
+            prev_y = y;
+        }
+    } else for (lines.items) |line| {
         const lw = textWidth(line, size);
         const x: f64 = switch (da.quad) {
             1 => @max(pad, (w - lw) / 2),
             2 => @max(pad, w - pad - lw),
             else => pad,
         };
-        // Td moves relative to the previous line start.
-        try content.print(a, "{d:.2} {d:.2} Td\n", .{ x - prev_x, y - prev_y });
-        var sb: std.Io.Writer.Allocating = .init(a);
-        write.writeString(&sb.writer, line) catch return error.OutOfMemory;
-        try content.print(a, "{s} Tj\n", .{sb.written()});
+        try showAt(a, &content, line, x - prev_x, y - prev_y);
         prev_x = x;
         prev_y = y;
         y -= leading;
@@ -1257,6 +1307,54 @@ test "a filled field keeps the widget's background, border and rotation" {
         else => {},
     };
     try testing.expect(yellow and blue_border);
+}
+
+test "a comb field puts each character in its own cell" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Five cells of 30 units. Comb is bit 25; the second field is also
+    // multi-line, and the third has no /MaxLen, so neither is a comb.
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R 5 0 R 6 0 R] >>",
+        "<< /Subtype /Widget /FT /Tx /T (left) /Ff 16777216 /MaxLen 5 /Rect [10 100 160 120] /DA (/Helv 10 Tf 0 g) >>",
+        "<< /Subtype /Widget /FT /Tx /T (lines) /Ff 16781312 /MaxLen 5 /Rect [10 60 160 80] >>",
+        "<< /Subtype /Widget /FT /Tx /T (open) /Ff 16777216 /Rect [10 20 160 40] >>",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const all = try fields(a, &doc, try pages.PageList.build(&doc));
+    try testing.expect(all[0].comb and !all[1].comb and !all[2].comb);
+    // For each alignment (/Q), the cells that "AiW" takes.
+    for ([_]struct { q: i64, first: f64 }{ .{ .q = 0, .first = 0 }, .{ .q = 1, .first = 1 }, .{ .q = 2, .first = 2 } }) |case| {
+        var upd = try Update.init(testing.allocator, &doc);
+        defer upd.deinit();
+        var fd = upd.get(4).asDict().?;
+        fd = try write.dictWith(upd.allocator(), fd, "Q", .{ .integer = case.q });
+        try upd.set(4, .{ .dict = fd });
+        try setText(&upd, all[0], "AiW");
+        const ap = upd.get(4).asDict().?.get("AP").?.asDict().?;
+        const content = upd.get(ap.get("N").?.ref.num).stream.data;
+        // Follow the Td moves and note where each one-character string starts.
+        var x: f64 = 0;
+        var count: usize = 0;
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.endsWith(u8, line, " Td")) {
+                x += try std.fmt.parseFloat(f64, line[0..std.mem.indexOfScalar(u8, line, ' ').?]);
+            } else if (std.mem.endsWith(u8, line, " Tj")) {
+                try testing.expectEqual(@as(usize, "(A) Tj".len), line.len);
+                // Each is centred in its cell.
+                const centre = x + textWidth(line[1..2], 10) / 2;
+                try testing.expectApproxEqAbs((case.first + @as(f64, @floatFromInt(count)) + 0.5) * 30, centre, 0.02);
+                count += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 3), count);
+    }
 }
 
 test "wrapping a very long line takes linear time" {
