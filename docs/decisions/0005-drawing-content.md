@@ -154,6 +154,23 @@ over from sources is separate work, after this.
 - **Letting callers write content streams themselves** costs nothing, and gives no
   guarantee of a valid page, correct coordinates or usable fonts.
 
+## Font libraries considered (B3, 2026-11-27)
+
+pdf-zig needs to read a few tables of an untrusted TrueType file and write a subset of it.
+Looked at, from their project pages and sources, without building or running them:
+
+| Library | Finding |
+|---|---|
+| [andrewrk/TrueType](https://codeberg.org/andrewrk/TrueType) | A rasteriser. Its README says untrusted font files are not supported; no subsetting is mentioned |
+| tatfi | A port of a Rust parser. Its project page could not be loaded; search results say it is a parser, not a subsetter, and its author no longer tracks Zig releases |
+| [nat3Github/zig-lib-opentype](https://github.com/nat3Github/zig-lib-opentype) | 0BSD or MIT, Zig 0.17.1, parses, shapes and rasterises, aims to handle malicious input. Calls itself work in progress; about 3.4 MB of source; no subsetter found; one author, repository two months old |
+| [sicher/platen](https://github.com/sicher/platen) | MIT, a whole PDF writing library with a subsetter. Repository a week old, one contributor; the read helpers of its subsetter return 0 past the end of the data instead of an error |
+
+**Decision:** write the part that is needed in `truetype.zig`, with every out-of-range read
+an error, under pdf-zig's own tests and fuzzing. None of these both subsets and is fit for
+untrusted input. If shaping is wanted later, look at zig-lib-opentype again: a caller can
+already use any shaper through `canvas.glyphs`.
+
 ## Steps
 
 | Step | Contents | Gives |
