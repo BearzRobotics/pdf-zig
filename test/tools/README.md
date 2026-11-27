@@ -1,9 +1,9 @@
 # Verification scripts
 
 Not part of `zig build test`; they compare pdf-zig with poppler (`pdftotext`, `pdfinfo`,
-`pdftoppm`) and fuzz it with damaged files. They were written with absolute paths for one
-machine and one session: **edit the paths at the top before use** (the pdf-zig binaries are
-`zig-out/bin/pdfinfo`, `pdftext`, ... after `zig build -Doptimize=ReleaseSafe`).
+`pdftoppm`) and fuzz it with damaged files. Build the programs first with
+`zig build -Doptimize=ReleaseSafe`; the scripts use `zig-out/bin`, or the directory
+in `PDFZIG_BIN`. Each exits non-zero if something failed or nothing was run.
 
 | Script | What it does |
 |---|---|
