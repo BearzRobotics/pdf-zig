@@ -813,7 +813,7 @@ pub const Document = struct {
         const p = parms orelse return .{};
         return switch (p) {
             .dict => |d| if (i == 0) self.resolveDict(d) else .{},
-            .array => |arr| if (i < arr.len) (self.resolve(arr[i]).asDict() orelse .{}) else .{},
+            .array => |arr| if (i < arr.len) self.resolveDict(self.resolve(arr[i]).asDict() orelse .{}) else .{},
             else => .{},
         };
     }

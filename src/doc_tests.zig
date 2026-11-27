@@ -786,3 +786,20 @@ test "a trailer with very many keys is merged quickly, first value first" {
     try testing.expectEqual(@as(?i64, 7), doc.trailer.get("K7").?.asInt());
     try testing.expectEqual(@as(?i64, 199_999), doc.trailer.get("K199999").?.asInt());
 }
+
+test "references inside a /DecodeParms array are resolved" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // PNG predictor given indirectly: tag 1 (Sub), then 1 1 1.
+    var doc = try pdf.Document.open(testing.allocator, try build(a, &(simple ++ .{
+        // A zlib stored block holding 01 01 01 01, hex encoded.
+        "<< /Filter [/AHx /Fl] /DecodeParms [null << /Predictor 5 0 R /Columns 6 0 R >>] /Length 31 >>\nstream\n7801010400fbff01010101000e0005>\nendstream",
+        "12",
+        "3",
+    })), .{});
+    defer doc.deinit();
+    const list = try doc.filterList(doc.getObject(4).stream.dict);
+    try testing.expectEqual(@as(?i64, 12), list[1].parms.get("Predictor").?.asInt());
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, try doc.streamData(doc.getObject(4).stream));
+}
