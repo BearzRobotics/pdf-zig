@@ -125,7 +125,8 @@ timeout. The text of some files differs. Measured by words against `pdftotext`, 
 reading order 125 of those files moved closer to it, 60 further away and 15 stayed as
 far (the total difference over them fell by about 4%). In stream order 135 moved closer,
 9 further and 4 stayed as far, but the total rose by about 2%, mostly from two files with
-heavily overlapping text. 0.3.1 extracts the same text as 0.3.0 from all of them. In a separate sample, 273 copies with annotations added by the
+heavily overlapping text. 0.3.1 extracts the same text as 0.3.0 from all of them, and
+0.4.0 the same as 0.3.1. In a separate sample, 273 copies with annotations added by the
 library showed no new errors when Poppler and MuPDF drew their first page. These are
 comparisons on one set of files, not a conformance claim. The scripts in `test/tools/`
 compare with `pdftotext` and `pdfinfo`.
@@ -143,7 +144,8 @@ PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`).
 `zig build test` runs the unit tests and compiles the example programs: syntax, filters
 (with LZW data from libtiff and fax data from Ghostscript), documents (xref forms, repair,
 hostile input, token-level mutation), encrypted files made with qpdf, content streams,
-fonts, CMaps, functions, colour, the interpreter, text extraction, images, and writing.
+fonts, CMaps, functions, colour, the interpreter, text extraction, images, writing,
+links and new documents.
 It also passes for `x86-linux` and in the release modes. Changes between releases are in
 `docs/CHANGELOG.md`.
 

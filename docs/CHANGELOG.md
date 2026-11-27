@@ -1,20 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-27)
 
-- Reading bookmarks no longer takes time in proportion to bookmarks times named
-  destinations on files built to make it so; `link.list` and `compose` share the fix.
-- New `compose.Builder`: makes a new document from blank pages and pages of other
-  documents, to create, delete, reorder, merge, split and rotate pages. Fillable forms
-  and the bookmarks that lead to imported pages are carried over. The output uses
-  compressed object streams. New example `pdfpages`.
-- New `Document.storedStreamData` and `Renderer.loadOcgs`, which `compose` uses.
-- New `link.list`: the links of a page, with the page they go to, their URI or their
-  named action.
-- Pages with `/UserUnit` have their true size: `Page.displaySize` and `DisplayList.base`
-  give points. `Page` has `user_unit`.
+pdf-zig can now make new documents, to take PDFs apart and put them together. No public
+function or type of 0.3.1 was removed or had its signature changed.
+
+### Check this when upgrading
+
+- Pages with `/UserUnit` now have their true size: `Page.displaySize` and
+  `DisplayList.base` give points. **A viewer that applied `/UserUnit` itself must stop,
+  or such pages are scaled twice.** `Page`'s boxes stay in user space units, and `Page`
+  has the new `user_unit`. Sizes given to the annotation functions are points on the page.
 - A page with a function-based or mesh shading (types 1 and 4 to 7), which is skipped,
   now has `DisplayList.incomplete` set.
+
+### New
+
+- `compose.Builder` makes a new document from blank pages and pages of other documents:
+  create, delete, reorder, merge, split and rotate pages. Page content, annotations, links
+  between imported pages, layers, fillable form fields and the bookmarks that lead to
+  imported pages are carried over. Clashing form field and form font names get a number.
+  The output uses compressed object streams. New example `pdfpages`.
+  - Not carried: document information and metadata, page labels, document attachments,
+    accessibility structure, scripts, signature values, links to other files and
+    bookmarks with other actions. Encrypted sources are refused unless you allow an
+    unencrypted copy. **Leaving a page out is not redaction.** See
+    `docs/architecture.md`, "New documents". Drawing on new pages is not supported yet.
+- `link.list`: the links of a page, with the page they go to, their URI or their named
+  action. It follows none of them; check a URI's scheme before opening it.
+- `Document.storedStreamData` and `Renderer.loadOcgs`, which `compose` uses. Parts of
+  `outline`'s destination lookup are public too, for `link` and `compose`.
+
+### Fixed
+
+- Reading bookmarks could take time in proportion to bookmarks times named destinations
+  on files built to make it so. After enough lookups the names are now indexed.
 
 ## 0.3.1 (2026-11-27)
 
