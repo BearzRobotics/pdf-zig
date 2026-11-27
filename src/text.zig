@@ -154,9 +154,15 @@ fn collect(a: Allocator, items: *std.ArrayList(Item), t: display.Text, base: dis
         // The box spans the advance and, vertically, a descent of 0.2 and an
         // ascent of 0.8 of the font size, which fits most fonts closely enough
         // to show a selection.
-        const c0 = to_page.apply(g.x, t.rise - 0.2 * t.size);
-        const c1 = to_page.apply(g.x + g.advance * t.size * t.h_scale, t.rise + 0.8 * t.size);
-        const box: Rect = .{ .x0 = @min(c0.x, c1.x), .y0 = @min(c0.y, c1.y), .x1 = @max(c0.x, c1.x), .y1 = @max(c0.y, c1.y) };
+        const right = g.x + g.advance * t.size * t.h_scale;
+        const low = t.rise - 0.2 * t.size;
+        const high = t.rise + 0.8 * t.size;
+        // All four corners: tilted or sheared, any of them can be an extreme.
+        const first = to_page.apply(g.x, low);
+        var box: Rect = .{ .x0 = first.x, .y0 = first.y, .x1 = first.x, .y1 = first.y };
+        for ([_]display.Point{ to_page.apply(right, low), to_page.apply(right, high), to_page.apply(g.x, high) }) |corner| {
+            box = .{ .x0 = @min(box.x0, corner.x), .y0 = @min(box.y0, corner.y), .x1 = @max(box.x1, corner.x), .y1 = @max(box.y1, corner.y) };
+        }
         try items.append(a, .{ .x0 = p0.x, .x1 = p1.x, .y = p0.y, .size = @abs(t.size * vscale), .text = g.text, .box = box });
     }
 }

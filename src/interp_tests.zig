@@ -969,3 +969,18 @@ test "the text size on the page comes from the vertical axis of text space" {
     // Size 5, not 40: lines 12 apart stay apart.
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lay.text, "\n"));
 }
+
+test "the box of a tilted glyph covers all four corners" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Turned by 45 degrees: the box of a wide, tall glyph is as wide as it is high.
+    const r = try render(try page(arena.allocator(), "BT /F1 12 Tf 0.70710678 0.70710678 -0.70710678 0.70710678 50 50 Tm (m) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    var lay = try pdf.text.layout(testing.allocator, &r.list);
+    defer lay.deinit(testing.allocator);
+    const b = lay.boxes[0].rect;
+    // (width + height) / sqrt 2, in both directions.
+    const want = (0.833 * 12 + 12) / @sqrt(2.0);
+    try testing.expectApproxEqAbs(@as(f64, want), b.x1 - b.x0, 0.01);
+    try testing.expectApproxEqAbs(@as(f64, want), b.y1 - b.y0, 0.01);
+}
