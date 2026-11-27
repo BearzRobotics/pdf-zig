@@ -10,10 +10,17 @@ def arr(tag):
     if cnt==1: return [v]
     sz=2 if typ==3 else 4; return list(struct.unpack(bo+('H' if typ==3 else 'I')*cnt,t[v:v+sz*cnt]))
 w,h=val(256),val(257); comp=val(259); fill=tags.get(266,(0,0,1))[2]; opt=tags.get(292,(0,0,0))[2]
-offs,cnts=arr(273),arr(279); data=b''.join(t[o:o+c] for o,c in zip(offs,cnts))
+offs,cnts=arr(273),arr(279)
+# Each strip of a Group 3 or 4 TIFF is coded on its own, so strips cannot be
+# joined into one PDF stream.
+if len(offs)!=1: sys.exit(f"{sys.argv[1]}: {len(offs)} strips; make a single-strip TIFF (gs -dMaxStripSize=0)")
+data=t[offs[0]:offs[0]+cnts[0]]
+# 0: white is zero, which is how fax coding means its colours. 1: the reverse.
+photometric=tags.get(262,(0,0,0))[2]
 if fill==2: data=bytes(int('{:08b}'.format(b)[::-1],2) for b in data)
 K=-1 if comp==4 else (0 if not opt&1 else 4)
-parms=f"<< /K {K} /Columns {w} /Rows {h} /BlackIs1 false"+(" /EndOfLine true" if K>=0 else "")+" >>"
+black='true' if photometric==1 else 'false'
+parms=f"<< /K {K} /Columns {w} /Rows {h} /BlackIs1 {black}"+(" /EndOfLine true" if K>=0 else "")+" >>"
 print(sys.argv[1],'comp',comp,'opt',opt,'fill',fill,parms,file=sys.stderr)
 objs=[b"<< /Type /Catalog /Pages 2 0 R >>",b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << /XObject << /I 5 0 R >> >> >>".encode(),
