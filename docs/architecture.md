@@ -24,6 +24,7 @@
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
 | `appearance.zig` | Appearances made while rendering, for annotations and fields that need one (decision 0004) |
+| `draw.zig` | The canvas: paths, text in the built-in fonts and images, for new pages (decision 0005) |
 | `flatten.zig` | Form widgets made part of their page's content |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
@@ -127,6 +128,23 @@ way to change a PDF: it appends to the file and keeps everything in it.
 - **Encrypted sources** need `ImportOptions.allow_decrypted_output`, as the output is not
   encrypted. Repaired sources are fine.
 
+## Drawing
+
+`draw.Canvas` records content for a page of a given size. Its coordinates are the page as
+seen (points, top left origin, y down); it writes PDF's y-up numbers itself, and
+`transform` is given in canvas coordinates. Every call checks first and adds nothing when
+it fails, so the content is always valid: numbers are finite and bounded, path operators
+come in the order of 8.2, and `restore` has its `save`. Saved states left open are closed
+when the page is made.
+
+Text is one line in one of the twelve built-in text fonts, in WinAnsi; a character without
+a code there is `error.MissingGlyph`. These fonts are **not embedded**, so each reader
+substitutes its own, which may lack a character (Poppler's Courier substitute on one
+system had no euro sign). Images are JPEG files stored as they are (gray or three
+components, 8 bit) or raw gray or RGB pixels, Flate compressed, with alpha as a soft mask.
+`compose.Builder.addPage` makes the page; fonts and equal images are stored once. Not yet:
+drawing on existing pages, embedded fonts.
+
 ## Resource limits
 
 All input is untrusted. The limits, and why each counts what it does, are in
@@ -170,7 +188,8 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- In new documents: encryption and drawing new page content.
+- In new documents: encryption, and embedded fonts for drawn text. Drawing on existing
+  pages.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with

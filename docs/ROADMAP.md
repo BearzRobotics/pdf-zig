@@ -90,6 +90,9 @@ Forms in other scripts than WinAnsi need font embedding (stage 2).
 
 ## Stage 2: creating documents (stage B of 0003)
 
+Design: `docs/decisions/0005-drawing-content.md`. **Progress:** B1 (new pages, built-in
+fonts, images, document information) is done. Next B2, drawing on existing pages.
+
 | Item | Size |
 |---|---|
 | On new pages: paths, colours, transparency, text in the standard 14 fonts, JPEG and raw images | L |

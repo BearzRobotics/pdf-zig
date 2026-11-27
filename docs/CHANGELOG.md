@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New `draw.Canvas` and `compose.Builder.addPage`: draw new pages with paths, colours,
+  transparency, clipping, text in the twelve built-in text fonts, and JPEG or raw images.
+- New `compose.Builder.setInfo` (title, author and other document information).
+  `compose.Error` has `BadValue` and `PathOpen`. New example `pdfdraw`.
 - Annotations and form fields without a stored appearance are now drawn: text, combo and
   list fields, check boxes, radio and push buttons, highlights and other text markup,
   squares, circles, lines, polygons, ink, free text and notes. In a form with

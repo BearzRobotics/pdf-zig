@@ -106,10 +106,13 @@ pub fn compress(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice();
 }
 
+/// The objects the trailer names.
+pub const Trailer = struct { root: u32, info: ?u32 = null };
+
 /// Writes the cross-reference stream, itself object `own` at offset `own_at`,
 /// and the end of the file. `locations` has every other object; entry 0 and any
 /// beyond are not read.
-pub fn writeXref(gpa: Allocator, w: *Io.Writer, locations: []const Location, own: u32, own_at: usize, root: u32, id: [16]u8) Allocator.Error!void {
+pub fn writeXref(gpa: Allocator, w: *Io.Writer, locations: []const Location, own: u32, own_at: usize, trailer: Trailer, id: [16]u8) Allocator.Error!void {
     const size = own + 1;
     // Fields: the type, then an offset or a stream's number, then the index in
     // that stream (table 18). Eight bytes of offset only past 4 GiB.
@@ -152,14 +155,15 @@ pub fn writeXref(gpa: Allocator, w: *Io.Writer, locations: []const Location, own
     var dict_arena = std.heap.ArenaAllocator.init(gpa);
     defer dict_arena.deinit();
     const a = dict_arena.allocator();
-    const dict = try serial.makeDict(a, &.{
+    var dict = try serial.makeDict(a, &.{
         .{ "Type", .{ .name = "XRef" } },
         .{ "Size", .{ .integer = size } },
         .{ "W", .{ .array = try a.dupe(Object, &.{ .{ .integer = 1 }, .{ .integer = @intCast(width) }, .{ .integer = 2 } }) } },
-        .{ "Root", .{ .ref = .{ .num = root } } },
+        .{ "Root", .{ .ref = .{ .num = trailer.root } } },
         .{ "ID", .{ .array = try a.dupe(Object, &.{ id_object, id_object }) } },
         .{ "Filter", .{ .name = "FlateDecode" } },
     });
+    if (trailer.info) |num| dict = try serial.dictWith(a, dict, "Info", .{ .ref = .{ .num = num } });
     w.print("{d} 0 obj\n", .{own}) catch return error.OutOfMemory;
     serial.writeObject(w, .{ .stream = .{ .dict = dict, .data = squeezed } }) catch return error.OutOfMemory;
     w.print("\nendobj\nstartxref\n{d}\n%%EOF\n", .{own_at}) catch return error.OutOfMemory;

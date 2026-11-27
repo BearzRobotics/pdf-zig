@@ -43,3 +43,9 @@ reproduce it exactly (all three, verified 0 of 518,400 pixels differ).
 rows, row *i* being `r` white pixels, `r` black ones and white to the end, for
 `r` in 0..63, every multiple of 64 up to 2560 and each of those plus 5. It
 checks the run-length code tables against an independent encoder.
+
+## JPEG
+
+`jpeg_rgb.jpg` (16 by 8, red left and blue right), `jpeg_progressive.jpg` (the same,
+progressive), `jpeg_gray.jpg` (5 by 7, 60 % gray) and `jpeg_cmyk.jpg` (CMYK, which
+`draw.Image.fromJpeg` refuses) were drawn and encoded with ImageMagick.

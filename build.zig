@@ -114,6 +114,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(pdfsurvey);
 
+    const pdfdraw = b.addExecutable(.{
+        .name = "pdfdraw",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pdfdraw.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        }),
+    });
+    b.installArtifact(pdfdraw);
+
     // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
     for ([_][]const u8{
         "plain",          "enc_rc4_40",         "enc_rc4_128",          "enc_aes_128",           "enc_aes_256",
@@ -125,13 +136,13 @@ pub fn build(b: *std.Build) void {
 
     // CCITT fax samples (Ghostscript tiffg3/tiffg32d/tiffg4 output wrapped in a PDF) and the
     // bitmap Ghostscript renders for the same page; see test/fixtures/README.md.
-    for ([_][]const u8{ "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm", "lzw_libtiff.bin", "fax_runs.bin" }) |name| {
+    for ([_][]const u8{ "jpeg_rgb.jpg", "jpeg_progressive.jpg", "jpeg_gray.jpg", "jpeg_cmyk.jpg", "fax_g3_1d.pdf", "fax_g3_2d.pdf", "fax_g4.pdf", "fax_ref.pbm", "lzw_libtiff.bin", "fax_runs.bin" }) |name| {
         mod.addAnonymousImport(name, .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}", .{name})) });
     }
 
     const test_step = b.step("test", "Run unit tests and compile the example programs");
     // A change that breaks an example must fail the tests too.
-    for ([_]*std.Build.Step.Compile{ pdfinfo, pdftext, pdfdump, pdfmark, pdffill, pdfsvg, pdfimg, pdfpages, pdfsurvey }) |example| {
+    for ([_]*std.Build.Step.Compile{ pdfinfo, pdftext, pdfdump, pdfmark, pdffill, pdfsvg, pdfimg, pdfpages, pdfsurvey, pdfdraw }) |example| {
         test_step.dependOn(&example.step);
     }
     const unit = b.addTest(.{ .root_module = mod });

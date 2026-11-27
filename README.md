@@ -5,7 +5,7 @@ file structure and turns pages into a **display list** (paths, text, images, sha
 that a renderer draws; it draws nothing itself. It also finds text on the page, reads
 bookmarks, links and form fields, and writes annotations, bookmarks and form values as an
 incremental update. It can also make new documents from blank pages and from pages of
-others. Zig 0.17.1, no dependencies.
+others, with new pages you draw yourself. Zig 0.17.1, no dependencies.
 
 Written from ISO 32000-1:2008 (see `docs/decisions/0001-architecture.md`).
 
@@ -79,6 +79,31 @@ value. `flatten.widgets` turns a page's fields into page content; it keeps hidde
 and signatures, and the old values stay inside the file. Signature fields are listed, not
 filled; XFA forms are not read; no scripts run.
 
+## Drawing new pages
+
+```zig
+var canvas = try pdf.draw.Canvas.init(gpa, 595, 842);     // points, from the top left
+defer canvas.deinit();
+try canvas.setFill(.{ .rgb = .{ 0.9, 0.9, 0.95 } });
+try canvas.rect(36, 36, 523, 48);
+try canvas.fill(.nonzero);
+try canvas.setFill(.black);
+try canvas.text(.helvetica_bold, 22, 48, 68, "Quarterly report");  // x, baseline
+var photo = try pdf.draw.Image.fromJpeg(gpa, jpeg_bytes);
+defer photo.deinit();
+try canvas.image(&photo, 48, 100, 300, 200);
+
+var out = pdf.compose.Builder.init(gpa, .{});
+defer out.deinit();
+try out.addPage(&canvas);
+try out.setInfo(.{ .title = "Report" });
+try out.write(&writer.interface);
+```
+
+Text is one line at a time (`Font.textWidth` measures it) in the twelve built-in text
+fonts, which cover WinAnsi (Western European) and are not embedded. There is no wrapping
+or layout, and drawing on existing pages and embedding fonts are not there yet.
+
 ## New documents: extract, reorder, merge
 
 ```zig
@@ -140,7 +165,8 @@ compare with `pdftotext` and `pdfinfo`.
 `pdftext` (`-raw` for stream order, `-p` for a password), `pdfdump` (the display list of a page),
 `pdfsvg` (a page as SVG, to look at), `pdfimg` (decode the images of a page), `pdfmark`
 (highlight a word and add a note), `pdffill` (list or fill form fields) and `pdfpages` (a new
-PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`). `pdfsurvey` names the features a
+PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`). `pdfdraw`
+makes a sample document with the drawing functions. `pdfsurvey` names the features a
 file uses.
 
 ## Tests

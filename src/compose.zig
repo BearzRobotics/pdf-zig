@@ -27,6 +27,7 @@ const serial = @import("write.zig");
 const compose_form = @import("compose_form.zig");
 const compose_outline = @import("compose_outline.zig");
 const pack = @import("compose_pack.zig");
+const draw = @import("draw.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -65,6 +66,10 @@ pub const Error = error{
     TooManyObjects,
     /// A stream's encryption method is not one that is read.
     UnsupportedFilter,
+    /// Document information that is not usable text or a PDF date.
+    BadValue,
+    /// A canvas whose path was neither painted nor used to clip.
+    PathOpen,
     OutOfMemory,
     WriteFailed,
 };
@@ -110,6 +115,12 @@ pub const Builder = struct {
     field_names: std.StringArrayHashMapUnmanaged(void) = .empty,
     form_fonts: std.StringArrayHashMapUnmanaged(u32) = .empty,
     need_appearances: bool = false,
+    /// Objects for what canvases draw with, made once: the built-in fonts by
+    /// their order, and images by their digest.
+    drawn_fonts: std.EnumArray(draw.Builtin, u32) = .initFill(0),
+    drawn_images: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
+    /// The document information dictionary, when `setInfo` gave one.
+    info: ?Dict = null,
     bookmarks: std.ArrayList(compose_outline.Item) = .empty,
     /// What names and bookmarks take of `Options.max_bytes`.
     extra_bytes: usize = 0,
@@ -129,6 +140,7 @@ pub const Builder = struct {
         self.field_names.deinit(self.gpa);
         self.form_fonts.deinit(self.gpa);
         self.bookmarks.deinit(self.gpa);
+        self.drawn_images.deinit(self.gpa);
         self.arena.deinit();
         self.* = undefined;
     }
@@ -150,10 +162,10 @@ pub const Builder = struct {
             .{ "MediaBox", try serial.numbers(a, &.{ 0, 0, width, height }) },
             .{ "Resources", .{ .dict = .{} } },
         });
-        try self.addPage(try self.newNumber(), dict, 0);
+        try self.addPageRecord(try self.newNumber(), dict, 0);
     }
 
-    fn addPage(self: *Builder, num: u32, dict: Dict, rotate: u16) Error!void {
+    fn addPageRecord(self: *Builder, num: u32, dict: Dict, rotate: u16) Error!void {
         const start = self.page_bytes.items.len;
         {
             var out: Io.Writer.Allocating = .fromArrayList(self.gpa, &self.page_bytes);
@@ -173,6 +185,112 @@ pub const Builder = struct {
     pub fn charge(self: *Builder, n: usize) Error!void {
         self.extra_bytes +|= n;
         if (self.size() > self.options.max_bytes) return error.TooLarge;
+    }
+
+    /// Appends a page with what `canvas` draws. The builder copies it, so the
+    /// canvas can be changed or freed afterwards. Saved states still open are
+    /// closed.
+    pub fn addPage(self: *Builder, canvas: *const draw.Canvas) Error!void {
+        if (canvas.path != .none) return error.PathOpen;
+        const mark = self.snapshot();
+        errdefer self.restore(mark);
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+
+        var resources: std.ArrayList(Entry) = .empty;
+        var fonts: std.ArrayList(Entry) = .empty;
+        var it = canvas.fonts.iterator();
+        while (it.next()) |font| {
+            if (self.drawn_fonts.get(font) == 0) {
+                const num = try self.newNumber();
+                try self.emit(num, .{ .dict = try serial.makeDict(a, &.{
+                    .{ "Type", .{ .name = "Font" } },
+                    .{ "Subtype", .{ .name = "Type1" } },
+                    .{ "BaseFont", .{ .name = font.baseFont() } },
+                    .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
+                }) });
+                self.drawn_fonts.set(font, num);
+            }
+            try fonts.append(a, .{ .key = try std.fmt.allocPrint(a, "F{d}", .{@backingInt(font)}), .value = .{ .ref = .{ .num = self.drawn_fonts.get(font) } } });
+        }
+        if (fonts.items.len > 0) try resources.append(a, .{ .key = "Font", .value = .{ .dict = .{ .entries = fonts.items } } });
+
+        const images = try a.alloc(Entry, canvas.images.items.len);
+        for (canvas.images.items, images, 0..) |*picture, *entry, i| {
+            const num = self.drawn_images.get(picture.digest) orelse try self.addImage(a, picture);
+            entry.* = .{ .key = try std.fmt.allocPrint(a, "Im{d}", .{i}), .value = .{ .ref = .{ .num = num } } };
+        }
+        if (images.len > 0) try resources.append(a, .{ .key = "XObject", .value = .{ .dict = .{ .entries = images } } });
+
+        const states = try a.alloc(Entry, canvas.states.items.len);
+        for (states, 0..) |*entry, i| entry.* = .{ .key = try std.fmt.allocPrint(a, "Gs{d}", .{i}), .value = .{ .dict = try canvas.stateDictionary(a, i) } };
+        if (states.len > 0) try resources.append(a, .{ .key = "ExtGState", .value = .{ .dict = .{ .entries = states } } });
+
+        var content: std.ArrayList(u8) = .empty;
+        try content.appendSlice(a, canvas.content.items);
+        for (canvas.saved.items) |_| try content.appendSlice(a, "Q\n");
+        const contents = try self.newNumber();
+        const squeezed = try pack.compress(a, content.items);
+        try self.emit(contents, .{ .stream = .{ .dict = try serial.makeDict(a, &.{.{ "Filter", .{ .name = "FlateDecode" } }}), .data = squeezed } });
+        try self.flush();
+
+        try self.addPageRecord(try self.newNumber(), try serial.makeDict(a, &.{
+            .{ "Type", .{ .name = "Page" } },
+            .{ "MediaBox", try serial.numbers(a, &.{ 0, 0, canvas.width, canvas.height }) },
+            .{ "Resources", .{ .dict = .{ .entries = resources.items } } },
+            .{ "Contents", .{ .ref = .{ .num = contents } } },
+        }), 0);
+    }
+
+    /// Writes `picture` as an image XObject, with its alpha as a soft mask.
+    fn addImage(self: *Builder, a: Allocator, picture: *const draw.Image) Error!u32 {
+        var entries: std.ArrayList(Entry) = .empty;
+        try entries.appendSlice(a, (try imageDictionary(a, picture, picture.components, picture.jpeg)).entries);
+        if (picture.alpha) |alpha| {
+            const mask = try self.newNumber();
+            try self.emit(mask, .{ .stream = .{ .dict = try imageDictionary(a, picture, 1, false), .data = alpha } });
+            try entries.append(a, .{ .key = "SMask", .value = .{ .ref = .{ .num = mask } } });
+        }
+        const num = try self.newNumber();
+        try self.emit(num, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = picture.data } });
+        try self.drawn_images.put(self.gpa, picture.digest, num);
+        return num;
+    }
+
+    pub const Info = struct {
+        /// UTF-8; empty ones are left out.
+        title: []const u8 = "",
+        author: []const u8 = "",
+        subject: []const u8 = "",
+        keywords: []const u8 = "",
+        creator: []const u8 = "",
+        producer: []const u8 = "",
+        /// Dates as PDF writes them (7.9.4), such as `D:20261127120000Z`.
+        created: []const u8 = "",
+        modified: []const u8 = "",
+    };
+
+    /// Sets the document information (14.3.3), in place of any set before.
+    pub fn setInfo(self: *Builder, info: Info) Error!void {
+        const mark = self.snapshot();
+        errdefer self.restore(mark);
+        const a = self.arena.allocator();
+        var entries: std.ArrayList(Entry) = .empty;
+        for ([_]struct { []const u8, []const u8, bool }{
+            .{ "Title", info.title, false },         .{ "Author", info.author, false },
+            .{ "Subject", info.subject, false },     .{ "Keywords", info.keywords, false },
+            .{ "Creator", info.creator, false },     .{ "Producer", info.producer, false },
+            .{ "CreationDate", info.created, true }, .{ "ModDate", info.modified, true },
+        }) |field| {
+            const value = field[1];
+            if (value.len == 0) continue;
+            if (!std.unicode.utf8ValidateSlice(value)) return error.BadValue;
+            if (field[2] and !isDate(value)) return error.BadValue;
+            try self.charge(value.len *| 2);
+            try entries.append(a, .{ .key = field[0], .value = .{ .string = try serial.textString(a, value) } });
+        }
+        self.info = if (entries.items.len > 0) .{ .entries = entries.items } else null;
     }
 
     /// Turns page `index` of the new document: the clockwise rotation it is
@@ -204,10 +322,10 @@ pub const Builder = struct {
         }
     }
 
-    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize, unpacked_bytes: usize };
+    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize, unpacked_bytes: usize, drawn_fonts: std.EnumArray(draw.Builtin, u32), drawn_images: usize, info: ?Dict };
 
     fn snapshot(self: *const Builder) Snapshot {
-        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes, .unpacked_bytes = self.unpacked_bytes };
+        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes, .unpacked_bytes = self.unpacked_bytes, .drawn_fonts = self.drawn_fonts, .drawn_images = self.drawn_images.count(), .info = self.info };
     }
 
     fn restore(self: *Builder, s: Snapshot) void {
@@ -224,6 +342,9 @@ pub const Builder = struct {
         self.bookmarks.shrinkRetainingCapacity(s.bookmarks);
         self.extra_bytes = s.extra_bytes;
         self.unpacked_bytes = s.unpacked_bytes;
+        self.drawn_fonts = s.drawn_fonts;
+        self.drawn_images.shrinkRetainingCapacity(s.drawn_images);
+        self.info = s.info;
         self.pending.clear();
     }
 
@@ -317,7 +438,7 @@ pub const Builder = struct {
                     try items.append(a, .{ .dict = rewritten });
                 }
             }
-            try self.addPage(page_num, try copy.page(a, p, list.entries[index].inh.resources, items.items), p.rotate);
+            try self.addPageRecord(page_num, try copy.page(a, p, list.entries[index].inh.resources, items.items), p.rotate);
         }
 
         // Everything referred to, and what that refers to, until nothing is left.
@@ -442,7 +563,12 @@ pub const Builder = struct {
         if (self.field_roots.items.len > 0) catalog = try serial.dictWith(a, catalog, "AcroForm", .{ .dict = try self.formDictionary(a) });
         if (self.layers.items.len > 0) catalog = try serial.dictWith(a, catalog, "OCProperties", .{ .dict = try self.layerProperties(a) });
         try tail.add(catalog_num, .{ .dict = catalog });
-        try tail.finish();
+        var info_num: ?u32 = null;
+        if (self.info) |info| {
+            info_num = try tail.newNumber();
+            try tail.add(info_num.?, .{ .dict = info });
+        }
+        try tail.finish(info_num);
 
         if (tail.base + tail.out.written().len > self.options.max_bytes) return error.TooLarge;
         w.writeAll(header) catch return error.WriteFailed;
@@ -484,6 +610,33 @@ pub const Builder = struct {
         });
     }
 };
+
+/// The dictionary of an image XObject of `picture`'s size.
+fn imageDictionary(a: Allocator, picture: *const draw.Image, components: u8, jpeg: bool) Allocator.Error!Dict {
+    return serial.makeDict(a, &.{
+        .{ "Type", .{ .name = "XObject" } },
+        .{ "Subtype", .{ .name = "Image" } },
+        .{ "Width", .{ .integer = picture.width } },
+        .{ "Height", .{ .integer = picture.height } },
+        .{ "ColorSpace", .{ .name = if (components == 1) "DeviceGray" else "DeviceRGB" } },
+        .{ "BitsPerComponent", .{ .integer = 8 } },
+        .{ "Filter", .{ .name = if (jpeg) "DCTDecode" else "FlateDecode" } },
+    });
+}
+
+/// Whether `s` is a date as 7.9.4 writes them: `D:` and a year, then pairs of
+/// digits as far as they go, and perhaps a time zone.
+fn isDate(s: []const u8) bool {
+    if (s.len < 6 or !std.mem.startsWith(u8, s, "D:")) return false;
+    var i: usize = 2;
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    const digits = i - 2;
+    if (digits < 4 or digits > 14 or digits % 2 != 0) return false;
+    if (i == s.len) return true;
+    if (s[i] != 'Z' and s[i] != '+' and s[i] != '-') return false;
+    for (s[i + 1 ..]) |c| if (!std.ascii.isDigit(c) and c != '\'') return false;
+    return true;
+}
 
 /// The end of a file being written: what `write` adds after the body, without
 /// changing the builder.
@@ -543,7 +696,7 @@ pub const Tail = struct {
         try self.pending.close(self.builder.gpa, &self.out.writer, num, .{ .items = self.locations.items });
     }
 
-    fn finish(self: *Tail) Error!void {
+    fn finish(self: *Tail, info: ?u32) Error!void {
         try self.flush();
         const own = try self.newNumber();
         const own_at = self.base + self.out.written().len;
@@ -553,7 +706,7 @@ pub const Tail = struct {
         hash.update(self.out.written());
         var digest: [16]u8 = undefined;
         hash.final(&digest);
-        try pack.writeXref(self.builder.gpa, &self.out.writer, self.locations.items, own, own_at, catalog_num, digest);
+        try pack.writeXref(self.builder.gpa, &self.out.writer, self.locations.items, own, own_at, .{ .root = catalog_num, .info = info }, digest);
     }
 };
 
