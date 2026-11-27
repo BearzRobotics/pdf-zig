@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
 const encoding = @import("encoding.zig");
 const cmap_mod = @import("cmap.zig");
+const spans_mod = @import("spans.zig");
 const std14 = @import("std14.zig");
 const doc_mod = @import("document.zig");
 const Document = doc_mod.Document;
@@ -292,13 +293,13 @@ pub const Font = struct {
                 i += 3;
             } else i += 1;
         }
-        // Stable, so that of two entries for a CID the later one is found.
-        std.mem.sort(WidthRange, out.items, {}, struct {
-            fn lt(_: void, x: WidthRange, y: WidthRange) bool {
-                return x.first < y.first;
-            }
-        }.lt);
-        self.cid_widths = out.items;
+        // Made disjoint so that a lookup is one search; later entries win.
+        const spans = try a.alloc(spans_mod.Span, out.items.len);
+        for (out.items, spans, 0..) |r, *span, k| span.* = .{ .lo = r.first, .hi = r.last, .source = @intCast(k) };
+        const pieces = try spans_mod.disjoint(a, spans);
+        const widths = try a.alloc(WidthRange, pieces.len);
+        for (pieces, widths) |piece, *slot| slot.* = .{ .first = piece.lo, .last = piece.hi, .w = out.items[piece.source].w };
+        self.cid_widths = widths;
     }
 
     fn cidWidth(self: *const Font, cid: u32) f64 {
@@ -309,13 +310,7 @@ pub const Font = struct {
             const mid = lo + (hi - lo) / 2;
             if (self.cid_widths[mid].first <= cid) lo = mid + 1 else hi = mid;
         }
-        var i = lo;
-        var steps: usize = 0;
-        while (i > 0 and steps < 16) : (steps += 1) {
-            i -= 1;
-            const r = self.cid_widths[i];
-            if (cid >= r.first and cid <= r.last) return r.w;
-        }
+        if (lo > 0 and cid <= self.cid_widths[lo - 1].last) return self.cid_widths[lo - 1].w;
         return self.dw;
     }
 

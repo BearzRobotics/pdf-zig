@@ -1018,3 +1018,18 @@ test "rotated text reads along its own baseline" {
     defer done(r);
     try testing.expectEqualStrings("Hello\n", try pdf.text.extract(a, &r.list, .content));
 }
+
+test "a width range is found behind many entries inside it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: std.ArrayList(u8) = .empty;
+    try w.appendSlice(a, "0 1000 500");
+    for (1..40) |cid| try w.print(a, " {d} [600]", .{cid});
+    const font = try std.fmt.allocPrint(a, "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /W [{s}] >>] >>", .{w.items});
+    const r = try render(try page(a, "BT /F1 10 Tf <00320005> Tj ET", helv, &.{font}, ""));
+    defer done(r);
+    const glyphs = r.list.commands[0].text.glyphs;
+    try testing.expectEqual(@as(f64, 0.5), glyphs[0].advance);
+    try testing.expectEqual(@as(f64, 0.6), glyphs[1].advance);
+}

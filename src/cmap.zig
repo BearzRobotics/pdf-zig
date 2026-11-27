@@ -10,18 +10,22 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const object = @import("object.zig");
+const spans_mod = @import("spans.zig");
 
 pub const CodeSpace = struct { lo: u32, hi: u32, bytes: u8 };
 
 /// A run of codes `lo..=hi` of `bytes` bytes. For a Unicode map `dst` is the
-/// UTF-16 text of `lo`; later codes add one to its last unit. For a CID map
-/// `dst` holds the CID of `lo`.
+/// UTF-16 text of code `first`; later codes add to its last unit. For a CID map
+/// `dst` holds the CID of `first`. Parsed maps hold disjoint runs: where one
+/// definition overrides part of another, the other is split around it.
 const Range = struct {
     lo: u32,
     hi: u32,
     /// Bytes in the source code (for sorting and lookups of different lengths).
     bytes: u8,
     dst: []const u16,
+    /// The code the definition starts at, which `dst` belongs to.
+    first: u32 = 0,
 };
 
 pub const CMap = struct {
@@ -51,8 +55,8 @@ pub const CMap = struct {
     }
 
     fn find(self: CMap, code: u32, bytes: u8) ?*const Range {
-        // Ranges are sorted by (bytes, lo). Later definitions of the same
-        // code win, so look at the last range that starts at or before it.
+        // Disjoint and sorted by (bytes, lo): only the last range starting at
+        // or before the code can hold it.
         var lo: usize = 0;
         var hi: usize = self.ranges.len;
         while (lo < hi) {
@@ -60,22 +64,15 @@ pub const CMap = struct {
             const r = self.ranges[mid];
             if (r.bytes < bytes or (r.bytes == bytes and r.lo <= code)) lo = mid + 1 else hi = mid;
         }
-        // Walk back over ranges that start before `code`.
-        var i = lo;
-        var steps: usize = 0;
-        while (i > 0 and steps < 8) : (steps += 1) {
-            i -= 1;
-            const r = &self.ranges[i];
-            if (r.bytes != bytes) break;
-            if (code >= r.lo and code <= r.hi) return r;
-        }
-        return null;
+        if (lo == 0) return null;
+        const r = &self.ranges[lo - 1];
+        return if (r.bytes == bytes and code <= r.hi) r else null;
     }
 
     /// CID of `code` (a CID map), or null.
     pub fn cid(self: CMap, code: u32, bytes: u8) ?u32 {
         const r = self.find(code, bytes) orelse return null;
-        return @as(u32, r.dst[0]) +| (code - r.lo);
+        return @as(u32, r.dst[0]) +| (code - r.first);
     }
 
     /// Appends the Unicode text of `code` (a ToUnicode map) as UTF-8 to `out`.
@@ -86,7 +83,7 @@ pub const CMap = struct {
         const n = @min(r.dst.len, units.len);
         @memcpy(units[0..n], r.dst[0..n]);
         // The offset is added to the last UTF-16 unit, which wraps.
-        if (n > 0) units[n - 1] +%= @truncate(code - r.lo);
+        if (n > 0) units[n - 1] +%= @truncate(code - r.first);
         var it = std.unicode.Utf16LeIterator.init(units[0..n]);
         while (it.nextCodepoint() catch return false) |cp| {
             var buf: [4]u8 = undefined;
@@ -110,11 +107,6 @@ fn utf16Of(a: Allocator, s: []const u8) Allocator.Error![]const u16 {
     for (0..n) |i| out[i] = (@as(u16, s[2 * i]) << 8) | s[2 * i + 1];
     if (n == 0 and s.len == 1) out[0] = s[0];
     return out[0..@max(n, 1)];
-}
-
-fn lessThan(_: void, x: Range, y: Range) bool {
-    if (x.bytes != y.bytes) return x.bytes < y.bytes;
-    return x.lo < y.lo;
 }
 
 /// Parses CMap program text. Allocations come from `a` (use an arena).
@@ -208,9 +200,25 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
         if (std.mem.startsWith(u8, word, "end")) section = .none;
         if (std.mem.eql(u8, word, "beginnotdefchar") or std.mem.eql(u8, word, "beginnotdefrange")) section = .none;
     }
-    // A stable sort keeps definition order for equal keys; `find` prefers later ones.
-    std.mem.sort(Range, ranges.items, {}, lessThan);
-    return .{ .spaces = spaces.items, .ranges = ranges.items };
+    return .{ .spaces = spaces.items, .ranges = try disjointRanges(a, ranges.items) };
+}
+
+/// The ranges as `find` needs them: sorted by code length, and within one
+/// length disjoint, later definitions replacing earlier ones.
+fn disjointRanges(a: Allocator, defined: []const Range) Allocator.Error![]const Range {
+    var out: std.ArrayList(Range) = .empty;
+    var of_length: std.ArrayList(spans_mod.Span) = .empty;
+    for (0..5) |bytes| {
+        of_length.clearRetainingCapacity();
+        for (defined, 0..) |r, i| {
+            if (r.bytes == bytes) try of_length.append(a, .{ .lo = r.lo, .hi = r.hi, .source = @intCast(i) });
+        }
+        for (try spans_mod.disjoint(a, of_length.items)) |span| {
+            const r = defined[span.source];
+            try out.append(a, .{ .lo = span.lo, .hi = span.hi, .bytes = r.bytes, .dst = r.dst, .first = r.lo });
+        }
+    }
+    return out.items;
 }
 
 test "ToUnicode: bfchar, bfrange, array form, ligature text" {
@@ -352,4 +360,27 @@ test "of many repeated definitions the last one wins" {
         try std.testing.expect(try m.unicode(a, @intCast(code), 1, &out));
         try std.testing.expectEqualStrings("Y", out.items);
     }
+}
+
+test "a range is found behind any number of ranges inside it, and later ones override" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "1 beginbfrange <0000> <00FF> <0041> endbfrange ");
+    for (1..30) |code| try src.print(a, "1 beginbfchar <{x:0>4}> <002A> endbfchar ", .{code});
+    // A later range covers an earlier single code.
+    try src.appendSlice(a, "1 beginbfchar <0080> <002B> endbfchar 1 beginbfrange <007F> <0081> <0061> endbfrange");
+    const m = try parse(a, src.items);
+    const want = [_]struct { u32, []const u8 }{ .{ 0, "A" }, .{ 1, "*" }, .{ 29, "*" }, .{ 0x20, "a" }, .{ 0x7E, "\u{bf}" }, .{ 0x7F, "a" }, .{ 0x80, "b" }, .{ 0x81, "c" }, .{ 0x82, "\u{c3}" }, .{ 0xFF, "\u{140}" } };
+    for (want) |w| {
+        var out: std.ArrayList(u8) = .empty;
+        try std.testing.expect(try m.unicode(a, w[0], 2, &out));
+        try std.testing.expectEqualStrings(w[1], out.items);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(!try m.unicode(a, 0x100, 2, &out));
+    const cids = try parse(a, "1 begincidrange <0000> <FFFF> 100 endcidrange 3 begincidchar <0001> 7 <0002> 8 <0003> 9 endcidchar");
+    try std.testing.expectEqual(@as(?u32, 7), cids.cid(1, 2));
+    try std.testing.expectEqual(@as(?u32, 150), cids.cid(50, 2));
 }

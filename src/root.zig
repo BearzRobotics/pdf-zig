@@ -39,6 +39,7 @@ pub const Stream = object.Stream;
 
 test {
     _ = @import("object.zig");
+    _ = @import("spans.zig");
     _ = @import("filters.zig");
     _ = @import("document.zig");
     _ = @import("crypt.zig");
