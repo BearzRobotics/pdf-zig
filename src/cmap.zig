@@ -75,10 +75,22 @@ pub const CMap = struct {
         return @as(u32, r.dst[0]) +| (code - r.first);
     }
 
+    /// Like `find`, but if there is no entry for a code of this length, one of
+    /// another length with the same value: many files write two-byte keys in
+    /// the `/ToUnicode` of a one-byte font, and other readers accept them.
+    fn findAnyLength(self: CMap, code: u32, bytes: u8) ?*const Range {
+        if (self.find(code, bytes)) |r| return r;
+        for (1..5) |other| {
+            if (other == bytes) continue;
+            if (self.find(code, @intCast(other))) |r| return r;
+        }
+        return null;
+    }
+
     /// Appends the Unicode text of `code` (a ToUnicode map) as UTF-8 to `out`.
     /// Returns false if the map has no entry.
     pub fn unicode(self: CMap, a: Allocator, code: u32, bytes: u8, out: *std.ArrayList(u8)) Allocator.Error!bool {
-        const r = self.find(code, bytes) orelse return false;
+        const r = self.findAnyLength(code, bytes) orelse return false;
         var units: [16]u16 = undefined;
         const n = @min(r.dst.len, units.len);
         @memcpy(units[0..n], r.dst[0..n]);

@@ -1033,3 +1033,18 @@ test "a width range is found behind many entries inside it" {
     try testing.expectEqual(@as(f64, 0.5), glyphs[0].advance);
     try testing.expectEqual(@as(f64, 0.6), glyphs[1].advance);
 }
+
+test "ToUnicode keys of another width still apply when none of the right width does" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cmap_text = "1 begincodespacerange <0000> <FFFF> endcodespacerange 2 beginbfchar <0001> <0048> <0041> <005A> endbfchar";
+    const bytes = try page(a, "BT /F1 10 Tf <0141> Tj ET", helv, &.{
+        "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 1 /Widths [700] /ToUnicode 6 0 R >>",
+        try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ cmap_text.len, cmap_text }),
+    }, "");
+    const r = try render(bytes);
+    defer done(r);
+    const got = try pdf.text.extract(a, &r.list, .content);
+    try testing.expectEqualStrings("HZ\n", got);
+}
