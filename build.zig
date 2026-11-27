@@ -103,7 +103,11 @@ pub fn build(b: *std.Build) void {
         mod.addAnonymousImport(name, .{ .root_source_file = b.path(b.fmt("test/fixtures/{s}", .{name})) });
     }
 
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run unit tests and compile the example programs");
+    // A change that breaks an example must fail the tests too.
+    for ([_]*std.Build.Step.Compile{ pdfinfo, pdftext, pdfdump, pdfmark, pdffill, pdfsvg, pdfimg }) |example| {
+        test_step.dependOn(&example.step);
+    }
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);
 }
