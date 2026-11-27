@@ -207,6 +207,14 @@ pub const Font = struct {
             };
         }
 
+        // There are no metrics here for the two symbol fonts: a typical width
+        // keeps their glyphs apart.
+        if (self.widths.len == 0 and self.missing_width == 0) {
+            for ([_][]const u8{ "Symbol", "ZapfDingbats" }) |symbols| {
+                if (std.mem.eql(u8, self.base_font, symbols)) self.missing_width = 600;
+            }
+        }
+
         // Standard 14 metrics when the dictionary carries no widths (9.6.2.2).
         if (self.widths.len == 0 and self.subtype != .type3) {
             if (std_name) |sn| for (std14.fonts) |f| if (std.mem.eql(u8, f.name, sn)) {
@@ -374,10 +382,17 @@ pub const Font = struct {
             return self.missing_width;
         }
         if (self.std_widths) |sw| {
-            if (self.names[code]) |nm| for (encoding.names, 0..) |n, i| {
-                if (std.mem.eql(u8, n[0], nm)) return @floatFromInt(sw[i]);
-            };
-            return self.missing_width;
+            if (self.names[code]) |nm| {
+                // Names the metrics do not list under their own name.
+                const listed = if (std.mem.eql(u8, nm, "sfthyphen")) "hyphen" else if (std.mem.eql(u8, nm, "nbspace")) "space" else nm;
+                for (encoding.names, 0..) |n, i| {
+                    if (std.mem.eql(u8, n[0], listed)) return @floatFromInt(sw[i]);
+                }
+            }
+            if (self.missing_width > 0) return self.missing_width;
+            // A glyph without a width would be drawn over the next one. Every
+            // Courier glyph is 600 wide.
+            return if (std.mem.startsWith(u8, standard14(self.base_font) orelse "", "Courier")) 600 else 500;
         }
         return self.missing_width;
     }

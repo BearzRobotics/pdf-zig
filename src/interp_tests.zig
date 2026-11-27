@@ -1086,3 +1086,24 @@ test "an embedded symbolic font keeps its built-in encoding for glyph names" {
     defer done(bare);
     try testing.expectEqualStrings("A", bare.list.commands[0].text.font.names[65].?);
 }
+
+test "standard fonts without /Widths never give a glyph no width" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { font: []const u8, code: []const u8, advance: f64 }{
+        .{ .font = "/BaseFont /Courier /Encoding << /Differences [1 /Amacron] >>", .code = "01", .advance = 0.6 },
+        .{ .font = "/BaseFont /Courier", .code = "81", .advance = 0.6 },
+        .{ .font = "/BaseFont /Helvetica /Encoding << /Differences [1 /nosuchglyph] >>", .code = "01", .advance = 0.5 },
+        // The soft hyphen and no-break space are a hyphen and a space.
+        .{ .font = "/BaseFont /Helvetica /Encoding /WinAnsiEncoding", .code = "AD", .advance = 0.333 },
+        .{ .font = "/BaseFont /Helvetica /Encoding /WinAnsiEncoding", .code = "A0", .advance = 0.278 },
+        .{ .font = "/BaseFont /Symbol", .code = "41", .advance = 0.6 },
+        .{ .font = "/BaseFont /ZapfDingbats", .code = "41", .advance = 0.6 },
+    };
+    for (cases) |c| {
+        const r = try render(try page(a, try std.fmt.allocPrint(a, "BT /F1 10 Tf <{s}> Tj ET", .{c.code}), helv, &.{try std.fmt.allocPrint(a, "<< /Type /Font /Subtype /Type1 {s} >>", .{c.font})}, ""));
+        defer done(r);
+        try testing.expectApproxEqAbs(c.advance, r.list.commands[0].text.glyphs[0].advance, 1e-9);
+    }
+}
