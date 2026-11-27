@@ -45,6 +45,7 @@ const ff_password: u32 = 1 << 13;
 const ff_radio: u32 = 1 << 15;
 const ff_push_button: u32 = 1 << 16;
 const ff_combo: u32 = 1 << 17;
+const ff_edit: u32 = 1 << 18;
 
 /// One place a field is drawn.
 pub const Widget = struct {
@@ -76,6 +77,11 @@ pub const Field = struct {
     max_len: ?u32,
     /// Choices of a combo or list box (display text).
     options: []const []const u8,
+    /// The export value of each choice, which is what `value` and `/V` hold. It
+    /// is the display text unless the file gives them apart.
+    exports: []const []const u8,
+    /// A combo box that also takes text that is not one of its choices.
+    editable: bool,
     widgets: []const Widget,
 };
 
@@ -186,17 +192,28 @@ const Walk = struct {
             else => {},
         };
 
+        // One entry per element of /Opt, so that indices stay those of the file.
         var options: std.ArrayList([]const u8) = .empty;
+        var exports: std.ArrayList([]const u8) = .empty;
         if (inh.opt) |opt| for (opt) |o| {
-            const r = doc.resolve(o);
-            switch (r) {
-                .string => |s| try options.append(a, try write.textToUtf8(a, s)),
+            var shown: []const u8 = "";
+            var exported: []const u8 = "";
+            switch (doc.resolve(o)) {
+                .string => |s| {
+                    shown = try write.textToUtf8(a, s);
+                    exported = shown;
+                },
                 // [export display]
-                .array => |pair| if (pair.len == 2) if (doc.resolve(pair[1]) == .string) {
-                    try options.append(a, try write.textToUtf8(a, doc.resolve(pair[1]).string));
+                .array => |pair| if (pair.len == 2) {
+                    const first = doc.resolve(pair[0]);
+                    const second = doc.resolve(pair[1]);
+                    if (first == .string) exported = try write.textToUtf8(a, first.string);
+                    if (second == .string) shown = try write.textToUtf8(a, second.string);
                 },
                 else => {},
             }
+            try options.append(a, shown);
+            try exports.append(a, exported);
         };
 
         try self.out.append(a, .{
@@ -210,6 +227,8 @@ const Walk = struct {
             .password = ff & ff_password != 0,
             .max_len = if (inh.max_len) |m| (if (m > 0 and m < 1 << 24) @as(?u32, @intCast(m)) else null) else null,
             .options = try options.toOwnedSlice(a),
+            .exports = try exports.toOwnedSlice(a),
+            .editable = ff & ff_edit != 0,
             .widgets = try widgets.toOwnedSlice(a),
         });
         _ = d;
@@ -245,7 +264,7 @@ const Walk = struct {
 
 // ---- filling ---------------------------------------------------------------------------------------
 
-pub const Error = write.Error || error{ ReadOnly, WrongKind, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
+pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
 
 /// Sets the text of a text field or an editable combo box. The value of a
 /// password field is not stored: it is only shown, masked, in the appearance.
@@ -254,6 +273,11 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
     if (field.kind != .text and field.kind != .combo) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
     const a = upd.allocator();
+    if (field.kind == .combo) {
+        if (optionIndex(field, value)) |i| return storeText(upd, field, field.exports[i], field.options[i]);
+        // A combo box without choices cannot restrict anything.
+        if (!field.editable and field.options.len > 0) return error.NotAnOption;
+    }
 
     // A single-line field has no line breaks; control characters are dropped.
     var clean: std.ArrayList(u8) = .empty;
@@ -269,19 +293,33 @@ pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
         const count = std.unicode.utf8CountCodepoints(text) catch text.len;
         if (count > m) return error.TooLong;
     }
+    return storeText(upd, field, text, text);
+}
 
+/// The choice that `choice` names, by its export value or its display text.
+fn optionIndex(field: Field, choice: []const u8) ?usize {
+    for (field.exports, 0..) |exported, i| if (std.mem.eql(u8, exported, choice)) return i;
+    for (field.options, 0..) |shown, i| if (std.mem.eql(u8, shown, choice)) return i;
+    return null;
+}
+
+/// Writes `value` to `/V` and gives every widget an appearance showing `shown`.
+fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) Error!void {
+    const a = upd.allocator();
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
     // A password is never put in the file (12.7.4.3), where an incremental
     // update would keep it for good. Only its masked appearance is written.
-    fd = if (field.password) try write.dictWithout(a, fd, "V") else try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, text) });
+    fd = if (field.password) try write.dictWithout(a, fd, "V") else try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, value) });
+    // Selected indices would disagree with the new value.
+    fd = try write.dictWithout(a, fd, "I");
     // A rich text value would still say what the field said before.
     fd = try write.dictWithout(a, fd, "RV");
     try upd.set(field.num, .{ .dict = fd });
 
-    const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, text, field.password)));
+    const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, shown, field.password)));
     for (field.widgets) |w| {
         if (w.num == 0) continue;
-        const ap = try textAppearance(upd, w.rect, text, field.multiline, field.password, da);
+        const ap = try textAppearance(upd, w.rect, shown, field.multiline, field.password, da);
         const wd = upd.get(w.num).asDict() orelse continue;
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
     }
@@ -326,16 +364,21 @@ pub fn setChecked(upd: *Update, field: Field, widget: usize, on: bool) Error!voi
     try upd.set(field.num, .{ .dict = fd });
 }
 
-/// Picks `choice` in a combo or list box. `/I` (selected indices) is dropped so
-/// it cannot disagree with the new value.
+/// Picks `choice`, given as an export value or as display text, in a combo or
+/// list box; only an editable combo box takes anything else. `/V` gets the
+/// export value. `/I` (selected indices) is dropped so it cannot disagree.
 pub fn setChoice(upd: *Update, field: Field, choice: []const u8) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .combo and field.kind != .list) return error.WrongKind;
     if (field.kind == .combo) return setText(upd, field, choice);
     if (field.num == 0) return error.DirectObject;
     const a = upd.allocator();
+    var value = choice;
+    if (optionIndex(field, choice)) |i| {
+        value = field.exports[i];
+    } else if (field.options.len > 0) return error.NotAnOption;
     var fd = upd.get(field.num).asDict() orelse return error.DirectObject;
-    fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, choice) });
+    fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, value) });
     fd = try write.dictWithout(a, fd, "I");
     try upd.set(field.num, .{ .dict = fd });
     // A list box has no generated appearance: ask viewers to draw it.
@@ -930,4 +973,50 @@ test "setText counts and keeps CR LF as one line break" {
         try setText(&upd, all[0], "a\r\nb\rc\nd");
         try testing.expectEqualStrings(case.want, upd.get(4).asDict().?.get("V").?.string);
     }
+}
+
+test "choice fields: export values are stored, display text is shown" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const widget = "<< /Type /Annot /Subtype /Widget /FT /Ch /T ({s}) /Ff {d} /Rect [10 10 190 30] /V (NO) /I [0] /Opt [[(NO) (Norway)] [(SE) (Sweden)] (Plain)] >>";
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [4 0 R 5 0 R 6 0 R] >>",
+        try std.fmt.allocPrint(a, widget, .{ "list", 0 }),
+        try std.fmt.allocPrint(a, widget, .{ "combo", 1 << 17 }),
+        try std.fmt.allocPrint(a, widget, .{ "editable", (1 << 17) | (1 << 18) }),
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    const list = findField(all, "list").?;
+    try testing.expectEqualStrings("Sweden", list.options[1]);
+    try testing.expectEqualStrings("SE", list.exports[1]);
+    try testing.expectEqualStrings("Plain", list.exports[2]);
+
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    for ([_][]const u8{ "list", "combo", "editable" }) |name| {
+        const f = findField(all, name).?;
+        // By display text or by export value; /V gets the export value.
+        for ([_][]const u8{ "Sweden", "SE" }) |choice| {
+            try setChoice(&upd, f, choice);
+            const d = upd.get(f.num).asDict().?;
+            try testing.expectEqualStrings("SE", d.get("V").?.string);
+            try testing.expect(d.get("I") == null);
+        }
+    }
+    // The combo shows what the user picked.
+    const ap = upd.get(upd.get(5).asDict().?.get("AP").?.dict.get("N").?.ref.num).stream;
+    try testing.expect(std.mem.indexOf(u8, ap.data, "(Sweden) Tj") != null);
+    // Only an editable combo takes other text.
+    try testing.expectError(error.NotAnOption, setChoice(&upd, findField(all, "list").?, "Atlantis"));
+    try testing.expectError(error.NotAnOption, setText(&upd, findField(all, "combo").?, "Atlantis"));
+    try setText(&upd, findField(all, "editable").?, "Atlantis");
+    try testing.expectEqualStrings("Atlantis", upd.get(6).asDict().?.get("V").?.string);
+    try testing.expect(upd.get(6).asDict().?.get("I") == null);
 }
