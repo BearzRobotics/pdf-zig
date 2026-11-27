@@ -457,7 +457,16 @@ pub const Parser = struct {
         }
         // "4." and ".5" are valid; parseFloat wants digits on both sides.
         var buf: [64]u8 = undefined;
-        if (body.len + 2 > buf.len) return error.Syntax;
+        if (body.len + 2 > buf.len) {
+            // Digits past what an f64 can hold: cut the fraction short, or
+            // drop it when the whole part alone is that long.
+            const dot = std.mem.indexOfScalar(u8, body, '.').?;
+            if (dot >= buf.len - 4) {
+                const whole = std.fmt.parseFloat(f64, body[0..dot]) catch return error.Syntax;
+                return .{ .real = if (neg) -whole else whole };
+            }
+            body = body[0 .. buf.len - 2];
+        }
         var n: usize = 0;
         if (body[0] == '.') {
             buf[n] = '0';
@@ -567,4 +576,24 @@ test "malformed input never crashes" {
     const a = arena.allocator();
     const inputs = [_][]const u8{ "", "<<", "<< /A", "<< /A >", "[", "[ ]]", "(", "(\\", "/", "<", "<<>>", "<<123>>", "R", "1 0", "tru", "-", ".", "+.", "1 0 R R" };
     for (inputs) |text| _ = parseAll(a, text) catch {};
+}
+
+test "very long reals are read, not rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zeros: [100]u8 = @splat('0');
+    const nines: [100]u8 = @splat('9');
+    const cases = [_]struct { []const u8, f64 }{
+        .{ try std.fmt.allocPrint(a, "0.{s}1", .{&zeros}), 0 },
+        .{ try std.fmt.allocPrint(a, "1.5{s}", .{&zeros}), 1.5 },
+        .{ try std.fmt.allocPrint(a, "-.{s}", .{&nines}), -1 },
+        .{ try std.fmt.allocPrint(a, "{s}.5", .{&nines}), 1e100 },
+    };
+    for (cases) |c| {
+        var p = Parser.init(a, c[0], 0);
+        const got = (try p.parseObject()).asNum().?;
+        try std.testing.expectApproxEqRel(c[1] + 1, got + 1, 1e-12);
+        try std.testing.expect(p.atEnd());
+    }
 }
