@@ -9,10 +9,11 @@
 //! a page that was left out can still be in the new file.
 //!
 //! Carried from a source: page contents and resources, annotations, links to
-//! pages imported in the same call, URI and named actions, and which layers are
-//! off by default. Not carried: bookmarks, the form (widgets keep their
-//! appearance but are not fields), document information and metadata, page
-//! labels, attachments of the document, structure, and every other action.
+//! pages imported in the same call, URI and named actions, which layers are off
+//! by default, the fields that have a widget on an imported page, and the
+//! bookmarks that lead to one. Not carried: document information and metadata,
+//! page labels, attachments of the document, structure, scripts and every other
+//! action, and signatures.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,6 +24,8 @@ const pages = @import("pages.zig");
 const outline = @import("outline.zig");
 const interp = @import("interp.zig");
 const serial = @import("write.zig");
+const compose_form = @import("compose_form.zig");
+const compose_outline = @import("compose_outline.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -95,9 +98,20 @@ pub const Builder = struct {
     layers: std.ArrayList(Layer) = .empty,
     /// A source was PDF 2.0.
     version2: bool = false,
+    /// Names and bookmarks.
+    arena: std.heap.ArenaAllocator,
+    /// The form: its top level fields, their names, and the fonts that default
+    /// appearances name (resource name to object number).
+    field_roots: std.ArrayList(u32) = .empty,
+    field_names: std.StringArrayHashMapUnmanaged(void) = .empty,
+    form_fonts: std.StringArrayHashMapUnmanaged(u32) = .empty,
+    need_appearances: bool = false,
+    bookmarks: std.ArrayList(compose_outline.Item) = .empty,
+    /// What names and bookmarks take of `Options.max_bytes`.
+    extra_bytes: usize = 0,
 
     pub fn init(gpa: Allocator, options: Options) Builder {
-        return .{ .gpa = gpa, .options = options };
+        return .{ .gpa = gpa, .options = options, .arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
     pub fn deinit(self: *Builder) void {
@@ -106,6 +120,11 @@ pub const Builder = struct {
         self.page_list.deinit(self.gpa);
         self.layers.deinit(self.gpa);
         self.page_bytes.deinit(self.gpa);
+        self.field_roots.deinit(self.gpa);
+        self.field_names.deinit(self.gpa);
+        self.form_fonts.deinit(self.gpa);
+        self.bookmarks.deinit(self.gpa);
+        self.arena.deinit();
         self.* = undefined;
     }
 
@@ -142,7 +161,13 @@ pub const Builder = struct {
 
     /// The bytes held for the new file so far.
     fn size(self: *const Builder) usize {
-        return self.body.items.len + self.page_bytes.items.len;
+        return self.body.items.len +| self.page_bytes.items.len +| self.extra_bytes;
+    }
+
+    /// Counts `n` bytes held outside the serialized buffers.
+    pub fn charge(self: *Builder, n: usize) Error!void {
+        self.extra_bytes +|= n;
+        if (self.size() > self.options.max_bytes) return error.TooLarge;
     }
 
     /// Turns page `index` of the new document: the clockwise rotation it is
@@ -174,10 +199,10 @@ pub const Builder = struct {
         }
     }
 
-    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool };
+    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize };
 
     fn snapshot(self: *const Builder) Snapshot {
-        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2 };
+        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes };
     }
 
     fn restore(self: *Builder, s: Snapshot) void {
@@ -187,9 +212,15 @@ pub const Builder = struct {
         self.page_list.shrinkRetainingCapacity(s.pages);
         self.layers.shrinkRetainingCapacity(s.layers);
         self.version2 = s.version2;
+        self.field_roots.shrinkRetainingCapacity(s.field_roots);
+        self.field_names.shrinkRetainingCapacity(s.field_names);
+        self.form_fonts.shrinkRetainingCapacity(s.form_fonts);
+        self.need_appearances = s.need_appearances;
+        self.bookmarks.shrinkRetainingCapacity(s.bookmarks);
+        self.extra_bytes = s.extra_bytes;
     }
 
-    fn newNumber(self: *Builder) Error!u32 {
+    pub fn newNumber(self: *Builder) Error!u32 {
         const num = first_free_num + self.offsets.items.len;
         // One more is left for the cross-reference table's free entry.
         if (num + 1 >= self.options.max_objects) return error.TooManyObjects;
@@ -220,24 +251,42 @@ pub const Builder = struct {
 
         // Then the annotations that are objects: they are rewritten, wherever
         // they are referred to from.
+        var form = try compose_form.Plan.read(&copy);
         var annots: std.ArrayList(Annot) = .empty;
         for (chosen, nums) |p, page_num| {
             for (doc.getArray(p.dict, "Annots") orelse &.{}) |item| {
                 if (item != .ref) continue;
                 const d = doc.resolve(item).asDict() orelse continue;
                 if (isDocumentNode(doc, d)) continue;
+                if (isWidget(doc, d)) form.keep(item.ref.num);
                 const gop = try copy.map.getOrPut(copy.a, item.ref.num);
                 if (gop.found_existing) continue;
                 gop.value_ptr.* = try self.newNumber();
                 try annots.append(copy.a, .{ .source = item.ref.num, .num = gop.value_ptr.*, .page = page_num });
             }
         }
+        // And the fields above their widgets, which are numbered too.
+        var groups: std.ArrayList(u32) = .empty;
+        try form.number(&copy, &groups);
+        try form.merge(&copy);
+
         var work: outline.Work = .{ .index_allocator = self.gpa };
         defer work.deinit();
         for (annots.items) |an| {
             _ = scratch.reset(.retain_capacity);
+            const a = scratch.allocator();
             const d = doc.getObject(an.source).asDict() orelse Dict{};
-            try self.emit(an.num, .{ .dict = try copy.annotation(scratch.allocator(), d, an.page, &work) });
+            const copied = try copy.annotation(a, d, an.page, form.omitted(an.source), &work);
+            try self.emit(an.num, .{ .dict = try form.finish(&copy, a, an.source, copied) });
+        }
+        for (groups.items) |source| {
+            _ = scratch.reset(.retain_capacity);
+            const a = scratch.allocator();
+            const d = doc.getObject(source).asDict() orelse Dict{};
+            // Actions on a field are scripts; `finish` gives it its kids.
+            const scripts: []const []const u8 = &.{ "A", "AA" };
+            const copied = try copy.dictionary(a, d, try std.mem.concat(a, []const u8, &.{ scripts, form.omitted(source) }));
+            try self.emit(copy.map.get(source).?, .{ .dict = try form.finish(&copy, a, source, copied) });
         }
 
         // Each page is serialized as soon as it is made, so that many pages
@@ -255,7 +304,7 @@ pub const Builder = struct {
                     if (num != excluded) try items.append(a, .{ .ref = .{ .num = num } });
                 } else {
                     // A direct dictionary stays direct.
-                    const rewritten = try copy.annotation(a, d, page_num, &work);
+                    const rewritten = try copy.annotation(a, d, page_num, &.{}, &work);
                     direct_bytes +|= rewritten.entries.len * @sizeOf(Entry);
                     if (direct_bytes > self.options.max_bytes) return error.TooLarge;
                     try items.append(a, .{ .dict = rewritten });
@@ -272,19 +321,26 @@ pub const Builder = struct {
             try self.emit(next.num, try copy.indirect(scratch.allocator(), next.source));
         }
 
+        try compose_outline.collect(&copy, &work);
+        // Fonts of the form may have queued more.
+        while (done < copy.queue.items.len) : (done += 1) {
+            _ = scratch.reset(.retain_capacity);
+            const next = copy.queue.items[done];
+            try self.emit(next.num, try copy.indirect(scratch.allocator(), next.source));
+        }
         try self.addLayers(&copy);
         if (isVersion2(doc)) self.version2 = true;
     }
 
     /// Serializes `o` as object `num`.
-    fn emit(self: *Builder, num: u32, o: Object) Error!void {
+    pub fn emit(self: *Builder, num: u32, o: Object) Error!void {
         const data_len = if (o == .stream) o.stream.data.len else 0;
         if (data_len > self.options.max_bytes -| self.size()) return error.TooLarge;
         var out: Io.Writer.Allocating = .fromArrayList(self.gpa, &self.body);
         defer self.body = out.toArrayList();
         const at = out.written().len;
         try putObject(&out.writer, num, o);
-        if (out.written().len + self.page_bytes.items.len > self.options.max_bytes) return error.TooLarge;
+        if (out.written().len +| self.page_bytes.items.len +| self.extra_bytes > self.options.max_bytes) return error.TooLarge;
         self.offsets.items[num - first_free_num] = at;
     }
 
@@ -316,7 +372,11 @@ pub const Builder = struct {
         const a = scratch.allocator();
 
         // Where each object is in the file, by number.
-        const count = first_free_num + self.offsets.items.len;
+        const objects = first_free_num + self.offsets.items.len;
+        // The outline takes the numbers after the other objects.
+        const outline_objects = if (self.bookmarks.items.len > 0) self.bookmarks.items.len + 1 else 0;
+        const count = objects + outline_objects;
+        if (count >= self.options.max_objects) return error.TooManyObjects;
         const at = try a.alloc(usize, count);
         @memset(at, not_in_body);
         for (self.offsets.items, first_free_num..) |offset, num| {
@@ -346,6 +406,11 @@ pub const Builder = struct {
             .{ "Type", .{ .name = "Catalog" } },
             .{ "Pages", .{ .ref = .{ .num = tree_num } } },
         });
+        if (outline_objects > 0) {
+            try compose_outline.write(a, self.bookmarks.items, @intCast(objects), &tail.writer, before_tail, at);
+            catalog = try serial.dictWith(a, catalog, "Outlines", .{ .ref = .{ .num = @intCast(objects) } });
+        }
+        if (self.field_roots.items.len > 0) catalog = try serial.dictWith(a, catalog, "AcroForm", .{ .dict = try self.formDictionary(a) });
         if (self.layers.items.len > 0) catalog = try serial.dictWith(a, catalog, "OCProperties", .{ .dict = try self.layerProperties(a) });
         at[catalog_num] = before_tail + tail.written().len;
         try putObject(&tail.writer, catalog_num, .{ .dict = catalog });
@@ -378,6 +443,21 @@ pub const Builder = struct {
         w.writeAll(tail.written()) catch return error.WriteFailed;
     }
 
+    /// The interactive form dictionary (table 218).
+    fn formDictionary(self: *const Builder, a: Allocator) Allocator.Error!Dict {
+        const roots = try a.alloc(Object, self.field_roots.items.len);
+        for (self.field_roots.items, roots) |num, *r| r.* = .{ .ref = .{ .num = num } };
+        var out = try serial.makeDict(a, &.{.{ "Fields", .{ .array = roots } }});
+        if (self.form_fonts.count() > 0) {
+            const fonts = try a.alloc(Entry, self.form_fonts.count());
+            for (self.form_fonts.keys(), self.form_fonts.values(), fonts) |name, num, *e| e.* = .{ .key = name, .value = .{ .ref = .{ .num = num } } };
+            const resources = try serial.makeDict(a, &.{.{ "Font", .{ .dict = .{ .entries = fonts } } }});
+            out = try serial.dictWith(a, out, "DR", .{ .dict = resources });
+        }
+        if (self.need_appearances) out = try serial.dictWith(a, out, "NeedAppearances", .{ .boolean = true });
+        return out;
+    }
+
     /// `/OCProperties` for the copied layers (8.11.4.2). `/Order` lets a viewer
     /// list them.
     fn layerProperties(self: *const Builder, a: Allocator) Allocator.Error!Dict {
@@ -408,23 +488,27 @@ const Annot = struct {
 
 /// Object `num` as it appears in the file. `w` grows in memory, so it only fails
 /// for want of it.
-fn putObject(w: *Io.Writer, num: u32, o: Object) error{OutOfMemory}!void {
+pub fn putObject(w: *Io.Writer, num: u32, o: Object) error{OutOfMemory}!void {
     w.print("{d} 0 obj\n", .{num}) catch return error.OutOfMemory;
     serial.writeObject(w, o) catch return error.OutOfMemory;
     w.writeAll("\nendobj\n") catch return error.OutOfMemory;
 }
 
 /// In `Copy.map`: an object that is not copied, so references to it are null.
-const excluded = 0;
+pub const excluded = 0;
 
 /// Whether `d` is part of the source's document structure, which is never
 /// copied: reaching a page this way would bring in a page that was left out.
-fn isDocumentNode(doc: *Document, d: Dict) bool {
+pub fn isDocumentNode(doc: *Document, d: Dict) bool {
     const ty = doc.getName(d, "Type") orelse return false;
     for ([_][]const u8{ "Catalog", "Pages", "Page", "StructTreeRoot", "StructElem", "Outlines" }) |name| {
         if (std.mem.eql(u8, ty, name)) return true;
     }
     return false;
+}
+
+fn isWidget(doc: *Document, d: Dict) bool {
+    return std.mem.eql(u8, doc.getName(d, "Subtype") orelse "", "Widget");
 }
 
 fn isOneOf(key: []const u8, keys: []const []const u8) bool {
@@ -440,7 +524,7 @@ fn isVersion2(doc: *Document) bool {
 }
 
 /// One call's copying from one document.
-const Copy = struct {
+pub const Copy = struct {
     builder: *Builder,
     doc: *Document,
     /// Lives as long as the call.
@@ -452,7 +536,7 @@ const Copy = struct {
 
     /// What a reference to source object `num` becomes. An object met for the
     /// first time is numbered and queued.
-    fn reference(self: *Copy, num: u32) Error!Object {
+    pub fn reference(self: *Copy, num: u32) Error!Object {
         const gop = try self.map.getOrPut(self.a, num);
         if (!gop.found_existing) {
             gop.value_ptr.* = excluded;
@@ -471,7 +555,7 @@ const Copy = struct {
 
     /// A direct value with its references renumbered. Nesting is bounded by the
     /// parser; references are queued, not followed.
-    fn value(self: *Copy, a: Allocator, v: Object) Error!Object {
+    pub fn value(self: *Copy, a: Allocator, v: Object) Error!Object {
         switch (v) {
             .ref => |r| return self.reference(r.num),
             .array => |arr| {
@@ -487,7 +571,7 @@ const Copy = struct {
     }
 
     /// `d` copied, without the keys in `without`.
-    fn dictionary(self: *Copy, a: Allocator, d: Dict, without: []const []const u8) Error!Dict {
+    pub fn dictionary(self: *Copy, a: Allocator, d: Dict, without: []const []const u8) Error!Dict {
         var out: std.ArrayList(Entry) = .empty;
         for (d.entries) |e| {
             if (isOneOf(e.key, without)) continue;
@@ -525,17 +609,17 @@ const Copy = struct {
 
     /// An annotation of a page being imported. Links and actions are reduced to
     /// what the new document can honour.
-    fn annotation(self: *Copy, a: Allocator, d: Dict, page_num: u32, work: *outline.Work) Error!Dict {
+    fn annotation(self: *Copy, a: Allocator, d: Dict, page_num: u32, omit: []const []const u8, work: *outline.Work) Error!Dict {
         const doc = self.doc;
-        const widget = std.mem.eql(u8, doc.getName(d, "Subtype") orelse "", "Widget");
+        const widget = isWidget(doc, d);
         // A widget's `/Parent` is its field, whose other widgets may be on
-        // pages left out; there is no form in the new document yet.
+        // pages left out. `compose_form` gives it back for fields of the form.
         const without: []const []const u8 = if (widget)
             &.{ "A", "AA", "PA", "Dest", "P", "StructParent", "Parent" }
         else
             &.{ "A", "AA", "PA", "Dest", "P", "StructParent" };
         var out: std.ArrayList(Entry) = .empty;
-        try out.appendSlice(a, (try self.dictionary(a, d, without)).entries);
+        try out.appendSlice(a, (try self.dictionary(a, d, try std.mem.concat(a, []const u8, &.{ without, omit }))).entries);
         if (d.has("P")) try out.append(a, .{ .key = "P", .value = .{ .ref = .{ .num = page_num } } });
 
         if (d.get("Dest")) |dest| {
@@ -566,7 +650,7 @@ const Copy = struct {
 
     /// A destination as an explicit array to a page imported in this call, or
     /// null. Names are looked up now: the name table is not copied.
-    fn destination(self: *Copy, a: Allocator, dest: Object, work: *outline.Work) Error!?Object {
+    pub fn destination(self: *Copy, a: Allocator, dest: Object, work: *outline.Work) Error!?Object {
         const arr = outline.destinationArray(self.doc, dest, 0, work) orelse return null;
         // `[page /Kind numbers...]`, at most four numbers (table 151).
         if (arr.len == 0 or arr.len > 6 or arr[0] != .ref) return null;

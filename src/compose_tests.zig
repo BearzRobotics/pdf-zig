@@ -119,8 +119,8 @@ test "a page that is left out is not in the file, whatever refers to it" {
     // Page 1 links to pages 2 and 3, and shares a field with page 3.
     const bytes = try imported(a, &.{0});
     for ([_][]const u8{ "Second page", "Third page" }) |gone| try testing.expect(!has(bytes, gone));
-    // Neither the field nor any script comes along.
-    for ([_][]const u8{ "fieldvalue", "JavaScript", "pageopen", "linkscript", "chained", "AcroForm", "Outlines", "/Names", "/AA" }) |gone| {
+    // No script comes along, nor an outline without a bookmark to keep.
+    for ([_][]const u8{ "JavaScript", "pageopen", "linkscript", "chained", "Outlines", "/Names", "/AA" }) |gone| {
         try testing.expect(!has(bytes, gone));
     }
     var out = try reopen(a, bytes);
@@ -458,4 +458,251 @@ test "an attachment encrypted in a way that is not read is not copied as noise" 
         const result = b.importPages(&doc, &.{0}, .{ .allow_decrypted_output = true });
         if (own_filter) try testing.expectError(error.UnsupportedFilter, result) else try result;
     }
+}
+
+/// Two pages with a form and bookmarks. Fields: a group `who` holding `name`
+/// (a widget on each page), a check box on page 2, and a signature on page 1.
+/// The font `F1` of the form has its default appearance in an object.
+fn formSample(a: Allocator, value: []const u8) ![]const u8 {
+    return file(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R /Outlines 15 0 R /Names << /Dests << /Names [(two) [4 0 R /FitH 50]] >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 100] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [8 0 R 11 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [9 0 R 10 0 R] >>",
+        "<< /Fields [6 0 R 10 0 R 11 0 R] /DR << /Font << /F1 13 0 R >> >> /DA 14 0 R /Q 1 /CO [6 0 R] /XFA (xfadata) /SigFlags 3 >>",
+        // 6 to 9: the group, its field and the field's two widgets.
+        "<< /T (who) /Kids [7 0 R] /AA << /C << /S /JavaScript /JS (calc) >> >> >>",
+        try std.fmt.allocPrint(a, "<< /FT /Tx /T (name) /Parent 6 0 R /V ({s}) /Kids [8 0 R 9 0 R] >>", .{value}),
+        "<< /Type /Annot /Subtype /Widget /Rect [10 70 90 90] /Parent 7 0 R /P 3 0 R >>",
+        "<< /Type /Annot /Subtype /Widget /Rect [10 40 90 60] /Parent 7 0 R /P 4 0 R /MK << /CA (secondwidget) >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /V /Off /Rect [10 10 20 20] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Sig /T (signed) /V 12 0 R /Rect [100 10 190 30] >>",
+        "<< /Type /Sig /Contents (signaturebytes) >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "(/F1 9 Tf 0 g)",
+        // 15 to 20: the bookmarks.
+        "<< /Type /Outlines /First 16 0 R /Last 19 0 R /Count 4 >>",
+        "<< /Title (Chapter) /Parent 15 0 R /Next 19 0 R /First 17 0 R /Last 18 0 R /Count -2 /C [1 0 0] /F 2 >>",
+        "<< /Title (Section on two) /Parent 16 0 R /Next 18 0 R /Dest (two) >>",
+        "<< /Title (Website) /Parent 16 0 R /Prev 17 0 R /A << /S /URI /URI (https://example.org/) >> >>",
+        "<< /Title (Start) /Parent 15 0 R /Prev 16 0 R /A << /S /GoTo /D [3 0 R /XYZ 0 100 0] >> >>",
+    });
+}
+
+fn fieldNamed(fields: []const pdf.form.Field, name: []const u8) ?pdf.form.Field {
+    for (fields) |f| if (std.mem.eql(u8, f.name, name)) return f;
+    return null;
+}
+
+test "forms stay fillable, with only the widgets of imported pages" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try formSample(a, "Ada"), .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    const bytes = try written(a, &b);
+    for ([_][]const u8{ "secondwidget", "signaturebytes", "xfadata", "JavaScript", "/CO ", "SigFlags", "agree" }) |gone| {
+        try testing.expect(!has(bytes, gone));
+    }
+    var out = try reopen(a, bytes);
+    const fields = try pdf.form.fields(a, &out.doc, out.pages);
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    const name = fieldNamed(fields, "who.name").?;
+    try testing.expectEqualStrings("Ada", name.value);
+    try testing.expectEqual(@as(usize, 1), name.widgets.len);
+    try testing.expectEqual(@as(?usize, 0), name.widgets[0].page);
+    try testing.expectEqualStrings("", fieldNamed(fields, "signed").?.value);
+    // What the form dictionary supplied is on the top level fields.
+    const form = out.doc.getDict(out.doc.catalog().?, "AcroForm").?;
+    const root = out.doc.resolve(out.doc.getArray(form, "Fields").?[0]).asDict().?;
+    try testing.expectEqualStrings("/F1 9 Tf 0 g", out.doc.get(root, "DA").?.string);
+    try testing.expectEqual(@as(i64, 1), out.doc.getInt(root, "Q").?);
+
+    // And it can be filled.
+    var upd = try pdf.write.Update.init(testing.allocator, &out.doc);
+    defer upd.deinit();
+    try pdf.form.setText(&upd, name, "Grace");
+    var filled: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &filled.writer);
+    var again = try reopen(a, filled.written());
+    try testing.expectEqualStrings("Grace", fieldNamed(try pdf.form.fields(a, &again.doc, again.pages), "who.name").?.value);
+    try testing.expectEqualStrings("Grace\n", try again.text(a, 0));
+}
+
+test "merged forms keep their fields apart, and their fonts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var one = try pdf.Document.open(a, try formSample(a, "first"), .{});
+    defer one.deinit();
+    var two = try pdf.Document.open(a, try formSample(a, "second"), .{});
+    defer two.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&one, &.{ 0, 1 }, .{});
+    try b.importPages(&two, &.{ 0, 1 }, .{});
+    var out = try reopen(a, try written(a, &b));
+    const fields = try pdf.form.fields(a, &out.doc, out.pages);
+    try testing.expectEqual(@as(usize, 6), fields.len);
+    for ([_][]const u8{ "who.name", "agree", "signed", "who_2.name", "agree_2", "signed_2" }) |name| {
+        try testing.expect(fieldNamed(fields, name) != null);
+    }
+    const second = fieldNamed(fields, "who_2.name").?;
+    try testing.expectEqualStrings("second", second.value);
+    try testing.expectEqual(@as(usize, 2), second.widgets.len);
+    try testing.expectEqual(@as(?usize, 2), second.widgets[0].page);
+    try testing.expectEqual(@as(?usize, 3), second.widgets[1].page);
+    const form = out.doc.getDict(out.doc.catalog().?, "AcroForm").?;
+    const font_names = out.doc.getDict(out.doc.getDict(form, "DR").?, "Font").?;
+    try testing.expect(font_names.has("F1") and font_names.has("F1_2"));
+    const roots = out.doc.getArray(form, "Fields").?;
+    var renamed_font = false;
+    for (roots) |r| {
+        const d = out.doc.resolve(r).asDict().?;
+        if (std.mem.eql(u8, out.doc.get(d, "T").?.string, "who_2")) renamed_font = std.mem.eql(u8, out.doc.get(d, "DA").?.string, "/F1_2 9 Tf 0 g");
+    }
+    try testing.expect(renamed_font);
+}
+
+test "bookmarks that lead to imported pages are kept, under their headings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try formSample(a, "x"), .{});
+    defer doc.deinit();
+    {
+        var b = Builder.init(testing.allocator, .{});
+        defer b.deinit();
+        try b.importPages(&doc, &.{ 1, 0 }, .{});
+        try b.addBlankPage(10, 10);
+        try b.importPages(&doc, &.{0}, .{});
+        var out = try reopen(a, try written(a, &b));
+        const items = try pdf.outline.read(a, &out.doc, out.pages);
+        try testing.expectEqual(@as(usize, 3), items.len);
+        // The heading has no destination of its own. The web link is dropped.
+        try testing.expectEqualStrings("Chapter", items[0].title);
+        try testing.expect(items[0].dest == null and !items[0].open);
+        try testing.expectEqual(@as(usize, 1), items[0].children.len);
+        try testing.expectEqualStrings("Section on two", items[0].children[0].title);
+        try testing.expectEqual(pdf.outline.Destination{ .page = 0, .y = 50 }, items[0].children[0].dest.?);
+        try testing.expectEqual(pdf.outline.Destination{ .page = 1, .x = 0, .y = 100 }, items[1].dest.?);
+        // From the second call, which had only the first page.
+        try testing.expectEqualStrings("Start", items[2].title);
+        try testing.expectEqual(@as(usize, 3), items[2].dest.?.page);
+        const root = out.doc.getDict(out.doc.catalog().?, "Outlines").?;
+        // Three at the top; the closed chapter hides its section.
+        try testing.expectEqual(@as(i64, 3), out.doc.getInt(root, "Count").?);
+        const chapter = out.doc.getDict(root, "First").?;
+        try testing.expectEqual(@as(i64, -1), out.doc.getInt(chapter, "Count").?);
+        try testing.expectEqual(@as(i64, 2), out.doc.getInt(chapter, "F").?);
+        try testing.expect(chapter.has("C") and !chapter.has("Prev"));
+
+        // A written outline can be edited.
+        var upd = try pdf.write.Update.init(testing.allocator, &out.doc);
+        defer upd.deinit();
+        try pdf.outline.remove(&upd, items[1].num);
+    }
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    var out = try reopen(a, try written(a, &b));
+    const items = try pdf.outline.read(a, &out.doc, out.pages);
+    try testing.expectEqual(@as(usize, 1), items.len);
+    try testing.expectEqualStrings("Start", items[0].title);
+}
+
+test "damaged form and outline trees are copied within limits" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try file(a, &.{
+        // The form lists a page, a loop and a direct dictionary; the outline loops.
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R 4 0 R << /T (direct) >> 99 0 R] >> /Outlines << /First 6 0 R >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>",
+        "<< /T (loop) /Kids [5 0 R 4 0 R] >>",
+        "<< /Subtype /Widget /FT /Tx /Rect [0 0 1 1] /Parent 4 0 R /Kids [4 0 R] >>",
+        "<< /Title (self) /First 6 0 R /Next 6 0 R /Dest [3 0 R /Fit] >>",
+    }), .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    var out = try reopen(a, try written(a, &b));
+    try testing.expectEqual(@as(usize, 1), (try pdf.outline.read(a, &out.doc, out.pages)).len);
+    try testing.expectEqual(@as(usize, 1), (try pdf.form.fields(a, &out.doc, out.pages)).len);
+}
+
+test "a failed call adds no fields or bookmarks" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try formSample(a, "x"), .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    const before = try written(a, &b);
+    // Every size limit short of what a second import needs, so that it fails at
+    // each place that counts.
+    const held = before.len;
+    var limit: usize = 0;
+    var failures: usize = 0;
+    while (limit < held) : (limit += 40) {
+        b.options.max_bytes = b.body.items.len + b.page_bytes.items.len + b.extra_bytes + limit;
+        b.importPages(&doc, &.{ 0, 1 }, .{}) catch |err| {
+            try testing.expectEqual(error.TooLarge, err);
+            failures += 1;
+            b.options.max_bytes = 1 << 30;
+            try testing.expectEqualSlices(u8, before, try written(a, &b));
+            continue;
+        };
+        break;
+    }
+    try testing.expect(failures > 5);
+}
+
+fn importFormUnderAllocationFailure(gpa: Allocator, bytes: []const u8) !void {
+    var doc = try pdf.Document.open(gpa, bytes, .{});
+    defer doc.deinit();
+    var b = Builder.init(gpa, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{ 0, 1 }, .{});
+    try b.importPages(&doc, &.{0}, .{});
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try b.write(&out.writer);
+    const bytes_out = out.written();
+    for ([_][]const u8{ "Section on two", "who_2", "/F1_2 9 Tf", "Helvetica", "AcroForm" }) |want| try testing.expect(has(bytes_out, want));
+}
+
+test "every failed allocation while copying a form is reported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, importFormUnderAllocationFailure, .{try formSample(arena.allocator(), "x")});
+}
+
+test "a field that needs no change is copied as it is" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A form with no defaults: nothing has to be added to its field.
+    var doc = try pdf.Document.open(a, try file(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 99 99] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /T (box) /V /Off /Rect [1 1 9 9] >>",
+    }), .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    var out = try reopen(a, try written(a, &b));
+    const fields = try pdf.form.fields(a, &out.doc, out.pages);
+    try testing.expectEqual(@as(usize, 1), fields.len);
+    try testing.expectEqualStrings("box", fields[0].name);
+    try testing.expectEqual(@as(usize, 1), fields[0].widgets.len);
 }

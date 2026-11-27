@@ -90,9 +90,9 @@ try out.write(&writer.interface);                         // a complete new file
 
 Import all the pages you want from a document in one call: shared fonts and images are
 then copied once, and links between those pages keep working. Pages keep their content,
-annotations, links and hidden layers. **Bookmarks and fillable forms are not carried yet**
-(form fields keep their look), nor are document information, page labels or accessibility
-tags. An encrypted source is refused unless `allow_decrypted_output` is set, because the
+annotations, links, hidden layers, fillable form fields and the bookmarks that lead to them.
+Fields or form fonts that would share a name with an earlier import are renamed (`name_2`).
+Document information, page labels, accessibility tags, scripts and signatures are not carried. An encrypted source is refused unless `allow_decrypted_output` is set, because the
 new file is not encrypted. Leaving a page out is **not redaction**: pages often share
 resources, which are copied whole. Details in `docs/architecture.md`, "New documents".
 Drawing content on new pages is not supported yet.

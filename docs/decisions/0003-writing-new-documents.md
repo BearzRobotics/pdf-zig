@@ -2,7 +2,14 @@
 
 Status: accepted by the maintainer in conversation, with both recommendations under
 "Questions for the maintainer": encrypted sources are refused unless allowed, and forms and
-bookmarks wait for A2. Stage A1 is implemented; see docs/architecture.md.
+bookmarks wait for A2. Stages A1 and A2 are implemented; see docs/architecture.md.
+
+Settled while implementing A2: a clashing name gets a number (`name_2`); the form
+dictionary's `/DA` and `/Q` are written on the top level fields and its fonts merged; a
+bookmark heading whose own target is gone stays without one if a bookmark under it stays;
+bookmarks with other actions are dropped; signature values are dropped. A field with
+widgets on several pages keeps its value when only some of them are imported, because the
+value belongs to the field.
 
 ## Problem
 
