@@ -254,10 +254,10 @@ pub const Document = struct {
         var index_pairs: std.ArrayList(u32) = .empty;
         if (st.dict.get("Index")) |ix| {
             const arr = ix.asArray() orelse return null;
-            for (arr) |x| index_pairs.append(self.a(), @intCast(@max(0, x.asInt() orelse return null))) catch return null;
+            for (arr) |x| index_pairs.append(self.a(), std.math.lossyCast(u32, x.asInt() orelse return null)) catch return null;
         } else {
             const size = (st.dict.get("Size") orelse return null).asInt() orelse return null;
-            index_pairs.appendSlice(self.a(), &.{ 0, @intCast(@max(0, size)) }) catch return null;
+            index_pairs.appendSlice(self.a(), &.{ 0, std.math.lossyCast(u32, size) }) catch return null;
         }
 
         var cursor: usize = 0;

@@ -318,3 +318,15 @@ test "xref table object numbers past 2^32 do not overflow" {
     const bytes = "%PDF-1.7\nxref\n4294967295 2\n0000000000 00000 f \n0000000000 00000 f \ntrailer\n<<>>\nstartxref\n9\n%%EOF\n";
     try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, bytes, .{}));
 }
+
+test "xref stream /Index and /Size larger than u32 do not crash" {
+    const head = "%PDF-1.7\n1 0 obj\n<< /Type /XRef /W [1 1 1] ";
+    const tail = " /Length 3 >>\nstream\nabc\nendstream\nendobj\nstartxref\n9\n%%EOF\n";
+    for ([_][]const u8{
+        head ++ "/Index [0 4294967296] /Size 1" ++ tail,
+        head ++ "/Index [4294967296 1] /Size 1" ++ tail,
+        head ++ "/Size 4294967296" ++ tail,
+    }) |bytes| {
+        try testing.expectError(error.NoCatalog, pdf.Document.open(testing.allocator, bytes, .{}));
+    }
+}
