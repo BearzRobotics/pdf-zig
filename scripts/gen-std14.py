@@ -12,7 +12,9 @@ fonts = ["Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
          "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
          "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"]
 
-# One line per glyph; a glyph the font lacks prints 0 (the error is caught).
+# One line per glyph; 0 if showing it raises an error. A glyph the font merely
+# lacks does not: Ghostscript shows .notdef, whose width is printed. (The library
+# takes the soft hyphen and no-break space from hyphen and space.)
 ps = ["/w { gsave newpath 0 0 moveto dup { glyphshow currentpoint pop } stopped { pop pop pop 0 } if = grestore pop } def"]
 for f in fonts:
     ps.append(f"/{f} findfont 1000 scalefont setfont")

@@ -12,4 +12,4 @@ in `PDFZIG_BIN`. Each exits non-zero if something failed or nothing was run.
 | `renderall.sh LIST` | `pdfinfo -r` on every file: renders every page and decodes images; reports crashes |
 | `fuzz.py LIST FILES MUTATIONS SEED` | corrupts real files (flip, truncate, zero, delete) and runs `pdfinfo -r`; reports crashes and hangs |
 
-A good LIST is every PDF under `/usr/share` and the user's documents (80 files were used).
+A good LIST is a large, varied set of PDFs, such as those under `/usr/share`.

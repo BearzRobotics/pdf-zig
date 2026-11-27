@@ -17,7 +17,7 @@ defer doc.deinit();
 const list = try pdf.pages.PageList.build(&doc);          // every page, in order
 const page = pdf.pages.page(&doc, list, 0).?;             // sizes, rotation, resources
 
-var rend = pdf.Renderer.init(&doc, .{});                  // caches fonts across pages
+var rend = pdf.Renderer.init(&doc, .{});                  // reusable across pages
 defer rend.deinit();
 var dl = try rend.render(gpa, page);                      // the display list
 defer dl.deinit();
@@ -59,13 +59,16 @@ try upd.write(gpa, &writer.interface);                    // original file + the
 | `text.layout` | reading-order text with a box for every glyph; hit testing, search ranges and per-line rectangles |
 | `outline` | reads the bookmark tree (named destinations too); adds and removes bookmarks |
 | `write` | serializes objects; appends an incremental update with a classic table or a cross-reference stream. Refuses encrypted files and files that had to be repaired on open |
-| `annot` | reads annotations; adds highlight, underline, strike-out and note annotations with appearance streams; edits and removes them |
+| `annot` | reads annotations; adds highlights, underlines, strike-outs (a squiggly underline is drawn straight), notes, ink and text boxes with appearance streams; edits and removes them |
 | `form` | finds AcroForm fields (groups, check boxes, radio groups, choices); fills text, check box, radio, combo and list fields |
 
-Form limits: a filled text field gets a new appearance in Helvetica with WinAnsi
-characters (others draw as `?`; `/V` keeps the full text); signature fields are
-listed, not filled; XFA forms are not read; no scripts run. Annotation output was
-checked against poppler (`zig build` makes `pdfmark` and `pdffill` for that).
+Form limits: a filled text field gets a new appearance with the widget's background,
+border and rotation. It uses the font `/DA` names if that font can write the text,
+else Helvetica; characters outside WinAnsi draw as `?` (`/V` keeps the full text). Comb
+fields are not laid out as combs, and a widget's pressed appearance is dropped. The value
+of a password field is not stored in the file. A choice field stores the option's export
+value, and only an editable combo box takes other text. Signature fields are listed, not
+filled; XFA forms are not read; no scripts run.
 
 ## What it reads
 
@@ -73,37 +76,48 @@ checked against poppler (`zig build` makes `pdfmark` and `pdffill` for that).
 |---|---|
 | Encryption | the standard security handler: RC4 40-128 bit, AES-128, AES-256 (R5, R6), user password (`Options.password`, empty by default); other handlers give `error.UnsupportedEncryption`, a wrong password `error.PasswordRequired` |
 | File structure | header, cross-reference tables and streams, `/Prev` chains, hybrid files, object streams, incremental updates; **repair** by scanning when the table is damaged |
-| Filters | Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG and TIFF predictors. DCT, JPX, JBIG2 and CCITT are passed on undecoded (`Document.decodeStream` reports the first one in `rest`) |
+| Filters | Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG and TIFF predictors. DCT, JPX, JBIG2 and CCITT are passed on by `Document.decodeStream`, which reports the first one in `rest` (`image.decode` decodes CCITT) |
 | Page tree | inherited `Resources`, `MediaBox`, `CropBox`, `Rotate`; wrong `/Count` and cycles tolerated |
 | Graphics | paths, strokes (width, caps, joins, dashes), fills (both rules), clipping, forms, inline images, image XObjects (referenced, not decoded), axial and radial shadings (sampled to colour stops), shading and tiling patterns, optional content (layers), annotation appearance streams, transparency values (`ca`, `CA`) and blend-mode names |
 | Colour | DeviceGray/RGB/CMYK, Cal*/ICC (as the device space), Lab, Indexed, Separation, DeviceN, Pattern; PDF functions of types 0, 2, 3 and 4 |
 | Text | simple fonts (Type 1, TrueType, Type 3), composite fonts (Type 0 with Identity or embedded CMaps), encodings (Standard, WinAnsi, MacRoman, Differences), `/ToUnicode`, `/Widths`, `/W`, the standard 14 metrics, text state and all text operators |
-| Text extraction | reading order or content-stream order; ligatures expanded |
+| Text extraction | reading order or content-stream order, rotated text along its own baseline; ligatures expanded |
+| Images | `image.decode` gives straight-alpha RGBA for Flate/LZW/ASCII/RunLength/CCITT/raw images: 1, 2, 4, 8, 16 bit, every colour space above, `/Decode`, stencil masks, colour-key masks, soft masks. JPEG, JPX and JBIG2 data is returned undecoded with the codec name; `image.fromSamples` then applies the colour space and masks to the codec's samples, and `image.withMaskSamples` a mask that needed the codec |
 
-| Images | `image.decode` gives straight-alpha RGBA for Flate/LZW/ASCII/RunLength/raw images: 1, 2, 4, 8, 16 bit, every colour space above, `/Decode`, stencil masks, colour-key masks, soft masks. JPEG, JPX, JBIG2 and CCITT data is returned undecoded with the codec name; `image.fromSamples` then applies the colour space and masks to the codec's samples |
+Not done (see `docs/architecture.md`, "Not supported"): JBIG2, DCT and JPX decoding (the viewer's codec's job), public-key encryption, mesh and function-based shadings, soft masks of graphics state, vertical writing, predefined CJK CMaps other than Identity.
 
-Not done (see `docs/architecture.md`, "Not supported"): JBIG2 and CCITT decoding (JPEG and JPX are the viewer's codec's job), public-key encryption, mesh and function-based shadings, soft masks of graphics state, vertical writing, predefined CJK CMaps other than Identity.
+Damaged and hostile files are expected: limits on memory and work are described in
+`docs/decisions/0002-work-limits.md`. No claim of being proof against every input is made.
 
 ## Checked against poppler
 
-On the 80 PDFs found on the development machine (CUPS, pdfTeX, Cairo, LibreOffice, Skia,
-Ghostscript, fig2dev output): the page count matches `pdfinfo` on every file poppler can
-read, and the words of `pdftext -raw` match `pdftotext -raw` to within about 1% (the
-differences are spacing heuristics and ligature handling). A 332-page, 15 MB book is
-extracted in about 3 s using 35 MB. This is a comparison on one set of files, not a
-conformance claim.
+On an even sample of 831 of the PDFs under `/usr/share` on the development machine
+(mostly TeX documentation), version 0.3.0 reports the same page count, draws the same
+number of commands and reports the same page errors as 0.2.2 did, with no crash or
+timeout. The text of some files differs. Measured by words against `pdftotext`, in
+reading order 125 of those files moved closer to it, 60 further away and 15 stayed as
+far (the total difference over them fell by about 4%). In stream order 135 moved closer,
+9 further and 4 stayed as far, but the total rose by about 2%, mostly from two files with
+heavily overlapping text. In a separate sample, 273 copies with annotations added by the
+library showed no new errors when Poppler and MuPDF drew their first page. These are
+comparisons on one set of files, not a conformance claim. The scripts in `test/tools/`
+compare with `pdftotext` and `pdfinfo`.
 
 ## Example programs
 
 `zig build` installs `pdfinfo` (structure, `-r` renders every page and decodes its images),
 `pdftext` (`-raw` for stream order, `-p` for a password), `pdfdump` (the display list of a page),
-`pdfsvg` (a page as SVG, to look at) and `pdfimg` (decode the images of a page).
+`pdfsvg` (a page as SVG, to look at), `pdfimg` (decode the images of a page), `pdfmark`
+(highlight a word and add a note) and `pdffill` (list or fill form fields).
 
 ## Tests
 
-`zig build test`: syntax, filters (with the spec's LZW example), documents (incremental
-updates, xref streams, repair, mutation fuzzing, encrypted files made with qpdf), pages, content streams, encodings,
-CMaps, fonts, functions, colour, the interpreter on hand-built pages, text extraction, images.
+`zig build test` runs the unit tests and compiles the example programs: syntax, filters
+(with LZW data from libtiff and fax data from Ghostscript), documents (xref forms, repair,
+hostile input, token-level mutation), encrypted files made with qpdf, content streams,
+fonts, CMaps, functions, colour, the interpreter, text extraction, images, and writing.
+It also passes for `x86-linux` and in the release modes. Changes between releases are in
+`docs/CHANGELOG.md`.
 
 ## License
 
