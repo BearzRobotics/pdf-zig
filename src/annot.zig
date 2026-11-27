@@ -510,7 +510,11 @@ fn attachToPage(upd: *Update, page: pages.Page, annot: Ref) Error!void {
 /// other styling its old appearance had is not kept.
 pub fn setContents(upd: *Update, num: u32, contents: []const u8, date: ?[]const u8) Error!void {
     const a = upd.allocator();
-    var d = upd.get(num).asDict() orelse return error.NoSuchAnnotation;
+    // A dictionary of its own (not a stream, whose data would be lost) with an
+    // annotation's subtype and rectangle.
+    const target = upd.get(num);
+    if (target != .dict or !target.dict.has("Subtype") or !target.dict.has("Rect")) return error.NoSuchAnnotation;
+    var d = target.dict;
     d = try write.dictWith(a, d, "Contents", .{ .string = try write.textString(a, contents) });
     if (date) |m| d = try write.dictWith(a, d, "M", .{ .string = try a.dupe(u8, m) });
     // Rich text, which some viewers prefer, would still say the old thing.
@@ -960,4 +964,18 @@ test "editing one page leaves other pages that share its /Annots array alone" {
         try testing.expectEqual(@as(usize, if (adding) 2 else 0), (try list(aa, &doc2, pages.page(&doc2, pl2, 0).?)).len);
         try testing.expectEqual(@as(usize, 1), (try list(aa, &doc2, pages.page(&doc2, pl2, 1).?)).len);
     }
+}
+
+test "setContents changes only annotations" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{"<< /Subtype /Text /Rect [0 0 1 1] /Length 3 >>\nstream\nabc\nendstream"}, ""), .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    // The catalog, the page tree, the page, a content stream, a stream that
+    // pretends to be an annotation, and nothing at all.
+    for ([_]u32{ 1, 2, 3, 4, 5, 99 }) |num| try testing.expectError(error.NoSuchAnnotation, setContents(&upd, num, "x", null));
+    try testing.expectEqual(@as(usize, 0), upd.changed.count());
 }
