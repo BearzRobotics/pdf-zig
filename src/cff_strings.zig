@@ -33,7 +33,7 @@ pub const std_strings = [_][]const u8{
     "ecircumflex",     "edieresis",        "egrave",              "iacute",            "icircumflex",        "idieresis",         "igrave",             "ntilde",
     "oacute",          "ocircumflex",      "odieresis",           "ograve",            "otilde",             "scaron",            "uacute",             "ucircumflex",
     "udieresis",       "ugrave",           "yacute",              "ydieresis",         "zcaron",             "exclamsmall",       "Hungarumlautsmall",  "dollaroldstyle",
-    "dollarsuperior",  "ampersandsmall",   "Acutesmall",          "parenleftsuperior", "parenrightsuperior", "266ff",             "onedotenleader",     "zerooldstyle",
+    "dollarsuperior",  "ampersandsmall",   "Acutesmall",          "parenleftsuperior", "parenrightsuperior", "twodotenleader",    "onedotenleader",     "zerooldstyle",
     "oneoldstyle",     "twooldstyle",      "threeoldstyle",       "fouroldstyle",      "fiveoldstyle",       "sixoldstyle",       "sevenoldstyle",      "eightoldstyle",
     "nineoldstyle",    "commasuperior",    "threequartersemdash", "periodsuperior",    "questionsmall",      "asuperior",         "bsuperior",          "centsuperior",
     "dsuperior",       "esuperior",        "isuperior",           "lsuperior",         "msuperior",          "nsuperior",         "osuperior",          "rsuperior",

@@ -65,3 +65,11 @@ test {
     _ = @import("interp_tests.zig");
     _ = @import("doc_tests.zig");
 }
+
+test "CFF standard strings" {
+    // Adobe Technical Note 5176, appendix A.
+    try @import("std").testing.expectEqual(@as(usize, 391), cff_strings.std_strings.len);
+    try @import("std").testing.expectEqualStrings("twodotenleader", cff_strings.std_strings[237]);
+    try @import("std").testing.expectEqualStrings(".notdef", cff_strings.std_strings[0]);
+    try @import("std").testing.expectEqualStrings("Semibold", cff_strings.std_strings[390]);
+}
