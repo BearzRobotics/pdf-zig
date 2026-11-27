@@ -308,10 +308,11 @@ test "image XObjects and inline images" {
     try testing.expectEqual(@as(u32, 4), im.width);
     try testing.expectEqual(@as(f64, 50), im.ctm.a);
     try testing.expectEqual(@as(u32, 5), im.num);
-    for (r.list.commands) |c| if (c == .image and c.image.num == 0) {
-        try testing.expectEqual(@as(u32, 2), c.image.width);
-        try testing.expectEqualStrings("abcd", c.image.stream.data);
-    };
+    // The second image is the inline one, which has no object number.
+    const inline_image = r.list.commands[4].image;
+    try testing.expectEqual(@as(u32, 0), inline_image.num);
+    try testing.expectEqual(@as(u32, 2), inline_image.width);
+    try testing.expectEqualStrings("abcd", inline_image.stream.data);
 }
 
 test "optional content: a hidden layer draws nothing" {
@@ -1217,4 +1218,244 @@ test "encoding edge cases: unused and special WinAnsi codes, expert and Type 3 n
     // A Type 3 font has only the names of its Differences.
     try testing.expect(fonts[2].names['b'] == null);
     try testing.expectEqualStrings("ga", fonts[2].names['a'].?);
+}
+
+test "operands keep their values through the scanner" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var scanner = pdf.content.Scanner.init(arena.allocator(), "1 2 3 4 5.5 -6 cm [(A) -120 (B)] TJ true false null foo");
+    const cm = (try scanner.next()).?;
+    for ([_]f64{ 1, 2, 3, 4, 5.5, -6 }, cm.operands) |want, got| try testing.expectEqual(want, got.asNum().?);
+    const tj = (try scanner.next()).?.operands[0].array;
+    try testing.expectEqualStrings("A", tj[0].string);
+    try testing.expectEqual(@as(i64, -120), tj[1].integer);
+    try testing.expectEqualStrings("B", tj[2].string);
+    const foo = (try scanner.next()).?;
+    try testing.expect(foo.operands[0].boolean and !foo.operands[1].boolean and foo.operands[2] == .null);
+}
+
+test "scanning continues with the operators after damage" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var scanner = pdf.content.Scanner.init(arena.allocator(), ") ] >> (unterminated\n1 2 m 12abc 3 4 l q");
+    var names: std.ArrayList(u8) = .empty;
+    while (try scanner.next()) |op| {
+        if (std.mem.eql(u8, op.name, "m") or std.mem.eql(u8, op.name, "l") or std.mem.eql(u8, op.name, "q")) try names.appendSlice(arena.allocator(), op.name);
+    }
+    try testing.expectEqualStrings("mlq", names.items);
+}
+
+test "cm concatenates in order, and Q restores the whole state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "q 2 0 0 3 0 0 cm 1 0 0 1 5 7 cm 1 0 0 rg 4 w 0 0 1 1 re f Q 0 0 1 1 re B", "", &.{}, ""));
+    defer done(r);
+    // The translation is inside the scaling.
+    const inner = r.list.commands[1].fill;
+    try testing.expectEqual(@as(f64, 10), inner.ctm.e);
+    try testing.expectEqual(@as(f64, 21), inner.ctm.f);
+    try testing.expectEqual(@as(f32, 1), inner.paint.color.r);
+    const outer = r.list.commands[3].fill;
+    try testing.expectEqual(@as(f64, 1), outer.ctm.a);
+    try testing.expectEqual(@as(f32, 0), outer.paint.color.r);
+    try testing.expectEqual(@as(f64, 1), r.list.commands[4].stroke.style.width);
+}
+
+test "text: the double quote operator, TD, Ts and TJ under Tz" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 10 90 Td 0 -20 TD 3 2 (a b) \" 4 Ts 50 Tz [(a) -1000 (b)] TJ T* (c) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const quoted = r.list.commands[0].text;
+    // TD sets the leading to 20, which " moves down by.
+    try testing.expectApproxEqAbs(@as(f64, 50), quoted.tm.f, 1e-9);
+    // Word spacing 3, character spacing 2: a (556), then the space (278).
+    try testing.expectApproxEqAbs(@as(f64, 7.56), quoted.glyphs[1].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 7.56 + 2.78 + 2 + 3), quoted.glyphs[2].x, 1e-9);
+    const adjusted = r.list.commands[1].text;
+    try testing.expectEqual(@as(f64, 4), adjusted.rise);
+    // (5.56 + 2) * 0.5, then the adjustment of 10 * 0.5.
+    try testing.expectApproxEqAbs(@as(f64, 3.78 + 5), adjusted.glyphs[1].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 30), r.list.commands[2].text.tm.f, 1e-9);
+}
+
+test "ToUnicode wins over a simple font's encoding" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const text = "1 beginbfchar <41> <005A> endbfchar";
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf (AB) Tj ET", helv, &.{
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>",
+        try std.fmt.allocPrint(arena.allocator(), "<< /Length {d} >>\nstream\n{s}\nendstream", .{ text.len, text }),
+    }, ""));
+    defer done(r);
+    const glyphs = r.list.commands[0].text.glyphs;
+    try testing.expectEqualStrings("Z", glyphs[0].text);
+    try testing.expectEqualStrings("B", glyphs[1].text);
+}
+
+test "a form uses its own resources and is clipped to its bounding box" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = "/C cs 1 sc 0 0 50 50 re f";
+    const r = try render(try page(a, "/F Do", "/XObject << /F 5 0 R >> /ColorSpace << /C [/Indexed /DeviceRGB 1 <000000FF0000>] >>", &.{
+        try std.fmt.allocPrint(a, "<< /Subtype /Form /BBox [1 2 30 40] /Resources << /ColorSpace << /C [/Indexed /DeviceRGB 1 <0000000000FF>] >> >> /Length {d} >>\nstream\n{s}\nendstream", .{ body.len, body }),
+    }, ""));
+    defer done(r);
+    const clip = r.list.commands[1].clip.path;
+    try testing.expectEqual(display.Point{ .x = 1, .y = 2 }, clip[0].move);
+    try testing.expectEqual(display.Point{ .x = 30, .y = 2 }, clip[1].line);
+    try testing.expectEqual(display.Point{ .x = 30, .y = 40 }, clip[2].line);
+    try testing.expectEqual(display.Point{ .x = 1, .y = 40 }, clip[3].line);
+    const fill = r.list.commands[2].fill;
+    try testing.expectEqual(@as(f32, 1), fill.paint.color.b);
+    try testing.expectEqual(@as(f32, 0), fill.paint.color.r);
+}
+
+test "optional content: the right layer is hidden, for content, XObjects, annotations and BaseState" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Layer 5 (/A) and layer 6 (/B). Squares of different sizes say which show.
+    const form = "<< /Subtype /Form /BBox [0 0 9 9] /OC 6 0 R /Length 12 >>\nstream\n0 0 3 3 re f\nendstream";
+    const appearance = "<< /Subtype /Form /BBox [0 0 9 9] /Length 12 >>\nstream\n0 0 4 4 re f\nendstream";
+    const content = "/OC /A BDC 0 0 1 1 re f EMC /OC /B BDC 0 0 2 2 re f EMC /F Do";
+    for ([_]struct { config: []const u8, shown: []const f64 }{
+        .{ .config = "/OFF [6 0 R]", .shown = &.{1} },
+        .{ .config = "/OFF [5 0 R]", .shown = &.{ 2, 3, 4 } },
+        .{ .config = "/BaseState /OFF /ON [6 0 R]", .shown = &.{ 2, 3, 4 } },
+    }) |case| {
+        const bytes = try buildFile(a, &.{
+            try std.fmt.allocPrint(a, "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << {s} >> >> >>", .{case.config}),
+            "<< /Type /Pages /Kids [3 0 R] >>",
+            "<< /Type /Page /MediaBox [0 0 100 100] /Contents 4 0 R /Annots [9 0 R] /Resources << /Properties << /A 5 0 R /B 6 0 R >> /XObject << /F 7 0 R >> >> >>",
+            try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ content.len, content }),
+            "<< /Type /OCG >>",
+            "<< /Type /OCG >>",
+            form,
+            appearance,
+            "<< /Subtype /Square /Rect [0 0 9 9] /OC 6 0 R /AP << /N 8 0 R >> >>",
+        });
+        const r = try render(bytes);
+        defer done(r);
+        try testing.expect(!r.doc.repaired);
+        var shown: std.ArrayList(f64) = .empty;
+        for (r.list.commands) |c| if (c == .fill) try shown.append(a, c.fill.path[1].line.x);
+        try testing.expectEqualSlices(f64, case.shown, shown.items);
+    }
+}
+
+test "paths, clips and dashes carry their coordinates and rules" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "[4 2.5] 1 d 10 20 100 50 re S 1 2 3 4 re W n 0 0 m 1 2 3 4 v 5 6 7 8 y h f 0 0 9 9 re W* n", "", &.{}, ""));
+    defer done(r);
+    const stroke = r.list.commands[0].stroke;
+    try testing.expectEqualSlices(f64, &.{ 4, 2.5 }, stroke.style.dash);
+    try testing.expectEqual(display.Point{ .x = 10, .y = 20 }, stroke.path[0].move);
+    try testing.expectEqual(display.Point{ .x = 110, .y = 70 }, stroke.path[2].line);
+    const clip = r.list.commands[1].clip;
+    try testing.expectEqual(display.FillRule.nonzero, clip.rule);
+    try testing.expectEqual(display.Point{ .x = 4, .y = 6 }, clip.path[2].line);
+    const curves = r.list.commands[2].fill.path;
+    // v: the current point is the first control point. y: the end is the second.
+    try testing.expectEqual(display.Point{ .x = 0, .y = 0 }, curves[1].curve.c1);
+    try testing.expectEqual(display.Point{ .x = 1, .y = 2 }, curves[1].curve.c2);
+    try testing.expectEqual(display.Point{ .x = 7, .y = 8 }, curves[2].curve.c2);
+    try testing.expectEqual(display.Point{ .x = 7, .y = 8 }, curves[2].curve.p);
+    try testing.expectEqual(display.FillRule.even_odd, r.list.commands[3].clip.rule);
+}
+
+test "every page rotation puts the crop box on the displayed page" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Crop box 100 x 50 with its lower left corner at (10, 10). For each
+    // rotation, where that corner lands.
+    for ([_]struct { rotate: u16, x: f64, y: f64, width: f64 }{
+        .{ .rotate = 0, .x = 0, .y = 50, .width = 100 },
+        .{ .rotate = 90, .x = 0, .y = 0, .width = 50 },
+        .{ .rotate = 180, .x = 100, .y = 0, .width = 100 },
+        .{ .rotate = 270, .x = 50, .y = 100, .width = 50 },
+    }) |c| {
+        const r = try render(try page(arena.allocator(), "", "", &.{}, try std.fmt.allocPrint(arena.allocator(), "/Rotate {d} /CropBox [10 10 110 60]", .{c.rotate})));
+        defer done(r);
+        try testing.expectEqual(c.width, r.list.width);
+        const p = r.list.base.apply(10, 10);
+        try testing.expectEqual(c.x, p.x);
+        try testing.expectEqual(c.y, p.y);
+        // The whole crop box stays on the page.
+        const far = r.list.base.apply(110, 60);
+        try testing.expect(far.x >= 0 and far.x <= r.list.width and far.y >= 0 and far.y <= r.list.height);
+    }
+}
+
+test "layout: out-of-order runs are sorted, and a selection over two lines gives two rectangles" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try render(try page(a, "BT /F1 10 Tf 1 0 0 1 60 80 Tm (two) Tj 1 0 0 1 20 80 Tm (one) Tj 1 0 0 1 20 60 Tm (three) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    var lay = try pdf.text.layout(a, &r.list);
+    try testing.expectEqualStrings("one two\nthree\n", lay.text);
+    var rects: std.ArrayList(pdf.text.Rect) = .empty;
+    try lay.rectsFor(a, 0, @intCast(lay.text.len), &rects);
+    try testing.expectEqual(@as(usize, 2), rects.items.len);
+    try testing.expect(rects.items[0].y1 <= rects.items[1].y0 + 1);
+    try testing.expectEqualStrings("two one\nthree\n", try pdf.text.extract(a, &r.list, .content));
+}
+
+test "a matrix times its inverse is the identity in every component" {
+    const m: display.Matrix = .{ .a = 2, .b = 1, .c = -3, .d = 4, .e = 5, .f = -6 };
+    for ([_]display.Matrix{ m.mul(m.invert().?), m.invert().?.mul(m) }) |i| {
+        for ([_][2]f64{ .{ i.a, 1 }, .{ i.b, 0 }, .{ i.c, 0 }, .{ i.d, 1 }, .{ i.e, 0 }, .{ i.f, 0 } }) |pair| try testing.expectApproxEqAbs(pair[1], pair[0], 1e-12);
+    }
+}
+
+test "graphics state dictionaries, patterns, radial shadings and annotation states" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const square = "<< /Subtype /Form /BBox [0 0 9 9] /Length 12 >>\nstream\n0 0 7 7 re f\nendstream";
+    const other = "<< /Subtype /Form /BBox [0 0 9 9] /Length 12 >>\nstream\n0 0 8 8 re f\nendstream";
+    const r = try render(try page(a, "/G gs 0 0 1 1 re B /Pattern cs /P scn 0 0 2 2 re f /S sh", "/ExtGState << /G << /LW 7 /LC 1 /LJ 2 /ML 3 /ca 0.25 /CA 0.5 /BM /Screen /D [[5] 2] >> >> /Pattern << /P 5 0 R >> /Shading << /S 6 0 R >>", &.{
+        "<< /PatternType 1 /PaintType 1 /BBox [0 0 2 3] /XStep 4 /YStep 5 /Matrix [1 0 0 1 6 7] /Length 12 >>\nstream\n0 0 1 1 re f\nendstream",
+        // Two one-output functions, a background and a bounding box.
+        "<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [1 2 3 4 5 6] /Background [0 1 0] /BBox [0 0 5 5] /Function [<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] >> << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] >> << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] >>] >>",
+        // Hidden, NoView, and one that shows the state /AS names.
+        "<< /Subtype /Square /F 2 /Rect [0 0 9 9] /AP << /N 10 0 R >> >>",
+        "<< /Subtype /Square /F 32 /Rect [0 0 9 9] /AP << /N 10 0 R >> >>",
+        "<< /Subtype /Widget /Rect [0 0 9 9] /AS /On /AP << /N << /On 10 0 R /Off 11 0 R >> >> >>",
+        square,
+        other,
+    }, "/Annots [7 0 R 8 0 R 9 0 R]"));
+    defer done(r);
+    const fill = r.list.commands[0].fill;
+    const stroke = r.list.commands[1].stroke;
+    try testing.expectEqual(@as(f64, 0.25), fill.alpha);
+    try testing.expectEqual(@as(f64, 0.5), stroke.alpha);
+    try testing.expectEqualStrings("Screen", fill.blend);
+    try testing.expectEqual(@as(f64, 7), stroke.style.width);
+    try testing.expectEqual(display.Cap.round, stroke.style.cap);
+    try testing.expectEqual(display.Join.bevel, stroke.style.join);
+    try testing.expectEqual(@as(f64, 3), stroke.style.miter_limit);
+    try testing.expectEqualSlices(f64, &.{5}, stroke.style.dash);
+    const tiling = r.list.commands[2].fill.paint.tiling;
+    try testing.expectEqual([4]f64{ 0, 0, 2, 3 }, tiling.bbox);
+    try testing.expectEqual(@as(f64, 4), tiling.xstep);
+    try testing.expectEqual(@as(f64, 5), tiling.ystep);
+    try testing.expectEqual(@as(f64, 6), tiling.matrix.e);
+    try testing.expectEqual(@as(usize, 1), tiling.cell.commands.len);
+    const shading = r.list.commands[3].shading.shading;
+    try testing.expectEqual(display.ShadingKind.radial, shading.kind);
+    try testing.expectEqual([6]f64{ 1, 2, 3, 4, 5, 6 }, shading.coords);
+    try testing.expectEqual(@as(f32, 1), shading.stops[0].color.r);
+    try testing.expectEqual(@as(f32, 1), shading.stops[shading.stops.len - 1].color.b);
+    try testing.expectEqual(@as(f32, 1), shading.background.?.g);
+    try testing.expect(shading.bbox != null);
+    var annotation_squares: usize = 0;
+    for (r.list.commands[4..]) |c| if (c == .fill) {
+        try testing.expectEqual(@as(f64, 7), c.fill.path[1].line.x);
+        annotation_squares += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), annotation_squares);
 }
