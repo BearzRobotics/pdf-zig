@@ -423,20 +423,39 @@ fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) A
     }
 }
 
+const ArrayObject = struct { num: u32, items: []const Object };
+
+/// The array object that `ref` leads to, following references, or null when it
+/// does not end at an array. Only such an object may be rewritten as the array.
+fn arrayObject(upd: *Update, ref: Ref) ?ArrayObject {
+    var num = ref.num;
+    var hops: usize = 0;
+    while (hops < 32 and num != 0 and num < upd.next) : (hops += 1) {
+        switch (upd.get(num)) {
+            .array => |items| return .{ .num = num, .items = items },
+            .ref => |r| num = r.num,
+            else => break,
+        }
+    }
+    return null;
+}
+
 /// Appends `annot` to the page's `/Annots`, wherever that array lives.
 fn attachToPage(upd: *Update, page: pages.Page, annot: Ref) Error!void {
     const a = upd.allocator();
     const page_dict = upd.get(page.num).asDict() orelse return error.DirectPage;
     const existing = page_dict.get("Annots");
-    if (existing) |e| if (e == .ref) {
+    if (existing) |e| if (e == .ref) if (arrayObject(upd, e.ref)) |holder| {
         // The array is its own object: change that object.
-        const items = upd.get(e.ref.num).asArray() orelse &[_]Object{};
+        const items = holder.items;
         const grown = try a.alloc(Object, items.len + 1);
         @memcpy(grown[0..items.len], items);
         grown[items.len] = .{ .ref = annot };
-        try upd.set(e.ref.num, .{ .array = grown });
+        try upd.set(holder.num, .{ .array = grown });
         return;
     };
+    // No array, or a reference that does not lead to one: the page gets a new
+    // array of its own, and whatever the reference points at is left alone.
     const items = if (existing) |e| (e.asArray() orelse &[_]Object{}) else &[_]Object{};
     const grown = try a.alloc(Object, items.len + 1);
     @memcpy(grown[0..items.len], items);
@@ -463,8 +482,9 @@ pub fn remove(upd: *Update, page: pages.Page, num: u32) Error!void {
     var holder: ?u32 = null;
     var items: []const Object = &.{};
     if (existing == .ref) {
-        holder = existing.ref.num;
-        items = upd.get(existing.ref.num).asArray() orelse return error.NoSuchAnnotation;
+        const found_array = arrayObject(upd, existing.ref) orelse return error.NoSuchAnnotation;
+        holder = found_array.num;
+        items = found_array.items;
     } else items = existing.asArray() orelse return error.NoSuchAnnotation;
 
     var kept: std.ArrayList(Object) = .empty;
@@ -676,4 +696,64 @@ test "markup with no rectangles or a wrong kind is refused" {
     defer upd.deinit();
     try testing.expectError(error.BadGeometry, addMarkup(&upd, page, .highlight, &.{}, .{}));
     try testing.expectError(error.BadGeometry, addMarkup(&upd, page, .note, &.{.{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 }}, .{}));
+}
+
+test "a bad /Annots reference never overwrites another object" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // 0: the null object; 2: the page tree; 4: the content stream; 5: the first
+    // free number (the new appearance stream gets it); 999: far beyond /Size.
+    for ([_]u32{ 0, 2, 4, 5, 999 }) |target| {
+        const entry = try std.fmt.allocPrint(aa, "/Annots {d} 0 R", .{target});
+        const bytes = try tests.page(aa, "0 g", "", &.{}, entry);
+        var doc = try Document.open(a, bytes, .{});
+        defer doc.deinit();
+        const pl = try pages.PageList.build(&doc);
+        var upd = try Update.init(a, &doc);
+        defer upd.deinit();
+        const note = try addNote(&upd, pages.page(&doc, pl, 0).?, 10, 10, .{ .contents = "n" });
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try upd.write(a, &out.writer);
+        try tests.expectSoundFile(out.written());
+
+        var doc2 = try Document.open(a, out.written(), .{});
+        defer doc2.deinit();
+        try testing.expectEqualStrings("Pages", doc2.getName(doc2.getObject(2).asDict().?, "Type").?);
+        try testing.expect(doc2.getObject(4) == .stream);
+        try testing.expect(doc2.getObject(note.num - 1) == .stream);
+        const pl2 = try pages.PageList.build(&doc2);
+        const found = try list(aa, &doc2, pages.page(&doc2, pl2, 0).?);
+        try testing.expectEqual(@as(usize, 1), found.len);
+        try testing.expectEqual(note.num, found[0].num);
+    }
+}
+
+test "an /Annots array behind a chain of references keeps its entries" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const bytes = try tests.page(aa, "0 g", "", &.{ "6 0 R", "[7 0 R]", "<< /Subtype /Text /Rect [0 0 20 20] >>" }, "/Annots 5 0 R");
+    var doc = try Document.open(a, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const page = pages.page(&doc, pl, 0).?;
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const note = try addNote(&upd, page, 10, 10, .{});
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try upd.write(a, &out.writer);
+    var doc2 = try Document.open(a, out.written(), .{});
+    defer doc2.deinit();
+    const pl2 = try pages.PageList.build(&doc2);
+    try testing.expectEqual(@as(usize, 2), (try list(aa, &doc2, pages.page(&doc2, pl2, 0).?)).len);
+
+    // Removing works through the chain too.
+    var upd2 = try Update.init(a, &doc2);
+    defer upd2.deinit();
+    try remove(&upd2, pages.page(&doc2, pl2, 0).?, note.num);
 }

@@ -219,6 +219,8 @@ pub const Error = error{
     Encrypted,
     /// The file's cross-reference data was damaged and rebuilt when it was opened.
     Repaired,
+    /// An object number that is neither in the file nor handed out by `add`.
+    InvalidObject,
     OutOfMemory,
     WriteFailed,
 };
@@ -277,7 +279,8 @@ pub const Update = struct {
     }
 
     /// Replaces the value of existing object `num`.
-    pub fn set(self: *Update, num: u32, o: Object) Allocator.Error!void {
+    pub fn set(self: *Update, num: u32, o: Object) (Allocator.Error || error{InvalidObject})!void {
+        if (num == 0 or num >= self.next) return error.InvalidObject;
         try self.changed.put(self.allocator(), num, o);
     }
 
@@ -566,4 +569,18 @@ test "rewritten objects keep their generation, in tables and in new references" 
     try upd.write(a, &out.writer);
     try tests.expectSoundFile(out.written());
     try testing.expect(std.mem.indexOf(u8, out.written()[file.items.len..], "[3 1 R /XYZ") != null);
+}
+
+test "set refuses object 0 and numbers that were never handed out" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try document.Document.open(a, try tests.page(arena.allocator(), "0 g", "", &.{}, ""), .{});
+    defer doc.deinit();
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    try testing.expectError(error.InvalidObject, upd.set(0, .null));
+    try testing.expectError(error.InvalidObject, upd.set(999, .null));
+    const r = try upd.add(.null);
+    try upd.set(r.num, .{ .integer = 1 });
 }
