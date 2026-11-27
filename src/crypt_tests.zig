@@ -121,3 +121,24 @@ test "R2 with a password, R5, V4 RC4 and clear metadata, and object streams" {
         try testing.expectEqualStrings("<x:xmpmeta>clear metadata</x:xmpmeta>", try doc.streamData(metadata));
     }
 }
+
+test "a non-ASCII password given as UTF-8 opens R3 and R4 files" {
+    // The files' password is "päss€•" in PDFDocEncoding (7.6.3.3).
+    for ([_][]const u8{ @embedFile("enc_rc4_r3_pdfdoc_pw.pdf"), @embedFile("enc_aes_128_pdfdoc_pw.pdf") }) |bytes| {
+        try check(bytes, "p\u{e4}ss\u{20ac}\u{2022}");
+        // Bytes already in the file's encoding keep working.
+        try check(bytes, "p\xe4ss\xa0\x80");
+        try testing.expectError(error.PasswordRequired, pdf.Document.open(testing.allocator, bytes, .{ .password = "p\u{e4}ss\u{20ac}" }));
+        // A character PDFDocEncoding lacks cannot be part of the password.
+        try testing.expectError(error.PasswordRequired, pdf.Document.open(testing.allocator, bytes, .{ .password = "p\u{e4}ss\u{20ac}\u{2022}\u{4e00}" }));
+    }
+}
+
+test "R6 passwords get SASLprep's character mapping" {
+    // The file's password is "open sesame". A no-break space becomes a space
+    // and a soft hyphen is dropped (RFC 4013, 2.1).
+    const bytes = @embedFile("enc_aes_256_mapped_pw.pdf");
+    try check(bytes, "open sesame");
+    try check(bytes, "open\u{a0}ses\u{ad}ame");
+    try testing.expectError(error.PasswordRequired, pdf.Document.open(testing.allocator, bytes, .{ .password = "opensesame" }));
+}

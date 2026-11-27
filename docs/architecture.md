@@ -101,9 +101,11 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 ## Not supported
 
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
-- Passwords are used as the bytes given: no PDFDocEncoding conversion (R2 to R4) or
-  SASLprep (R5, R6), so a non-ASCII password may not open a file. The owner password is
-  not used. A separate crypt filter for embedded files (`/EFF`) is not read.
+- SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
+  typed in composed form, as keyboards usually give it, is unaffected; one with
+  decomposed accents, or compatibility characters that the writer normalized, will not
+  open the file. The owner password is not used. A separate crypt filter for embedded
+  files (`/EFF`) is not read.
 - Shadings other than types 2 and 3 (function-based and mesh): skipped.
 - Soft masks and transparency groups: alpha values and blend-mode names are passed on;
   masks are not. (Soft masks of images are applied.)
@@ -122,7 +124,11 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 ## Encryption
 
 `Document.load` derives the file key (`crypt.zig`) as soon as the cross-reference data is read
-and before any other object is cached, from `Options.password` (empty by default). Strings are
+and before any other object is cached, from `Options.password` (empty by default). The
+password is tried as given. If that fails and it is UTF-8, it is tried once more: up to
+R4 in PDFDocEncoding (Adobe's ExtensionLevel 3 supplement to ISO 32000, algorithm 3.2),
+and for R5 and R6 with SASLprep's character mapping (the same supplement, algorithm 3.2a;
+RFC 4013). Strings are
 decrypted when an object is loaded. Stream data is decrypted when it is decoded (`Stream.encrypted`
 with the object number and generation), so decrypted content can live in a scratch arena.
 Objects inside object streams are not decrypted separately; the object stream is. Cross-reference

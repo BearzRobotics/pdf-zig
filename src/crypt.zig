@@ -15,6 +15,7 @@ const Sha512 = std.crypto.hash.sha2.Sha512;
 const Aes128 = std.crypto.core.aes.Aes128;
 const Aes256 = std.crypto.core.aes.Aes256;
 const object = @import("object.zig");
+const write = @import("write.zig");
 const Object = object.Object;
 const Dict = object.Dict;
 
@@ -40,6 +41,48 @@ const padding = [32]u8{
     0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 };
 
+/// How many bytes of a password revisions 5 and 6 use; earlier ones use 32.
+const max_password = 127;
+
+/// `password`, which must be UTF-8, in PDFDocEncoding, cut to `out`'s length.
+/// Null if it is not UTF-8 or has a character the encoding lacks.
+fn pdfDocBytes(out: *[max_password]u8, password: []const u8) ?[]const u8 {
+    var it = (std.unicode.Utf8View.init(password) catch return null).iterator();
+    var n: usize = 0;
+    while (it.nextCodepoint()) |cp| {
+        if (n == out.len) break;
+        out[n] = for (0..256) |byte| {
+            const mapped_to = write.pdfDocCodepoint(@intCast(byte));
+            if (mapped_to == cp and mapped_to != 0xFFFD) break @intCast(byte);
+        } else return null;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// `password`, which must be UTF-8, after the mapping step of SASLprep (RFC
+/// 4013, 2.1), cut to `out`'s length: other spaces become U+0020 and the
+/// characters of RFC 3454's table B.1 are removed.
+fn mapped(out: *[max_password]u8, password: []const u8) ?[]const u8 {
+    var it = (std.unicode.Utf8View.init(password) catch return null).iterator();
+    var n: usize = 0;
+    while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch return null;
+        const bytes = switch (cp) {
+            // RFC 3454, C.1.2. (U+200B is in both tables; this one comes first.)
+            0xA0, 0x1680, 0x2000...0x200B, 0x202F, 0x205F, 0x3000 => " ",
+            // RFC 3454, B.1.
+            0xAD, 0x34F, 0x1806, 0x180B...0x180D, 0x200C, 0x200D, 0x2060, 0xFE00...0xFE0F, 0xFEFF => "",
+            else => slice,
+        };
+        // The cut is made on bytes, in the middle of a character if need be.
+        const take = @min(bytes.len, out.len - n);
+        @memcpy(out[n..][0..take], bytes[0..take]);
+        n += take;
+    }
+    return out[0..n];
+}
+
 pub const Crypt = struct {
     /// The file encryption key (5 to 16 bytes, or 32 for AES-256).
     key: [32]u8 = @splat(0),
@@ -53,7 +96,24 @@ pub const Crypt = struct {
     /// Reads the encryption dictionary `d` (values already resolved by the
     /// caller where they are references) and derives the file key. `id0` is
     /// the first element of the trailer's `/ID` (empty if there is none).
+    ///
+    /// `password` is tried as the bytes given, which is what some writers use,
+    /// and then, if it is UTF-8, in the form Adobe's supplement to ISO 32000
+    /// (ExtensionLevel 3, algorithms 3.2 and 3.2a) asks for:
+    /// PDFDocEncoding up to revision 4; for revisions 5 and 6, SASLprep's
+    /// character mapping (its normalization step is not applied).
     pub fn init(d: Dict, resolve_ctx: anytype, id0: []const u8, password: []const u8) Error!Crypt {
+        return derive(d, resolve_ctx, id0, password) catch |err| {
+            if (err != error.PasswordRequired) return err;
+            var buf: [max_password]u8 = undefined;
+            const unicode = (resolve_ctx.int(d, "V") orelse 0) == 5;
+            const other = (if (unicode) mapped(&buf, password) else pdfDocBytes(&buf, password)) orelse return err;
+            if (std.mem.eql(u8, other, password)) return err;
+            return derive(d, resolve_ctx, id0, other);
+        };
+    }
+
+    fn derive(d: Dict, resolve_ctx: anytype, id0: []const u8, password: []const u8) Error!Crypt {
         const filter = (resolve_ctx.name(d, "Filter") orelse "Standard");
         if (!std.mem.eql(u8, filter, "Standard")) return error.UnsupportedEncryption;
         const v = resolve_ctx.int(d, "V") orelse 0;
@@ -66,7 +126,7 @@ pub const Crypt = struct {
             const u = resolve_ctx.string(d, "U") orelse return error.UnsupportedEncryption;
             const ue = resolve_ctx.string(d, "UE") orelse return error.UnsupportedEncryption;
             if (u.len < 48 or ue.len < 32) return error.UnsupportedEncryption;
-            const pw = password[0..@min(password.len, 127)];
+            const pw = password[0..@min(password.len, max_password)];
             const vsalt = u[32..40];
             const ksalt = u[40..48];
             var check: [32]u8 = undefined;

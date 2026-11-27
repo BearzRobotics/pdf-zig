@@ -19,6 +19,10 @@ Five more cover paths those do not, made with pikepdf 10.3 (`static_id=True`):
 stream), `enc_aes_256_r5` (R5, deprecated) and `enc_aes_128_objstm` (object
 streams). Poppler reads all of them.
 
+Three have passwords that need converting: `enc_rc4_r3_pdfdoc_pw` (R3) and
+`enc_aes_128_pdfdoc_pw` (R4) have `päss€•`, which qpdf stores in PDFDocEncoding;
+`enc_aes_256_mapped_pw` (R6) has `open sesame`, for SASLprep's mapping.
+
 The owner password of all of them is `o`.
 
 ## LZW
