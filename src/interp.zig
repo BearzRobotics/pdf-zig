@@ -806,7 +806,12 @@ const Run = struct {
         const doc_ = self.doc();
         const sd = obj.asDict() orelse return null;
         const st = doc_.getInt(sd, "ShadingType") orelse return null;
-        if (st != 2 and st != 3) return null;
+        if (st != 2 and st != 3) {
+            // Function-based and mesh shadings (types 1 and 4 to 7) are real
+            // content that cannot be passed on.
+            if (st >= 1 and st <= 7) self.r.left_out = true;
+            return null;
+        }
         const space = try color.parseOwned(doc_, sd.get("ColorSpace") orelse return null, self.resources, 0);
         if (space.isInvisible()) return null;
         const coords_arr = doc_.getArray(sd, "Coords") orelse return null;

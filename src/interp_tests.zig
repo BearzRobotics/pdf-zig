@@ -958,6 +958,22 @@ test "a display list says when something was left out" {
     try testing.expect(dl.incomplete);
 }
 
+test "a shading that cannot be passed on marks the list incomplete" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A free-form triangle mesh (type 4), painted with sh and used as a pattern.
+    const mesh = "<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 1 0 1 0 1] /Length 0 >>\nstream\n\nendstream";
+    for ([_][2][]const u8{
+        .{ "/S sh 0 0 1 1 re f", "/Shading << /S 5 0 R >>" },
+        .{ "/Pattern cs /P scn 0 0 1 1 re f", "/Pattern << /P << /PatternType 2 /Shading 5 0 R >> >>" },
+    }) |c| {
+        const r = try render(try page(a, c[0], c[1], &.{mesh}, ""));
+        defer done(r);
+        try testing.expect(r.list.incomplete);
+    }
+}
+
 test "the text size on the page comes from the vertical axis of text space" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

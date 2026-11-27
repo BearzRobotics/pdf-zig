@@ -55,7 +55,7 @@ text. A Type 3 font draws its glyphs as the paths of its procedures and also emi
 invisible text (mode 3) so it can be extracted.
 
 A list with content left out (a stream that cannot be decoded, a function that cannot
-be read, nesting past `max_depth`) has `DisplayList.incomplete` set.
+be read, a shading of type 1 or 4 to 7, nesting past `max_depth`) has `DisplayList.incomplete` set.
 
 ## Resource limits
 
