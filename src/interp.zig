@@ -201,6 +201,26 @@ pub const Renderer = struct {
     }
 };
 
+/// The matrix that places an appearance with `/BBox` `bbox` and `/Matrix` `fm`
+/// on its annotation's rectangle `rect` (12.5.5, the appearance algorithm).
+pub fn appearanceMatrix(bbox: [4]f64, fm: Matrix, rect: [4]f64) Matrix {
+    // The upright box around the transformed appearance box.
+    const pts = [4]Point{ fm.apply(bbox[0], bbox[1]), fm.apply(bbox[2], bbox[1]), fm.apply(bbox[2], bbox[3]), fm.apply(bbox[0], bbox[3]) };
+    var tx0 = pts[0].x;
+    var ty0 = pts[0].y;
+    var tx1 = pts[0].x;
+    var ty1 = pts[0].y;
+    for (pts[1..]) |q| {
+        tx0 = @min(tx0, q.x);
+        ty0 = @min(ty0, q.y);
+        tx1 = @max(tx1, q.x);
+        ty1 = @max(ty1, q.y);
+    }
+    const sx = if (tx1 - tx0 == 0) 1 else (rect[2] - rect[0]) / (tx1 - tx0);
+    const sy = if (ty1 - ty0 == 0) 1 else (rect[3] - rect[1]) / (ty1 - ty0);
+    return .{ .a = sx, .d = sy, .e = rect[0] - tx0 * sx, .f = rect[1] - ty0 * sy };
+}
+
 /// Maps default user space to the displayed page for `p` (see `display`).
 pub fn baseMatrix(p: pages.Page) Matrix {
     const c = p.crop_box;
@@ -1194,8 +1214,8 @@ const Run = struct {
             if (doc_.getDict(ad, "AP")) |ap| if (doc_.get(ap, "N")) |normal| {
                 var n = normal;
                 if (n == .dict) {
-                    states = true;
-                    if (doc_.getName(ad, "AS")) |state| n = doc_.get(n.dict, state) orelse .null;
+                    states = appearance.anyDrawing(doc_, n.dict);
+                    n = if (doc_.getName(ad, "AS")) |state| (doc_.get(n.dict, state) orelse .null) else .null;
                 }
                 if (n == .stream) {
                     stored = n.stream;
@@ -1223,21 +1243,7 @@ const Run = struct {
             const rect = self.rectOf(ad, "Rect") orelse continue;
             const bbox = self.rectOf(form_stream.dict, "BBox") orelse continue;
             const fm = self.matrixOf(form_stream.dict, "Matrix");
-            // Transformed appearance box (the bounding box of the matrix applied to BBox).
-            const pts = [4]Point{ fm.apply(bbox[0], bbox[1]), fm.apply(bbox[2], bbox[1]), fm.apply(bbox[2], bbox[3]), fm.apply(bbox[0], bbox[3]) };
-            var tx0 = pts[0].x;
-            var ty0 = pts[0].y;
-            var tx1 = pts[0].x;
-            var ty1 = pts[0].y;
-            for (pts[1..]) |q| {
-                tx0 = @min(tx0, q.x);
-                ty0 = @min(ty0, q.y);
-                tx1 = @max(tx1, q.x);
-                ty1 = @max(ty1, q.y);
-            }
-            const sx = if (tx1 - tx0 == 0) 1 else (rect[2] - rect[0]) / (tx1 - tx0);
-            const sy = if (ty1 - ty0 == 0) 1 else (rect[3] - rect[1]) / (ty1 - ty0);
-            const a_m = Matrix{ .a = sx, .d = sy, .e = rect[0] - tx0 * sx, .f = rect[1] - ty0 * sy };
+            const a_m = appearanceMatrix(bbox, fm, rect);
             self.gs = .{};
             self.gs.ctm = a_m;
             try self.formOp(form_stream, num_id);

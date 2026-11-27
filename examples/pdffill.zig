@@ -4,6 +4,8 @@
 //!     pdffill IN.pdf OUT.pdf name=value…   fill text fields; for a choice an option's value
 //!                                          or text, for a check box "on" or "off", for a
 //!                                          radio group the number of the button (0, 1, …)
+//!     pdffill IN.pdf OUT.pdf --flatten     make the fields part of the pages (after any
+//!                                          filling given before it)
 
 const std = @import("std");
 const pdf = @import("pdf");
@@ -18,7 +20,7 @@ pub fn main(init: std.process.Init) !u8 {
     // Checked before anything is read: a mistake must not produce a file.
     var well_formed = args.len == 2 or args.len >= 4;
     for (args[@min(3, args.len)..]) |assign| {
-        if (std.mem.indexOfScalar(u8, assign, '=') == null) well_formed = false;
+        if (std.mem.indexOfScalar(u8, assign, '=') == null and !std.mem.eql(u8, assign, "--flatten")) well_formed = false;
     }
     if (!well_formed) {
         std.debug.print("usage: pdffill IN.pdf [OUT.pdf name=value...]\n", .{});
@@ -39,7 +41,12 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var upd = try pdf.write.Update.init(gpa, &doc);
     defer upd.deinit();
+    var flatten = false;
     for (args[3..]) |assign| {
+        if (std.mem.eql(u8, assign, "--flatten")) {
+            flatten = true;
+            continue;
+        }
         const eq = std.mem.indexOfScalar(u8, assign, '=').?;
         const name = assign[0..eq];
         const value = assign[eq + 1 ..];
@@ -68,6 +75,15 @@ pub fn main(init: std.process.Init) !u8 {
                 return 1;
             },
         }
+    }
+    if (flatten) {
+        var total: pdf.flatten.Result = .{};
+        for (0..list.entries.len) |i| {
+            const result = try pdf.flatten.widgets(&upd, pdf.pages.page(&doc, list, i).?);
+            total.flattened += result.flattened;
+            total.kept += result.kept;
+        }
+        std.debug.print("pdffill: flattened {d} widget(s), left {d}\n", .{ total.flattened, total.kept });
     }
     // Written beside the target and then renamed over it, so that a failure
     // leaves what was there, the input included if it is the target.

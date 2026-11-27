@@ -22,6 +22,8 @@ const Stream = object.Stream;
 const Document = document.Document;
 const Content = std.ArrayList(u8);
 
+/// Most states of one appearance dictionary that are looked at.
+const max_states = 64;
 /// Most numbers read from the arrays of one annotation.
 const max_numbers = 1 << 16;
 /// Most bytes of text drawn in one annotation.
@@ -73,6 +75,16 @@ const Field = struct {
         return std.mem.eql(u8, self.type, "Tx") or std.mem.eql(u8, self.type, "Ch");
     }
 };
+
+/// Whether any state of the appearance dictionary `states` is a drawing. If
+/// none is, the widget has no usable appearance; if one is, a state without a
+/// drawing, as "Off" often is, shows nothing.
+pub fn anyDrawing(doc: *Document, states: Dict) bool {
+    for (states.entries[0..@min(states.entries.len, max_states)]) |e| {
+        if (doc.resolve(e.value) == .stream) return true;
+    }
+    return false;
+}
 
 /// Whether a widget whose form sets `NeedAppearances` should be made again: a
 /// text or choice field with a value, which a stored appearance may not show.

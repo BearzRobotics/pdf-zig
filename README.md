@@ -75,7 +75,9 @@ A filled widget keeps only its normal appearance: an old pressed one would show 
 value. The value of a password field is not stored in the file. A choice field stores the
 option's export value, and only an editable combo box takes other text. `setChoices`
 selects several entries where the list allows it, and `reset` gives a field its default
-value. Signature fields are listed, not filled; XFA forms are not read; no scripts run.
+value. `flatten.widgets` turns a page's fields into page content; it keeps hidden fields
+and signatures, and the old values stay inside the file. Signature fields are listed, not
+filled; XFA forms are not read; no scripts run.
 
 ## New documents: extract, reorder, merge
 

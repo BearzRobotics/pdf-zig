@@ -32,6 +32,7 @@ pub const write = @import("write.zig");
 pub const annot = @import("annot.zig");
 pub const outline = @import("outline.zig");
 pub const link = @import("link.zig");
+pub const flatten = @import("flatten.zig");
 pub const appearance = @import("appearance.zig");
 pub const compose = @import("compose.zig");
 pub const form = @import("form.zig");
@@ -62,6 +63,8 @@ test {
     _ = @import("annot.zig");
     _ = @import("outline.zig");
     _ = @import("link.zig");
+    _ = @import("flatten.zig");
+    _ = @import("flatten_tests.zig");
     _ = @import("appearance.zig");
     _ = @import("appearance_tests.zig");
     _ = @import("compose.zig");

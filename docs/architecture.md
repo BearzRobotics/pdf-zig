@@ -24,6 +24,7 @@
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
 | `appearance.zig` | Appearances made while rendering, for annotations and fields that need one (decision 0004) |
+| `flatten.zig` | Form widgets made part of their page's content |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
 | `compose.zig`, `compose_form.zig`, `compose_outline.zig`, `compose_pack.zig` | A new document from blank pages and pages of other documents: forms, bookmarks, and the compact output |
@@ -65,6 +66,16 @@ An annotation without a stored appearance, and a text or choice field whose form
 `docs/decisions/0004-generated-appearances.md`), drawn like a stored one. Signature fields
 get no more than their background and border. Links, stamps, carets, attachments and
 sounds are not made.
+
+A button whose appearance dictionary has states, none of them a drawing, counts as having
+no appearance; if any state is one, a state without a drawing shows nothing.
+
+**Flattening** (`flatten.widgets`) is an edit: it draws each widget's appearance (stored,
+or made as above) at the end of the page content, gives the page resources of its own,
+removes the widgets, and takes emptied fields out of the form and XFA with them. The old
+content is wrapped in enough `q` and `Q` to make up for any it leaves unmatched; content
+that cannot be decoded stops it (`error.UnreadableContent`). Signatures, hidden widgets
+and widgets in optional content stay. The earlier values remain in the file.
 
 `DisplayList.omissions` says what the page uses that the list leaves out or only
 approximates. `incomplete` is set when content is missing: a stream that cannot be decoded,

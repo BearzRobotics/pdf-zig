@@ -13,6 +13,13 @@
 - New `form.setChoices` (several entries of a multi-select list) and `form.reset`.
   `form.Field` has `multi_select` and `selected`; `form.Error` has `NotMultiSelect`.
 - A filled comb field with a border colour has lines between its cells.
+- New `flatten.widgets`: makes the form widgets of a page part of its content and takes
+  those fields out of the form. Hidden widgets and signatures stay. It is not redaction:
+  the earlier version stays in the file. `pdffill` has `--flatten`.
+- A button whose appearance states include no drawing at all was shown as nothing; it
+  now gets a made appearance.
+- `write.Update.write` reported `error.WriteFailed` when it ran out of memory; it now
+  reports `error.OutOfMemory`.
 - The `pdfsvg` example put the letters of a run too far apart.
 - `DisplayList.omissions` says what a page uses that is left out or only approximated.
   `incomplete` means what it did. New example `pdfsurvey`.

@@ -505,7 +505,7 @@ pub fn setChoices(upd: *Update, field: Field, choices: []const []const u8) Error
 }
 
 /// `key` of field `d` or of the fields above it, as the update has them.
-fn inheritedIn(upd: *Update, d: Dict, key: []const u8) ?Object {
+pub fn inheritedIn(upd: *Update, d: Dict, key: []const u8) ?Object {
     var cur = d;
     for (0..max_depth) |_| {
         if (cur.get(key)) |v| {

@@ -371,7 +371,7 @@ pub const Update = struct {
 
         // Offsets count from the file's `%PDF-` header; the section follows the original bytes.
         const file_len = doc.data.len - doc.base;
-        if (doc.data.len > 0 and doc.data[doc.data.len - 1] != '\n') sw.writeByte('\n') catch return error.WriteFailed;
+        if (doc.data.len > 0 and doc.data[doc.data.len - 1] != '\n') sw.writeByte('\n') catch return error.OutOfMemory;
 
         const nums = try gpa.dupe(u32, self.changed.keys());
         defer gpa.free(nums);
@@ -381,9 +381,9 @@ pub const Update = struct {
 
         for (nums, 0..) |num, i| {
             offsets[i] = file_len + sw.end;
-            sw.print("{d} {d} obj\n", .{ num, self.generation(num) }) catch return error.WriteFailed;
-            writeObject(sw, self.changed.get(num).?) catch return error.WriteFailed;
-            sw.writeAll("\nendobj\n") catch return error.WriteFailed;
+            sw.print("{d} {d} obj\n", .{ num, self.generation(num) }) catch return error.OutOfMemory;
+            writeObject(sw, self.changed.get(num).?) catch return error.OutOfMemory;
+            sw.writeAll("\nendobj\n") catch return error.OutOfMemory;
         }
 
         // A cross-reference stream is an object itself.
@@ -396,7 +396,7 @@ pub const Update = struct {
         } else {
             try self.writeXrefTable(sw, nums, offsets, size, prev, id);
         }
-        sw.print("startxref\n{d}\n%%EOF\n", .{xref_pos}) catch return error.WriteFailed;
+        sw.print("startxref\n{d}\n%%EOF\n", .{xref_pos}) catch return error.OutOfMemory;
 
         w.writeAll(doc.data) catch return error.WriteFailed;
         w.writeAll(sec.written()) catch return error.WriteFailed;
@@ -429,13 +429,13 @@ pub const Update = struct {
     }
 
     fn writeXrefTable(self: *Update, sw: *Io.Writer, nums: []const u32, offsets: []const usize, size: u32, prev: usize, id: ?Object) Error!void {
-        sw.writeAll("xref\n") catch return error.WriteFailed;
+        sw.writeAll("xref\n") catch return error.OutOfMemory;
         var i: usize = 0;
         while (i < nums.len) {
             var j = i + 1;
             while (j < nums.len and nums[j] == nums[j - 1] + 1) j += 1;
-            sw.print("{d} {d}\n", .{ nums[i], j - i }) catch return error.WriteFailed;
-            for (i..j) |k| sw.print("{d:0>10} {d:0>5} n \n", .{ offsets[k], self.generation(nums[k]) }) catch return error.WriteFailed;
+            sw.print("{d} {d}\n", .{ nums[i], j - i }) catch return error.OutOfMemory;
+            for (i..j) |k| sw.print("{d:0>10} {d:0>5} n \n", .{ offsets[k], self.generation(nums[k]) }) catch return error.OutOfMemory;
             i = j;
         }
         var entries: std.ArrayList(Entry) = .empty;
@@ -444,9 +444,9 @@ pub const Update = struct {
         try self.trailerEntries(a, &entries);
         if (id) |v| try entries.append(a, .{ .key = "ID", .value = v });
         try entries.append(a, .{ .key = "Prev", .value = .{ .integer = @intCast(prev) } });
-        sw.writeAll("trailer\n") catch return error.WriteFailed;
-        writeObject(sw, .{ .dict = .{ .entries = entries.items } }) catch return error.WriteFailed;
-        sw.writeByte('\n') catch return error.WriteFailed;
+        sw.writeAll("trailer\n") catch return error.OutOfMemory;
+        writeObject(sw, .{ .dict = .{ .entries = entries.items } }) catch return error.OutOfMemory;
+        sw.writeByte('\n') catch return error.OutOfMemory;
     }
 
     fn writeXrefStream(self: *Update, gpa: Allocator, sw: *Io.Writer, nums: []const u32, offsets: []const usize, xref_pos: usize, size: u32, prev: usize, id: ?Object) Error!void {
@@ -492,9 +492,9 @@ pub const Update = struct {
         try self.trailerEntries(a, &entries);
         if (id) |v| try entries.append(a, .{ .key = "ID", .value = v });
         try entries.append(a, .{ .key = "Prev", .value = .{ .integer = @intCast(prev) } });
-        sw.print("{d} 0 obj\n", .{own}) catch return error.WriteFailed;
-        writeObject(sw, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = data.items } }) catch return error.WriteFailed;
-        sw.writeAll("\nendobj\n") catch return error.WriteFailed;
+        sw.print("{d} 0 obj\n", .{own}) catch return error.OutOfMemory;
+        writeObject(sw, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = data.items } }) catch return error.OutOfMemory;
+        sw.writeAll("\nendobj\n") catch return error.OutOfMemory;
     }
 };
 

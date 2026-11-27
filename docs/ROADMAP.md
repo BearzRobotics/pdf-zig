@@ -70,8 +70,10 @@ this sample, ahead of forms. The viewer may already decode it itself: its code r
 ## Stage 1: forms
 
 **Progress:** done are appearances made while rendering (decision 0004), list box
-appearances when filled, comb dividers, multiple selection and reset. Open: flatten and
-the font items. The pressed appearance stays dropped from filled fields on purpose: kept,
+appearances when filled, comb dividers, multiple selection, reset and flatten. Open: the
+font items, and two matters of style that real files showed: made appearances ignore the
+bevelled and inset border styles, and place text taller than its box a little higher than
+Poppler and MuPDF do. The pressed appearance stays dropped from filled fields on purpose: kept,
 it would show the old value while the field is pressed.
 
 | Item | Size | Viewer work |

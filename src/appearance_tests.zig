@@ -148,6 +148,18 @@ test "stored appearances are used, and a state without a drawing stays empty" {
     try testing.expect(!off.omissions.no_appearance);
 }
 
+test "states of which none is a drawing count as no appearance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // As some form packages write them: the "on" state is an empty dictionary.
+    const box = try field(a, "/FT /Btn /AS /Off /AP << /N << /Yes << >> >> >> /MK << /BC [0] >>");
+    try testing.expectEqual(@as(usize, 1), box.count(.stroke));
+    try testing.expect(!box.omissions.no_appearance);
+    // Ticked, it gets the mark too.
+    try testing.expectEqual(@as(usize, 2), (try field(a, "/FT /Btn /AS /Yes /AP << /N << /Yes null >> >> /MK << /BC [0] >>")).count(.stroke));
+}
+
 test "NeedAppearances makes text fields again, and only those with a value" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

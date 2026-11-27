@@ -519,7 +519,7 @@ fn appendMeta(a: Allocator, entries: *std.ArrayList(object.Entry), meta: Meta) A
 
 /// The entries of the page's `/Annots`, wherever the array lives: direct, or an
 /// object reached through references. Null when it does not lead to an array.
-fn annotsOf(upd: *Update, value: Object) ?[]const Object {
+pub fn annotsOf(upd: *Update, value: Object) ?[]const Object {
     var cur = value;
     var hops: usize = 0;
     while (hops < 32) : (hops += 1) {
