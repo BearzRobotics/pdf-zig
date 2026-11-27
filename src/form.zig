@@ -238,10 +238,12 @@ const Walk = struct {
     fn addWidget(self: *Walk, widgets: *std.ArrayList(Widget), node: Object) Allocator.Error!void {
         const doc = self.doc;
         const wd = doc.resolve(node).asDict() orelse return;
-        const arr = doc.getArray(wd, "Rect") orelse return;
-        if (arr.len < 4) return;
-        var v: [4]f64 = undefined;
-        for (0..4) |i| v[i] = doc.resolve(arr[i]).asNum() orelse return;
+        // A widget without a usable rectangle stays in the list, with an empty
+        // one, so that button numbers and states are not shifted.
+        var v: [4]f64 = @splat(0);
+        if (doc.getArray(wd, "Rect")) |arr| if (arr.len >= 4) for (0..4) |i| {
+            v[i] = doc.resolve(arr[i]).asNum() orelse 0;
+        };
         const num: u32 = if (node == .ref) node.ref.num else 0;
 
         // The "on" state is the name in the normal appearance that is not Off.
@@ -269,12 +271,19 @@ const Walk = struct {
 
 pub const Error = write.Error || error{ ReadOnly, WrongKind, NotAnOption, TooLong, NoSuchWidget, NoAppearanceState, DirectObject };
 
+/// A widget written directly inside another object cannot be rewritten, and
+/// would go on showing the old value.
+fn requireIndirectWidgets(field: Field) Error!void {
+    for (field.widgets) |w| if (w.num == 0) return error.DirectObject;
+}
+
 /// Sets the text of a text field or an editable combo box. The value of a
 /// password field is not stored: it is only shown, masked, in the appearance.
 pub fn setText(upd: *Update, field: Field, value: []const u8) Error!void {
     if (field.read_only) return error.ReadOnly;
     if (field.kind != .text and field.kind != .combo) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
+    try requireIndirectWidgets(field);
     const a = upd.allocator();
     if (field.kind == .combo) {
         if (optionIndex(field, value)) |i| return storeText(upd, field, field.exports[i], field.options[i]);
@@ -321,7 +330,7 @@ fn storeText(upd: *Update, field: Field, value: []const u8, shown: []const u8) E
 
     const da = try defaultAppearance(upd, fd, try toWinAnsi(a, try shownText(a, shown, field.password)));
     for (field.widgets) |w| {
-        if (w.num == 0) continue;
+        if (w.rect.width() <= 0 or w.rect.height() <= 0) continue;
         const wd = upd.get(w.num).asDict() orelse continue;
         const ap = try textAppearance(upd, w.rect, try widgetStyle(upd.doc, a, wd), shown, field.multiline, field.password, da);
         try upd.set(w.num, .{ .dict = try withNormalAppearance(upd, wd, ap) });
@@ -335,6 +344,7 @@ pub fn setChecked(upd: *Update, field: Field, widget: usize, on: bool) Error!voi
     if (field.kind != .checkbox and field.kind != .radio) return error.WrongKind;
     if (field.num == 0) return error.DirectObject;
     if (widget >= field.widgets.len) return error.NoSuchWidget;
+    try requireIndirectWidgets(field);
     const a = upd.allocator();
 
     var chosen: []const u8 = "Off";
@@ -385,6 +395,12 @@ pub fn setChoice(upd: *Update, field: Field, choice: []const u8) Error!void {
     fd = try write.dictWith(a, fd, "V", .{ .string = try write.textString(a, value) });
     fd = try write.dictWithout(a, fd, "I");
     try upd.set(field.num, .{ .dict = fd });
+    // The old appearances show the old selection; none is generated here.
+    for (field.widgets) |w| {
+        if (w.num == 0) continue;
+        const wd = upd.get(w.num).asDict() orelse continue;
+        try upd.set(w.num, .{ .dict = try write.dictWithout(a, wd, "AP") });
+    }
     // A list box has no generated appearance: ask viewers to draw it.
     try setNeedAppearances(upd);
 }
@@ -1256,4 +1272,42 @@ test "wrapping a very long line takes linear time" {
     // A word wider than the line is cut where it must be.
     try wrapLine(a, &lines, "abcdefgh", textWidth("abc", 10), 10);
     try testing.expect(lines.items.len > 1);
+}
+
+test "widgets that cannot be updated are reported, and keep their place" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try tests.buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 7 0 R 8 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        // A radio group whose first button has no rectangle.
+        "<< /FT /Btn /Ff 32768 /T (radio) /Kids [5 0 R 6 0 R] >>",
+        "<< /Subtype /Widget /Parent 4 0 R /AP << /N << /A null /Off null >> >> >>",
+        "<< /Subtype /Widget /Parent 4 0 R /Rect [0 0 9 9] /AP << /N << /B null /Off null >> >> >>",
+        // A text field with a widget written directly in /Kids.
+        "<< /FT /Tx /T (direct) /Kids [<< /Subtype /Widget /Rect [0 0 90 20] >>] >>",
+        "<< /FT /Ch /T (list) /Rect [0 0 90 90] /Subtype /Widget /Opt [(a) (b)] /AP << /N 9 0 R >> >>",
+        "<< /Subtype /Form /BBox [0 0 9 9] /Length 0 >>\nstream\n\nendstream",
+    });
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const all = try fields(a, &doc, pl);
+    const radio = findField(all, "radio").?;
+    try testing.expectEqual(@as(usize, 2), radio.widgets.len);
+    try testing.expectEqualStrings("B", radio.widgets[1].on_state);
+    var upd = try Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try setChecked(&upd, radio, 1, true);
+    try testing.expectEqualStrings("Off", upd.get(5).asDict().?.get("AS").?.name);
+    try testing.expectEqualStrings("B", upd.get(6).asDict().?.get("AS").?.name);
+    const before = upd.changed.count();
+    try testing.expectError(error.DirectObject, setText(&upd, findField(all, "direct").?, "x"));
+    try testing.expectEqual(before, upd.changed.count());
+    // A list box loses the appearance that showed its old selection.
+    try setChoice(&upd, findField(all, "list").?, "b");
+    try testing.expect(upd.get(8).asDict().?.get("AP") == null);
 }
