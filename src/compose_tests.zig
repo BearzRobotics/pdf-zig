@@ -90,8 +90,30 @@ fn imported(a: Allocator, indices: []const usize) ![]const u8 {
     return written(a, &b);
 }
 
+/// `bytes` followed by what its object streams hold. Searching the file alone
+/// would find nothing in them, so a check that something is gone would always
+/// pass.
+fn unpacked(a: Allocator, bytes: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, bytes);
+    var doc = try pdf.Document.open(a, bytes, .{});
+    defer doc.deinit();
+    var it = doc.xref.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* != .in_use) continue;
+        const o = doc.getObject(entry.key_ptr.*);
+        if (o != .stream) continue;
+        if (!std.mem.eql(u8, doc.getName(o.stream.dict, "Type") orelse "", "ObjStm")) continue;
+        try out.appendSlice(a, try doc.streamDataIn(a, o.stream));
+    }
+    return out.items;
+}
+
 fn has(bytes: []const u8, needle: []const u8) bool {
-    return std.mem.indexOf(u8, bytes, needle) != null;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const all = unpacked(arena.allocator(), bytes) catch |err| std.debug.panic("cannot read the output: {t}", .{err});
+    return std.mem.indexOf(u8, all, needle) != null;
 }
 
 test "reordering keeps each page's content, size, rotation and resources" {
@@ -108,8 +130,9 @@ test "reordering keeps each page's content, size, rotation and resources" {
     try testing.expectEqual(@as(f64, 200), out.page(0).media_box.width());
     try testing.expectEqual(@as(u16, 90), out.page(2).rotate);
     // The pages shared one resource dictionary and font, and still do.
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "/BaseFont"));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "/Font <<"));
+    const all = try unpacked(a, bytes);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, all, "/BaseFont"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, all, "/Font <<"));
 }
 
 test "a page that is left out is not in the file, whatever refers to it" {
@@ -705,4 +728,56 @@ test "a field that needs no change is copied as it is" {
     try testing.expectEqual(@as(usize, 1), fields.len);
     try testing.expectEqualStrings("box", fields[0].name);
     try testing.expectEqual(@as(usize, 1), fields[0].widgets.len);
+}
+
+test "objects are packed into compressed object streams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 700 link annotations that are objects: more than one stream holds.
+    var annots: std.ArrayList(u8) = .empty;
+    var bodies: std.ArrayList([]const u8) = .empty;
+    for (0..700) |i| try annots.print(a, "{d} 0 R ", .{i + 5});
+    try bodies.append(a, "<< /Type /Catalog /Pages 2 0 R >>");
+    try bodies.append(a, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 99 99] >>");
+    try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [{s}] >>", .{annots.items}));
+    try bodies.append(a, try stream(a, "", "0 0 1 1 re f"));
+    for (0..700) |i| try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /A << /S /URI /URI (https://example.org/{d}) >> >>", .{i}));
+    var doc = try pdf.Document.open(a, try file(a, bodies.items), .{});
+    defer doc.deinit();
+    var b = Builder.init(testing.allocator, .{});
+    defer b.deinit();
+    try b.importPages(&doc, &.{0}, .{});
+    const bytes = try written(a, &b);
+    // Nothing but streams is left in the clear.
+    try testing.expect(std.mem.indexOf(u8, bytes, "/Subtype /Link") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "trailer") == null);
+    try testing.expect(has(bytes, "https://example.org/699"));
+    try testing.expect(bytes.len < (try unpacked(a, bytes)).len / 3);
+
+    var out = try reopen(a, bytes);
+    var streams: usize = 0;
+    var packed_objects: usize = 0;
+    var it = out.doc.xref.iterator();
+    while (it.next()) |entry| switch (entry.value_ptr.*) {
+        .compressed => {
+            packed_objects += 1;
+            try testing.expect(out.doc.getObject(entry.key_ptr.*) != .null);
+        },
+        .in_use => {
+            const o = out.doc.getObject(entry.key_ptr.*);
+            try testing.expect(o == .stream);
+            if (std.mem.eql(u8, out.doc.getName(o.stream.dict, "Type") orelse "", "ObjStm")) {
+                streams += 1;
+                try testing.expect(out.doc.getInt(o.stream.dict, "N").? <= 200);
+            }
+        },
+        .free => {},
+    };
+    // The annotations, the page, the tree and the catalog.
+    try testing.expectEqual(@as(usize, 703), packed_objects);
+    try testing.expect(streams >= 4);
+    const links = try pdf.link.list(a, &out.doc, out.pages, out.page(0));
+    try testing.expectEqual(@as(usize, 700), links.len);
+    try testing.expectEqualStrings("https://example.org/699", links[699].target.uri);
 }

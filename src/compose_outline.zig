@@ -93,9 +93,11 @@ const Walk = struct {
     }
 };
 
-/// Writes the outline as objects `first` (its root) onwards, one more than there
-/// are bookmarks, noting where each starts in `at`, counted from `base`.
-pub fn write(a: Allocator, items: []const Item, first: u32, w: *std.Io.Writer, base: usize, at: []usize) Error!void {
+/// Adds the outline to the end of the file: its root, whose number is returned,
+/// and then the bookmarks, numbered in order after it.
+pub fn write(a: Allocator, items: []const Item, tail: *compose.Tail) Error!u32 {
+    const first = try tail.newNumber();
+    for (items) |_| _ = try tail.newNumber();
     // For each item, and in the last slot the root: its first and last child,
     // how many of its descendants show when it is open, and its neighbours.
     const Links = struct { first: ?usize = null, last: ?usize = null, prev: ?usize = null, next: ?usize = null, shown: i64 = 0 };
@@ -140,7 +142,7 @@ pub fn write(a: Allocator, items: []const Item, first: u32, w: *std.Io.Writer, b
             const open = index == root or items[index].open;
             try entries.append(a, .{ .key = "Count", .value = .{ .integer = if (open) l.shown else -l.shown } });
         }
-        at[first + n] = base + w.end;
-        try compose.putObject(w, @intCast(first + n), .{ .dict = .{ .entries = entries.items } });
+        try tail.add(@intCast(first + n), .{ .dict = .{ .entries = entries.items } });
     }
+    return first;
 }

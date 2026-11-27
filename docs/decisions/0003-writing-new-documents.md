@@ -11,6 +11,11 @@ bookmarks with other actions are dropped; signature values are dropped. A field 
 widgets on several pages keeps its value when only some of them are imported, because the
 value belongs to the field.
 
+Added afterwards, on the maintainer's approval: the output uses compressed object streams
+and a cross-reference stream. The first version had a classic table and no object
+streams, and long documents came out up to 2.35 times their size. The standard library's
+compressor is used, so there is still no dependency.
+
 ## Problem
 
 pdf-zig can only append changes to a file it has read (`write.Update`, ISO 32000-1:2008,
@@ -86,8 +91,7 @@ Forms are in A2 because they need their own rules: a field's other widgets may s
 pages that were not imported (and must not be copied, with their values), and merged
 files often use the same field names (12.7.3.2), which must be renamed.
 
-The output is PDF 1.7 (2.0 if a source is) with a classic cross-reference table and no
-object streams, so it can be larger than a source that uses them. Signatures cannot stay
+The output is PDF 1.7 (2.0 if a source is). Signatures cannot stay
 valid in a new file.
 
 ### Deleted content

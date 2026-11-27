@@ -26,6 +26,7 @@ const interp = @import("interp.zig");
 const serial = @import("write.zig");
 const compose_form = @import("compose_form.zig");
 const compose_outline = @import("compose_outline.zig");
+const pack = @import("compose_pack.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -33,8 +34,9 @@ const Entry = object.Entry;
 const Document = document.Document;
 
 pub const Options = struct {
-    /// Largest file the builder makes. What it holds in memory is about this at
-    /// most. The default is what `Document.open` accepts.
+    /// Largest file the builder makes. It also bounds what is held for it and
+    /// the size of what is compressed in it before compression, so memory use
+    /// stays in proportion. The default is what `Document.open` accepts.
     max_bytes: usize = 1 << 30,
     /// Most objects in the file.
     max_objects: u32 = 8_000_000,
@@ -71,8 +73,6 @@ pub const Error = error{
 const catalog_num = 1;
 const tree_num = 2;
 const first_free_num = 3;
-/// Marks an object number whose object is not in `body` (a page).
-const not_in_body = std.math.maxInt(usize);
 
 const PageRec = struct {
     num: u32,
@@ -90,10 +90,14 @@ pub const Builder = struct {
     options: Options,
     /// The page dictionaries, serialized.
     page_bytes: std.ArrayList(u8) = .empty,
-    /// Every other object, serialized.
+    /// Every other object: streams and object streams.
     body: std.ArrayList(u8) = .empty,
-    /// Where object `first_free_num + i` starts in `body`.
-    offsets: std.ArrayList(usize) = .empty,
+    /// Where object `first_free_num + i` is: an offset is into `body`.
+    offsets: std.ArrayList(pack.Location) = .empty,
+    /// Objects waiting for an object stream. It is empty between calls.
+    pending: pack.Pack = .{},
+    /// The bytes that went into object streams, before compression.
+    unpacked_bytes: usize = 0,
     page_list: std.ArrayList(PageRec) = .empty,
     layers: std.ArrayList(Layer) = .empty,
     /// A source was PDF 2.0.
@@ -117,6 +121,7 @@ pub const Builder = struct {
     pub fn deinit(self: *Builder) void {
         self.body.deinit(self.gpa);
         self.offsets.deinit(self.gpa);
+        self.pending.deinit(self.gpa);
         self.page_list.deinit(self.gpa);
         self.layers.deinit(self.gpa);
         self.page_bytes.deinit(self.gpa);
@@ -161,7 +166,7 @@ pub const Builder = struct {
 
     /// The bytes held for the new file so far.
     fn size(self: *const Builder) usize {
-        return self.body.items.len +| self.page_bytes.items.len +| self.extra_bytes;
+        return self.body.items.len +| self.pending.data.items.len +| self.page_bytes.items.len +| self.extra_bytes;
     }
 
     /// Counts `n` bytes held outside the serialized buffers.
@@ -199,10 +204,10 @@ pub const Builder = struct {
         }
     }
 
-    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize };
+    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize, unpacked_bytes: usize };
 
     fn snapshot(self: *const Builder) Snapshot {
-        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes };
+        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes, .unpacked_bytes = self.unpacked_bytes };
     }
 
     fn restore(self: *Builder, s: Snapshot) void {
@@ -218,13 +223,15 @@ pub const Builder = struct {
         self.need_appearances = s.need_appearances;
         self.bookmarks.shrinkRetainingCapacity(s.bookmarks);
         self.extra_bytes = s.extra_bytes;
+        self.unpacked_bytes = s.unpacked_bytes;
+        self.pending.clear();
     }
 
     pub fn newNumber(self: *Builder) Error!u32 {
         const num = first_free_num + self.offsets.items.len;
         // One more is left for the cross-reference table's free entry.
         if (num + 1 >= self.options.max_objects) return error.TooManyObjects;
-        try self.offsets.append(self.gpa, not_in_body);
+        try self.offsets.append(self.gpa, .none);
         return @intCast(num);
     }
 
@@ -328,20 +335,52 @@ pub const Builder = struct {
             const next = copy.queue.items[done];
             try self.emit(next.num, try copy.indirect(scratch.allocator(), next.source));
         }
+        try self.flush();
         try self.addLayers(&copy);
         if (isVersion2(doc)) self.version2 = true;
     }
 
-    /// Serializes `o` as object `num`.
+    /// Serializes `o` as object `num`: a stream into `body` as it is, anything
+    /// else into the object stream being filled.
     pub fn emit(self: *Builder, num: u32, o: Object) Error!void {
         const data_len = if (o == .stream) o.stream.data.len else 0;
         if (data_len > self.options.max_bytes -| self.size()) return error.TooLarge;
-        var out: Io.Writer.Allocating = .fromArrayList(self.gpa, &self.body);
-        defer self.body = out.toArrayList();
-        const at = out.written().len;
-        try putObject(&out.writer, num, o);
-        if (out.written().len +| self.page_bytes.items.len +| self.extra_bytes > self.options.max_bytes) return error.TooLarge;
-        self.offsets.items[num - first_free_num] = at;
+        if (o != .stream) {
+            var value: Io.Writer.Allocating = .init(self.gpa);
+            defer value.deinit();
+            serial.writeObject(&value.writer, o) catch return error.OutOfMemory;
+            if (value.written().len < pack.max_packed_object) {
+                self.unpacked_bytes +|= value.written().len;
+                try self.pending.add(self.gpa, num, value.written());
+                if (@max(self.size(), self.unpacked_bytes) > self.options.max_bytes) return error.TooLarge;
+                if (self.pending.isFull()) try self.flush();
+                return;
+            }
+        }
+        const at = self.body.items.len;
+        {
+            var out: Io.Writer.Allocating = .fromArrayList(self.gpa, &self.body);
+            defer self.body = out.toArrayList();
+            try putObject(&out.writer, num, o);
+        }
+        if (self.size() > self.options.max_bytes) return error.TooLarge;
+        self.offsets.items[num - first_free_num] = .{ .at = at };
+    }
+
+    /// Puts the waiting objects into an object stream in `body`.
+    fn flush(self: *Builder) Error!void {
+        if (self.pending.nums.items.len == 0) return;
+        const num = try self.newNumber();
+        const at = self.body.items.len;
+        {
+            var out: Io.Writer.Allocating = .fromArrayList(self.gpa, &self.body);
+            defer self.body = out.toArrayList();
+            // `close` records locations by object number; this list starts at
+            // the first free one.
+            try self.pending.close(self.gpa, &out.writer, num, .{ .items = self.offsets.items, .first = first_free_num });
+        }
+        if (self.size() > self.options.max_bytes) return error.TooLarge;
+        self.offsets.items[num - first_free_num] = .{ .at = at };
     }
 
     /// The source's layers that were copied, and whether each starts off.
@@ -367,37 +406,27 @@ pub const Builder = struct {
         if (self.page_list.items.len == 0) return error.NoPages;
         // The comment's high bytes say that the file is binary (7.5.2).
         const header = if (self.version2) "%PDF-2.0\n%\xe2\xe3\xcf\xd3\n" else "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n";
+
+        // What follows the body: the pages, their tree, the outline and the
+        // catalog in object streams, then the cross-reference stream.
+        var tail: Tail = try .init(self, header.len + self.body.items.len);
+        defer tail.deinit();
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
 
-        // Where each object is in the file, by number.
-        const objects = first_free_num + self.offsets.items.len;
-        // The outline takes the numbers after the other objects.
-        const outline_objects = if (self.bookmarks.items.len > 0) self.bookmarks.items.len + 1 else 0;
-        const count = objects + outline_objects;
-        if (count >= self.options.max_objects) return error.TooManyObjects;
-        const at = try a.alloc(usize, count);
-        @memset(at, not_in_body);
-        for (self.offsets.items, first_free_num..) |offset, num| {
-            if (offset != not_in_body) at[num] = header.len + offset;
-        }
-
-        // What follows the body: the pages, their tree, the catalog and the
-        // cross-reference data.
-        var tail: Io.Writer.Allocating = .init(self.gpa);
-        defer tail.deinit();
-        const before_tail = header.len + self.body.items.len;
         const kids = try a.alloc(Object, self.page_list.items.len);
+        var page_value: std.ArrayList(u8) = .empty;
+        defer page_value.deinit(self.gpa);
         for (self.page_list.items, kids) |rec, *kid| {
             kid.* = .{ .ref = .{ .num = rec.num } };
-            at[rec.num] = before_tail + tail.written().len;
             // The stored dictionary, reopened before its closing `>>`.
             const dict = self.page_bytes.items[rec.start..][0..rec.len];
-            tail.writer.print("{d} 0 obj\n{s} /Parent {d} 0 R /Rotate {d} >>\nendobj\n", .{ rec.num, dict[0 .. dict.len - " >>".len], tree_num, rec.rotate }) catch return error.OutOfMemory;
+            page_value.clearRetainingCapacity();
+            try page_value.print(self.gpa, "{s} /Parent {d} 0 R /Rotate {d} >>", .{ dict[0 .. dict.len - " >>".len], tree_num, rec.rotate });
+            try tail.addValue(rec.num, page_value.items);
         }
-        at[tree_num] = before_tail + tail.written().len;
-        try putObject(&tail.writer, tree_num, .{ .dict = try serial.makeDict(a, &.{
+        try tail.add(tree_num, .{ .dict = try serial.makeDict(a, &.{
             .{ "Type", .{ .name = "Pages" } },
             .{ "Kids", .{ .array = kids } },
             .{ "Count", .{ .integer = @intCast(kids.len) } },
@@ -406,41 +435,19 @@ pub const Builder = struct {
             .{ "Type", .{ .name = "Catalog" } },
             .{ "Pages", .{ .ref = .{ .num = tree_num } } },
         });
-        if (outline_objects > 0) {
-            try compose_outline.write(a, self.bookmarks.items, @intCast(objects), &tail.writer, before_tail, at);
-            catalog = try serial.dictWith(a, catalog, "Outlines", .{ .ref = .{ .num = @intCast(objects) } });
+        if (self.bookmarks.items.len > 0) {
+            const root = try compose_outline.write(a, self.bookmarks.items, &tail);
+            catalog = try serial.dictWith(a, catalog, "Outlines", .{ .ref = .{ .num = root } });
         }
         if (self.field_roots.items.len > 0) catalog = try serial.dictWith(a, catalog, "AcroForm", .{ .dict = try self.formDictionary(a) });
         if (self.layers.items.len > 0) catalog = try serial.dictWith(a, catalog, "OCProperties", .{ .dict = try self.layerProperties(a) });
-        at[catalog_num] = before_tail + tail.written().len;
-        try putObject(&tail.writer, catalog_num, .{ .dict = catalog });
+        try tail.add(catalog_num, .{ .dict = catalog });
+        try tail.finish();
 
-        const xref_at = before_tail + tail.written().len;
-        const t = &tail.writer;
-        t.print("xref\n0 {d}\n0000000000 65535 f \n", .{count}) catch return error.OutOfMemory;
-        for (at[1..]) |offset| {
-            std.debug.assert(offset != not_in_body);
-            t.print("{d:0>10} 00000 n \n", .{offset}) catch return error.OutOfMemory;
-        }
-        // Both file identifiers are a digest of the content (14.4).
-        var hash = std.crypto.hash.Md5.init(.{});
-        hash.update(self.body.items);
-        hash.update(tail.written());
-        var digest: [16]u8 = undefined;
-        hash.final(&digest);
-        const id: Object = .{ .string = &digest };
-        t.writeAll("trailer\n") catch return error.OutOfMemory;
-        serial.writeObject(t, .{ .dict = try serial.makeDict(a, &.{
-            .{ "Size", .{ .integer = @intCast(count) } },
-            .{ "Root", .{ .ref = .{ .num = catalog_num } } },
-            .{ "ID", .{ .array = &.{ id, id } } },
-        }) }) catch return error.OutOfMemory;
-        t.print("\nstartxref\n{d}\n%%EOF\n", .{xref_at}) catch return error.OutOfMemory;
-
-        if (before_tail + tail.written().len > self.options.max_bytes) return error.TooLarge;
+        if (tail.base + tail.out.written().len > self.options.max_bytes) return error.TooLarge;
         w.writeAll(header) catch return error.WriteFailed;
         w.writeAll(self.body.items) catch return error.WriteFailed;
-        w.writeAll(tail.written()) catch return error.WriteFailed;
+        w.writeAll(tail.out.written()) catch return error.WriteFailed;
     }
 
     /// The interactive form dictionary (table 218).
@@ -478,6 +485,78 @@ pub const Builder = struct {
     }
 };
 
+/// The end of a file being written: what `write` adds after the body, without
+/// changing the builder.
+pub const Tail = struct {
+    builder: *const Builder,
+    /// The offset in the file where the tail starts.
+    base: usize,
+    out: Io.Writer.Allocating,
+    pending: pack.Pack = .{},
+    /// By object number; offsets are into the file.
+    locations: std.ArrayList(pack.Location) = .empty,
+
+    fn init(builder: *const Builder, base: usize) Error!Tail {
+        const gpa = builder.gpa;
+        var self: Tail = .{ .builder = builder, .base = base, .out = .init(gpa) };
+        errdefer self.deinit();
+        try self.locations.appendNTimes(gpa, .none, first_free_num);
+        const header_len = base - builder.body.items.len;
+        for (builder.offsets.items) |location| try self.locations.append(gpa, switch (location) {
+            .at => |offset| .{ .at = header_len + offset },
+            else => location,
+        });
+        return self;
+    }
+
+    fn deinit(self: *Tail) void {
+        self.out.deinit();
+        self.pending.deinit(self.builder.gpa);
+        self.locations.deinit(self.builder.gpa);
+    }
+
+    /// A number for an object that the builder has none for.
+    pub fn newNumber(self: *Tail) Error!u32 {
+        const num = self.locations.items.len;
+        if (num + 1 >= self.builder.options.max_objects) return error.TooManyObjects;
+        try self.locations.append(self.builder.gpa, .none);
+        return @intCast(num);
+    }
+
+    /// Adds `o`, which is not a stream, as object `num`.
+    pub fn add(self: *Tail, num: u32, o: Object) Error!void {
+        var value: Io.Writer.Allocating = .init(self.builder.gpa);
+        defer value.deinit();
+        serial.writeObject(&value.writer, o) catch return error.OutOfMemory;
+        try self.addValue(num, value.written());
+    }
+
+    fn addValue(self: *Tail, num: u32, value: []const u8) Error!void {
+        try self.pending.add(self.builder.gpa, num, value);
+        if (self.pending.isFull()) try self.flush();
+    }
+
+    fn flush(self: *Tail) Error!void {
+        if (self.pending.nums.items.len == 0) return;
+        const num = try self.newNumber();
+        self.locations.items[num] = .{ .at = self.base + self.out.written().len };
+        try self.pending.close(self.builder.gpa, &self.out.writer, num, .{ .items = self.locations.items });
+    }
+
+    fn finish(self: *Tail) Error!void {
+        try self.flush();
+        const own = try self.newNumber();
+        const own_at = self.base + self.out.written().len;
+        // Both file identifiers are a digest of the content (14.4).
+        var hash = std.crypto.hash.Md5.init(.{});
+        hash.update(self.builder.body.items);
+        hash.update(self.out.written());
+        var digest: [16]u8 = undefined;
+        hash.final(&digest);
+        try pack.writeXref(self.builder.gpa, &self.out.writer, self.locations.items, own, own_at, catalog_num, digest);
+    }
+};
+
 const Annot = struct {
     /// The object number in the source, and in the new document.
     source: u32,
@@ -488,7 +567,7 @@ const Annot = struct {
 
 /// Object `num` as it appears in the file. `w` grows in memory, so it only fails
 /// for want of it.
-pub fn putObject(w: *Io.Writer, num: u32, o: Object) error{OutOfMemory}!void {
+fn putObject(w: *Io.Writer, num: u32, o: Object) error{OutOfMemory}!void {
     w.print("{d} 0 obj\n", .{num}) catch return error.OutOfMemory;
     serial.writeObject(w, o) catch return error.OutOfMemory;
     w.writeAll("\nendobj\n") catch return error.OutOfMemory;

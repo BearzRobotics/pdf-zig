@@ -64,6 +64,7 @@ test {
     _ = @import("compose.zig");
     _ = @import("compose_form.zig");
     _ = @import("compose_outline.zig");
+    _ = @import("compose_pack.zig");
     _ = @import("compose_tests.zig");
     _ = @import("form.zig");
     _ = @import("image.zig");

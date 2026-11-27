@@ -25,7 +25,7 @@
 | `text.zig` | Text from a display list |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
-| `compose.zig`, `compose_form.zig`, `compose_outline.zig` | A new document from blank pages and pages of other documents, with their forms and bookmarks |
+| `compose.zig`, `compose_form.zig`, `compose_outline.zig`, `compose_pack.zig` | A new document from blank pages and pages of other documents: forms, bookmarks, and the compact output |
 | `image.zig` | Image samples to RGBA; masks; hand-off to a JPEG/JPX codec |
 | `ccitt.zig` | CCITT fax decoding (T.4, T.6), used for images and their masks |
 | `spans.zig` | Overlapping ranges (CMaps, CID widths) made disjoint, later definitions winning |
@@ -92,9 +92,12 @@ way to change a PDF: it appends to the file and keeps everything in it.
 - **Memory.** Pages and objects are serialized as they are copied, and the source can be
   closed after the call. `compose.Options` limits the size and the number of objects. A
   call that fails adds nothing.
-- **Output.** PDF 1.7 (2.0 if a source is), a cross-reference table, no object streams.
-  Stored stream data is copied without being re-encoded. A file whose source uses object
-  streams grows: on the long TeX manuals tried, up to a little over twice the size.
+- **Output** (`compose_pack.zig`). PDF 1.7 (2.0 if a source is). Objects that are not
+  streams go into Flate-compressed object streams of at most 200, found through a
+  compressed cross-reference stream (7.5.7, 7.5.8). Stored stream data is copied without
+  being re-encoded. On the files compared, the reversed copies came to less in total than
+  their originals (200 files: 45.6 MB to 41.8 MB; 7 long manuals: 40.1 MB to 36.5 MB).
+  Those are totals; a single file need not come out smaller.
 - **Not carried over:** document information and metadata, page labels, document
   attachments, structure and output intents. **It is not redaction:** a resource dictionary
   that pages share is copied whole, and a field with widgets on several pages keeps its
@@ -145,7 +148,7 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- In new documents: object streams, encryption, and drawing new page content.
+- In new documents: encryption and drawing new page content.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with
