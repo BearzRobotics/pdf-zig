@@ -1125,3 +1125,15 @@ test "token-level mutations: opening and rendering every page never crashes" {
         upd.write(testing.allocator, &written.writer) catch {};
     }
 }
+
+test "a stream /Length larger than the address space is not believed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Near 2^32, just past it, and the largest integer.
+    for ([_][]const u8{ "4294967290", "4294967296", "9223372036854775807" }) |length| {
+        const bytes = try build(arena.allocator(), &(simple ++ .{try std.fmt.allocPrint(arena.allocator(), "<< /Length {s} >>\nstream\ndata\nendstream", .{length})}));
+        var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        try testing.expectEqualStrings("data", doc.getObject(4).stream.data);
+    }
+}

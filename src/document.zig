@@ -457,7 +457,9 @@ pub const Document = struct {
         if (dict.get("Length")) |lv| {
             const len_obj = self.resolve(lv);
             if (len_obj.asInt()) |len| {
-                if (len >= 0 and start + @as(usize, @intCast(len)) <= self.data.len) {
+                // Compared with the room left before it is narrowed or added: a
+                // large value would overflow a 32-bit usize.
+                if (len >= 0 and len <= self.data.len - start) {
                     const end = start + @as(usize, @intCast(len));
                     var q = object.Parser.init(self.a(), self.data, end);
                     if (q.eatKeyword("endstream")) return self.data[start..end];
