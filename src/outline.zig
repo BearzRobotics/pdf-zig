@@ -219,7 +219,24 @@ pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) Edit
     });
     const title_obj: Object = .{ .string = try write.textString(a, title) };
 
-    if (refOf(cat.get("Outlines"))) |outlines| {
+    // A root written directly in the catalog (not allowed, but read) becomes an
+    // object, which its items can name as their parent.
+    var existing = refOf(cat.get("Outlines"));
+    if (existing == null) if (cat.get("Outlines")) |direct| if (direct.asDict()) |root| {
+        const moved = try upd.add(direct);
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        var cursor = try itemAt(upd, root.get("First"), &seen);
+        while (cursor) |item| {
+            const d = upd.get(item.num).asDict() orelse break;
+            try upd.set(item.num, .{ .dict = try write.dictWith(a, d, "Parent", .{ .ref = moved }) });
+            cursor = try itemAt(upd, d.get("Next"), &seen);
+        }
+        cat = try write.dictWith(a, cat, "Outlines", .{ .ref = moved });
+        try upd.set(root_ref.num, .{ .dict = cat });
+        existing = moved;
+    };
+
+    if (existing) |outlines| {
         var root = upd.get(outlines.num).asDict() orelse return error.NoCatalog;
         const last = refOf(root.get("Last"));
         var entries: std.ArrayList(object.Entry) = .empty;
@@ -597,4 +614,49 @@ test "name tree lookups are bounded however the tree repeats itself" {
         try testing.expectEqual(@as(usize, 1), items.len);
         try testing.expect(items[0].dest == null);
     }
+}
+
+/// Applies `edit` to a file and returns the bytes written.
+fn edited(a: Allocator, bytes: []const u8, edit: *const fn (*write.Update) anyerror!void) ![]const u8 {
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    var upd = try write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    try edit(&upd);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+    try @import("interp_tests.zig").expectSoundFile(out.written());
+    return out.written();
+}
+
+/// The titles of the top level and of the first item's children.
+fn titles(a: Allocator, bytes: []const u8) ![]const u8 {
+    var doc = try Document.open(testing.allocator, bytes, .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    var out: std.ArrayList(u8) = .empty;
+    for (try read(a, &doc, pl)) |item| try out.print(a, "{s},", .{item.title});
+    return out.items;
+}
+
+fn addNew(upd: *write.Update) anyerror!void {
+    _ = try add(upd, 3, "new", null);
+}
+
+test "add keeps the bookmarks of a direct /Outlines dictionary" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try @import("interp_tests.zig").buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R /Outlines << /First 4 0 R /Last 4 0 R /Count 1 >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Title (old) >>",
+    });
+    const out = try edited(a, bytes, addNew);
+    try testing.expectEqualStrings("old,new,", try titles(a, out));
+    var doc = try Document.open(testing.allocator, out, .{});
+    defer doc.deinit();
+    const root = doc.catalog().?.get("Outlines").?.ref;
+    try testing.expectEqual(root.num, doc.getObject(4).asDict().?.get("Parent").?.ref.num);
 }
