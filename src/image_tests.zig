@@ -337,3 +337,48 @@ test "fromSamples reads the 8-bit samples it is documented to take for stencil m
     const px = try pdf.image.fromSamples(&r.doc, a, img, samples, 8, 2, 1);
     for (0..16) |i| try testing.expectEqual(@as(u8, if (samples[i] == 0) 255 else 0), px.rgba[i * 4 + 3]);
 }
+
+test "a fax-coded stencil mask is applied" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const px = try decodeFirst(a, &.{
+        try imageBody(a, "/Width 8 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Mask 6 0 R", "0123456789abcdef"),
+        try imageBody(a, "/Width 8 /Height 2 /ImageMask true /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 >>", "\x2e\xbc"),
+    }, "");
+    // The same data as an image of its own says which pixels the mask holds.
+    const alone = try decodeFirst(a, &.{try imageBody(a, "/Width 8 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 >>", "\x2e\xbc")}, "");
+    var masked: usize = 0;
+    for (0..16) |i| {
+        // A 1 bit (white) of a stencil mask leaves the pixel out.
+        const white = alone.rgba[i * 4] == 255;
+        try testing.expectEqual(@as(u8, if (white) 0 else 255), px.rgba[i * 4 + 3]);
+        masked += @intFromBool(white);
+    }
+    try testing.expect(masked > 0 and masked < 16);
+}
+
+test "a mask that needs the caller's codec is reported and can be applied" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try it.page(a, "q 10 0 0 10 0 0 cm /Im0 Do Q", "/XObject << /Im0 5 0 R >>", &.{
+        try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R", "\x10\x20"),
+        try imageBody(a, "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode", "jpeg"),
+    }, "");
+    const r = try it.render(bytes);
+    defer it.done(r);
+    var img: pdf.display.Image = undefined;
+    for (r.list.commands) |c| if (c == .image) {
+        img = c.image;
+    };
+    const px = (try pdf.image.decode(&r.doc, a, img)).pixels;
+    const mask = px.pending_mask.?;
+    try testing.expectEqualStrings("DCTDecode", mask.codec.name);
+    try testing.expectEqualStrings("jpeg", mask.codec.data);
+    // The caller decodes the JPEG: one gray byte per pixel.
+    const done_px = try pdf.image.withMaskSamples(&r.doc, a, px, mask, "\x40\xff", 2, 1);
+    try testing.expect(done_px.pending_mask == null);
+    try testing.expectEqual(@as(u8, 0x40), done_px.rgba[3]);
+    try testing.expectEqual(@as(u8, 0xff), done_px.rgba[7]);
+}

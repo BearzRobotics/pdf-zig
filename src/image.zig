@@ -31,6 +31,16 @@ pub const Pixels = struct {
     width: u32,
     height: u32,
     rgba: []u8,
+    /// A soft or stencil mask that has not been applied because its data needs
+    /// a codec this library does not have: decode it and pass the samples to
+    /// `withMaskSamples`, or the image is more opaque than it should be.
+    pending_mask: ?PendingMask = null,
+};
+
+pub const PendingMask = struct {
+    codec: Codec,
+    /// The mask image's dictionary.
+    dict: Dict,
 };
 
 /// A stream that needs a codec this library does not have.
@@ -53,7 +63,7 @@ pub fn decode(doc: *Document, a: Allocator, img: display.Image) Error!Result {
     var dec = try doc.decodeStreamIn(a, img.stream);
     if (dec.rest.len == 1 and (std.mem.eql(u8, dec.rest[0].name, "CCITTFaxDecode") or std.mem.eql(u8, dec.rest[0].name, "CCF"))) {
         // Fax data is decoded here: it needs no codec library.
-        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, img), .rest = &.{} };
+        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, img.width, img.height), .rest = &.{} };
     }
     if (dec.rest.len > 0) return .{ .codec = .{ .name = dec.rest[0].name, .data = dec.data, .parms = dec.rest[0].parms } };
     const is_fax = blk: {
@@ -76,7 +86,7 @@ pub fn decode(doc: *Document, a: Allocator, img: display.Image) Error!Result {
 }
 
 /// 1-bit samples from CCITTFaxDecode data and its `/DecodeParms` (7.4.6).
-fn faxSamples(doc: *Document, a: Allocator, data: []const u8, parms: Dict, img: display.Image) Error![]const u8 {
+fn faxSamples(doc: *Document, a: Allocator, data: []const u8, parms: Dict, width: u32, height: u32) Error![]const u8 {
     const boolOf = struct {
         fn f(d: *Document, p: Dict, k: []const u8) bool {
             const v = d.get(p, k) orelse return false;
@@ -86,7 +96,7 @@ fn faxSamples(doc: *Document, a: Allocator, data: []const u8, parms: Dict, img: 
     const p: ccitt.Params = .{
         .k = @intCast(std.math.clamp(doc.getInt(parms, "K") orelse 0, -1, 1 << 20)),
         .columns = @intCast(std.math.clamp(doc.getInt(parms, "Columns") orelse 1728, 1, 1 << 20)),
-        .rows = img.height,
+        .rows = height,
         .black_is_1 = boolOf(doc, parms, "BlackIs1"),
         .byte_align = boolOf(doc, parms, "EncodedByteAlign"),
     };
@@ -95,12 +105,12 @@ fn faxSamples(doc: *Document, a: Allocator, data: []const u8, parms: Dict, img: 
         error.OutOfMemory => error.OutOfMemory,
     };
     // The image's rows are `Width` pixels wide; the fax rows are `Columns` wide.
-    if (p.columns == img.width) return raw;
+    if (p.columns == width) return raw;
     const src_stride = (@as(usize, p.columns) + 7) / 8;
-    const dst_stride = (@as(usize, img.width) + 7) / 8;
-    const out = try a.alloc(u8, dst_stride * img.height);
+    const dst_stride = (@as(usize, width) + 7) / 8;
+    const out = try a.alloc(u8, dst_stride * height);
     @memset(out, if (p.black_is_1) 0 else 0xFF);
-    for (0..img.height) |y| {
+    for (0..height) |y| {
         const n = @min(src_stride, dst_stride);
         if ((y + 1) * src_stride <= raw.len) @memcpy(out[y * dst_stride ..][0..n], raw[y * src_stride ..][0..n]);
     }
@@ -270,20 +280,49 @@ fn applyMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
     const mw: u32 = @intCast(std.math.clamp(doc.getInt(mst.dict, "Width") orelse return px, 1, 1 << 20));
     const mh: u32 = @intCast(std.math.clamp(doc.getInt(mst.dict, "Height") orelse return px, 1, 1 << 20));
     if (@as(u64, mw) * mh > max_pixels) return px;
-    const dec = doc.decodeStreamIn(a, mst) catch |err| switch (err) {
+    var dec = doc.decodeStreamIn(a, mst) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return px, // a damaged mask
     };
-    if (dec.rest.len > 0) return px; // a JPEG soft mask: the caller would have to decode it
-    const is_stencil = if (doc.get(mst.dict, "ImageMask")) |im| (im == .boolean and im.boolean) else false;
-    const bpc: u8 = if (is_stencil) 1 else blk: {
+    var is_fax = false;
+    if (dec.rest.len == 1 and (std.mem.eql(u8, dec.rest[0].name, "CCITTFaxDecode") or std.mem.eql(u8, dec.rest[0].name, "CCF"))) {
+        dec = .{ .data = try faxSamples(doc, a, dec.data, dec.rest[0].parms, mw, mh), .rest = &.{} };
+        is_fax = true;
+    }
+    if (dec.rest.len > 0) {
+        var out = px;
+        out.pending_mask = .{ .codec = .{ .name = dec.rest[0].name, .data = dec.data, .parms = dec.rest[0].parms }, .dict = mst.dict };
+        return out;
+    }
+    const is_stencil = isStencil(doc, mst.dict);
+    const bpc: u8 = if (is_stencil or is_fax) 1 else blk: {
         const b = doc.getInt(mst.dict, "BitsPerComponent") orelse 8;
         break :blk switch (b) {
             1, 2, 4, 8, 16 => @intCast(b),
             else => 8,
         };
     };
-    const mdec = try decodeArray(doc, a, mst.dict, 1);
+    return applyAlpha(doc, a, mst.dict, px, dec.data, mw, mh, bpc);
+}
+
+fn isStencil(doc: *Document, mask_dict: Dict) bool {
+    const v = doc.get(mask_dict, "ImageMask") orelse return false;
+    return v == .boolean and v.boolean;
+}
+
+/// Applies a mask the caller decoded (`Pixels.pending_mask`): `samples` has one
+/// byte per pixel of the `width` x `height` mask, rows tightly packed.
+pub fn withMaskSamples(doc: *Document, a: Allocator, px: Pixels, mask: PendingMask, samples: []const u8, width: u32, height: u32) Error!Pixels {
+    if (width == 0 or height == 0 or @as(u64, width) * height > max_pixels) return error.TooBig;
+    var out = try applyAlpha(doc, a, mask.dict, px, samples, width, height, 8);
+    out.pending_mask = null;
+    return out;
+}
+
+/// `px` with the alpha channel taken from the mask samples.
+fn applyAlpha(doc: *Document, a: Allocator, mask_dict: Dict, px: Pixels, data: []const u8, mw: u32, mh: u32, bpc: u8) Error!Pixels {
+    const is_stencil = isStencil(doc, mask_dict);
+    const mdec = try decodeArray(doc, a, mask_dict, 1);
     const invert = if (mdec) |dd| dd[0] > dd[1] else false;
     const maxv: f64 = @floatFromInt((@as(u32, 1) << @intCast(bpc)) - 1);
     const row_bytes = (@as(usize, mw) * bpc + 7) / 8;
@@ -296,7 +335,7 @@ fn applyMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
         const sy = y * px.height / th;
         const my = y * mh / th;
         const mstart = my * row_bytes;
-        const mrow = if (mstart + row_bytes <= dec.data.len) dec.data[mstart .. mstart + row_bytes] else if (mstart < dec.data.len) dec.data[mstart..] else dec.data[0..0];
+        const mrow = if (mstart + row_bytes <= data.len) data[mstart .. mstart + row_bytes] else if (mstart < data.len) data[mstart..] else data[0..0];
         for (0..tw) |x| {
             const sx = x * px.width / tw;
             const mx = x * mw / tw;
@@ -307,7 +346,7 @@ fn applyMasks(doc: *Document, a: Allocator, d: Dict, px: Pixels) Error!Pixels {
             var alpha: f64 = @as(f64, @floatFromInt(s)) / maxv;
             if (is_stencil) {
                 // For a stencil, 1 means "masked out" unless Decode says otherwise.
-                alpha = if ((s == 1) != invert) 0 else 1;
+                alpha = if ((alpha > 0.5) != invert) 0 else 1;
             } else if (invert) alpha = 1 - alpha;
             out[o + 3] = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255 + 0.5);
         }
