@@ -1065,3 +1065,24 @@ test "painting in a None separation leaves no mark" {
         else => {},
     };
 }
+
+test "an embedded symbolic font keeps its built-in encoding for glyph names" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try render(try page(a, "BT /F1 10 Tf <2741> Tj ET", helv, &.{
+        "<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+CMSY10 /FirstChar 39 /Widths [500] /Encoding << /Differences [65 /Alpha] >> /FontDescriptor << /Flags 4 /FontFile 6 0 R >> >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+    }, ""));
+    defer done(r);
+    const f = r.list.commands[0].text.font;
+    // The renderer takes unnamed codes from the font program.
+    try testing.expect(f.names[39] == null);
+    try testing.expectEqualStrings("Alpha", f.names[65].?);
+    // Text extraction keeps its best guess without a ToUnicode map.
+    try testing.expect(r.list.commands[0].text.glyphs[0].text.len > 0);
+    // A symbolic font that is not embedded is unchanged.
+    const bare = try render(try page(a, "BT /F1 10 Tf <41> Tj ET", helv, &.{"<< /Type /Font /Subtype /Type1 /BaseFont /X /FontDescriptor << /Flags 4 >> >>"}, ""));
+    defer done(bare);
+    try testing.expectEqualStrings("A", bare.list.commands[0].text.font.names[65].?);
+}

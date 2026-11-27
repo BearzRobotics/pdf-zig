@@ -163,6 +163,9 @@ pub const Font = struct {
             else => {},
         };
         const std_name = standard14(self.base_font);
+        // With no base encoding named, an embedded symbolic font uses the one
+        // in its program (table 114), which only the renderer reads.
+        const built_in = base == .none and self.isSymbolic() and self.program.kind != .none;
         if (base == .none) {
             // No base encoding: nonsymbolic fonts and the standard 14 use
             // StandardEncoding; TrueType text is usually WinAnsi (9.6.6.1).
@@ -171,7 +174,9 @@ pub const Font = struct {
         for (0..256) |c| {
             const u = encoding.unicodeOf(base, @intCast(c));
             self.unicode[c] = u;
-            if (u != 0) self.names[c] = encoding.nameOfUnicode(u);
+            // The Unicode value stays as a guess for text extraction; no
+            // name, so that the program's own encoding picks the glyph.
+            if (u != 0 and !built_in) self.names[c] = encoding.nameOfUnicode(u);
         }
         if (diffs) |ds| {
             var code: i64 = 0;
