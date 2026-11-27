@@ -209,7 +209,7 @@ pub fn parse(a: Allocator, src: []const u8) Allocator.Error!CMap {
         if (std.mem.eql(u8, word, "beginnotdefchar") or std.mem.eql(u8, word, "beginnotdefrange")) section = .none;
     }
     // A stable sort keeps definition order for equal keys; `find` prefers later ones.
-    std.mem.sortUnstable(Range, ranges.items, {}, lessThan);
+    std.mem.sort(Range, ranges.items, {}, lessThan);
     return .{ .spaces = spaces.items, .ranges = ranges.items };
 }
 
@@ -334,4 +334,22 @@ test "long malformed tokens and endless codespace ranges stay cheap" {
     for (0..10_000) |_| try spaces.appendSlice(a, "<00> <01> ");
     const many = try parse(a, spaces.items);
     try std.testing.expectEqual(@as(usize, CMap.max_spaces), many.spaces.len);
+}
+
+test "of many repeated definitions the last one wins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ "0058", "0059" }) |text| {
+        try src.appendSlice(a, "200 beginbfchar ");
+        for (0..200) |code| try src.print(a, "<{x:0>2}> <{s}> ", .{ code, text });
+        try src.appendSlice(a, "endbfchar ");
+    }
+    const m = try parse(a, src.items);
+    for (0..200) |code| {
+        var out: std.ArrayList(u8) = .empty;
+        try std.testing.expect(try m.unicode(a, @intCast(code), 1, &out));
+        try std.testing.expectEqualStrings("Y", out.items);
+    }
 }

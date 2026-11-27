@@ -292,7 +292,8 @@ pub const Font = struct {
                 i += 3;
             } else i += 1;
         }
-        std.mem.sortUnstable(WidthRange, out.items, {}, struct {
+        // Stable, so that of two entries for a CID the later one is found.
+        std.mem.sort(WidthRange, out.items, {}, struct {
             fn lt(_: void, x: WidthRange, y: WidthRange) bool {
                 return x.first < y.first;
             }
