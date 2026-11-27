@@ -127,7 +127,9 @@ pub fn layout(a: Allocator, list: *const display.DisplayList) Allocator.Error!La
     var boxes: std.ArrayList(Box) = .empty;
     errdefer boxes.deinit(a);
     try readingOrder(a, items.items, &out, &boxes);
-    return .{ .text = try out.toOwnedSlice(a), .boxes = try boxes.toOwnedSlice(a) };
+    const owned = try out.toOwnedSlice(a);
+    errdefer a.free(owned);
+    return .{ .text = owned, .boxes = try boxes.toOwnedSlice(a) };
 }
 
 /// Extracts the text of `list`. The result is allocated from `a`.
@@ -338,4 +340,22 @@ test "layout: boxes follow the glyphs, selection and search map to rectangles" {
     try std.testing.expectEqual(@as(usize, 1), rects.items.len); // one line, one rectangle
     try std.testing.expectApproxEqAbs(@as(f64, 56), rects.items[0].x0, 0.01);
     try std.testing.expectApproxEqAbs(@as(f64, 74), rects.items[0].x1, 0.01);
+}
+
+test "layout frees everything when an allocation fails" {
+    const tests = @import("interp_tests.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = try tests.render(try tests.page(arena.allocator(), "BT /F1 10 Tf 20 50 Td (a line long enough to reallocate while it grows) Tj 0 -12 Td (and another) Tj ET", "/Font << /F1 5 0 R >>", &.{"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>"}, ""));
+    defer tests.done(r);
+    const Check = struct {
+        fn both(a: Allocator, list: *const display.DisplayList) !void {
+            var lay = try layout(a, list);
+            lay.deinit(a);
+            a.free(try extract(a, list, .content));
+        }
+    };
+    // Resizing is refused, so that turning the lists into slices allocates.
+    var strict = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(strict.allocator(), Check.both, .{&r.list});
 }
