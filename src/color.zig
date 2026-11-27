@@ -157,8 +157,13 @@ pub fn cmykRgb(c: f64, m: f64, y: f64, k: f64) Rgb {
     return .{ .r = clamp(out[0]), .g = clamp(out[1]), .b = clamp(out[2]) };
 }
 
+/// The white point of sRGB.
+const d65 = [3]f64{ 0.95047, 1.0, 1.08883 };
+
 fn labRgb(l: Lab, ls: f64, as: f64, bs: f64) Rgb {
-    // CIE L*a*b* to XYZ (8.6.5.4), then XYZ to sRGB with a D50-ish white.
+    // CIE L*a*b* to XYZ (8.6.5.4). L*a*b* is relative to the space's white
+    // point; the XYZ is taken relative to the display's white (D65) instead,
+    // which adapts one to the other, so that L* 100 is the screen's white.
     const a = std.math.clamp(as, l.range[0], l.range[1]);
     const b = std.math.clamp(bs, l.range[2], l.range[3]);
     const m = (ls + 16) / 116;
@@ -169,9 +174,9 @@ fn labRgb(l: Lab, ls: f64, as: f64, bs: f64) Rgb {
             return if (x >= 6.0 / 29.0) x * x * x else 108.0 / 841.0 * (x - 4.0 / 29.0);
         }
     }.f;
-    const x = l.white[0] * g(lx);
-    const y = l.white[1] * g(m);
-    const z = l.white[2] * g(lz);
+    const x = d65[0] * g(lx);
+    const y = d65[1] * g(m);
+    const z = d65[2] * g(lz);
     // Linear sRGB (D65 matrix; adequate for display of a preview).
     const r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
     const gg = -0.9689 * x + 1.8758 * y + 0.0415 * z;
@@ -364,4 +369,15 @@ test "Indexed lookup" {
     // An index past hival uses the last entry.
     const c9 = sp.toRgb(&.{9});
     try std.testing.expectEqual(@as(f32, 1), c9.b);
+}
+
+test "Lab white is white whatever the space's white point" {
+    for ([_][3]f64{ .{ 0.9642, 1, 0.8249 }, .{ 0.9505, 1, 1.089 }, .{ 1.0985, 1, 0.3558 } }) |white| {
+        const space: Space = .{ .lab = .{ .white = white, .range = .{ -128, 127, -128, 127 } } };
+        const c = space.toRgb(&.{ 100, 0, 0 });
+        for ([_]f32{ c.r, c.g, c.b }) |v| try std.testing.expect(v > 0.995);
+        const grey = space.toRgb(&.{ 50, 0, 0 });
+        try std.testing.expectApproxEqAbs(grey.r, grey.g, 0.005);
+        try std.testing.expectApproxEqAbs(grey.g, grey.b, 0.005);
+    }
 }
