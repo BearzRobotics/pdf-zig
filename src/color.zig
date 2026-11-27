@@ -83,7 +83,7 @@ pub const Space = union(enum) {
             .indexed => |ix| {
                 const n = ix.base.components();
                 const i: usize = @intFromFloat(std.math.clamp(@round(at(c, 0)), 0, @as(f64, @floatFromInt(ix.hival))));
-                var comp: [8]f64 = @splat(0);
+                var comp: [function.max_inputs]f64 = @splat(0);
                 for (0..@min(n, comp.len)) |k| {
                     const b = if (i * n + k < ix.lookup.len) ix.lookup[i * n + k] else 0;
                     comp[k] = @as(f64, @floatFromInt(b)) / 255.0;

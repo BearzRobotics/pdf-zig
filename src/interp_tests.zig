@@ -1162,3 +1162,26 @@ test "a tiling cell holds no pointer into render's stack frame" {
     try testing.expectEqual(testing.allocator.vtable, cell.arena.child_allocator.vtable);
     try testing.expectEqual(@as(usize, 1), cell.commands.len);
 }
+
+test "a DeviceN space with more than eight colorants keeps its component count" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = "[/a /b /c /d /e /f /g /h /i /j]";
+    const program = "{ pop pop pop pop pop pop pop pop pop }";
+    var limits: std.ArrayList(u8) = .empty;
+    for (0..10) |_| try limits.appendSlice(a, "0 1 ");
+    const function = try std.fmt.allocPrint(a, "<< /FunctionType 4 /Domain [{s}] /Range [0 1] /Length {d} >>\nstream\n{s}\nendstream", .{ limits.items, program.len, program });
+    const image = "<< /Subtype /Image /Width 1 /Height 2 /BitsPerComponent 8 /ColorSpace 7 0 R /Length 20 >>\nstream\n\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\nendstream";
+    const r = try render(try page(a, "q 10 0 0 10 0 0 cm /Im Do Q", "/XObject << /Im 5 0 R >>", &.{ image, function, try std.fmt.allocPrint(a, "[/DeviceN {s} /DeviceGray 6 0 R]", .{names}) }, ""));
+    defer done(r);
+    var img: display.Image = undefined;
+    for (r.list.commands) |c| if (c == .image) {
+        img = c.image;
+    };
+    try testing.expectEqual(@as(u8, 10), img.space.components());
+    // The program keeps the first tint: white for the first row, black for the second.
+    const px = (try pdf.image.decode(&r.doc, a, img)).pixels;
+    try testing.expectEqual(@as(u8, 255), px.rgba[0]);
+    try testing.expectEqual(@as(u8, 0), px.rgba[4]);
+}

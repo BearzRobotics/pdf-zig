@@ -13,8 +13,11 @@ const doc_mod = @import("document.zig");
 const Document = doc_mod.Document;
 const Object = object.Object;
 
-pub const max_inputs = 8;
+/// Most input values: the most colorants of a DeviceN space.
+pub const max_inputs = 32;
 pub const max_outputs = 32;
+/// Sampled functions interpolate between 2^inputs samples, so take fewer.
+const max_sampled_inputs = 8;
 
 pub const Kind = union(enum) {
     sampled: Sampled,
@@ -511,7 +514,7 @@ fn loadNew(doc: *Document, obj: Object, depth: u8) LoadError!Function {
         0 => {
             if (o != .stream or range.len < 2) return error.BadFunction;
             const size_f = try numArray(doc, d.get("Size"));
-            if (size_f.len != domain.len / 2) return error.BadFunction;
+            if (size_f.len != domain.len / 2 or size_f.len > max_sampled_inputs) return error.BadFunction;
             const size = try a.alloc(u32, size_f.len);
             var total: usize = 1;
             for (size_f, 0..) |s, i| {
