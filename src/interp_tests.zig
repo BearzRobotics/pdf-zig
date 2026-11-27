@@ -786,3 +786,12 @@ test "gidOfCid decodes the CID to glyph map once" {
     try testing.expectEqual(@as(u32, 0), f.gidOfCid(&r.doc, 70_000));
     try testing.expect(r.doc.arena.queryCapacity() - before < 512 << 10);
 }
+
+test "a TJ holding only numbers still moves the text position" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "BT /F1 10 Tf 10 50 Td (A) Tj [-5000] TJ (B) Tj ET", helv, &.{helv_obj}, ""));
+    defer done(r);
+    const b = r.list.commands[1].text;
+    try testing.expectApproxEqAbs(@as(f64, 66.67), b.tm.e, 1e-9);
+}

@@ -882,7 +882,11 @@ const Run = struct {
             .integer, .real => x -= (item.asNum() orelse 0) / 1000.0 * size * self.gs.th,
             else => {},
         };
-        if (glyphs.items.len == 0) return;
+        if (glyphs.items.len == 0) {
+            // Numbers in a TJ array move the position even without strings.
+            self.tm = Matrix.translate(x, 0).mul(self.tm);
+            return;
+        }
         const run_tm = self.tm;
         // A Type 3 font draws its glyphs as the paths of their procedures
         // (`type3Run`). The run is also emitted as invisible text (mode 3) so
