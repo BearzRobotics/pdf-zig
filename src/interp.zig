@@ -342,8 +342,10 @@ const Run = struct {
             .text => {},
             else => return,
         };
+        // Hidden content makes no marks, but still changes the graphics state,
+        // clipping included.
         if (self.hidden_depth > 0) switch (c) {
-            .save, .restore => {},
+            .save, .restore, .clip => {},
             else => return,
         };
         if (self.r.produced.commands >= self.r.options.max_commands) return error.LimitExceeded;

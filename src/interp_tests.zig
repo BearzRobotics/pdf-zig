@@ -831,3 +831,18 @@ test "Type 3 glyphs are not painted in the invisible rendering modes" {
         try testing.expectEqual(@as(usize, 1), countKind(r.list, .text));
     }
 }
+
+test "a clip set inside hidden optional content still applies" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try page(a, "q /OC /L BDC 0 0 10 10 re W n 0 0 5 5 re f EMC 0 0 100 100 re f Q", "/Properties << /L 5 0 R >>", &.{"<< /Type /OCG /Name (hidden) >>"}, "");
+    const with_oc = try std.mem.replaceOwned(u8, a, bytes, "/Type /Catalog /Pages 2 0 R", "/Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /OFF [5 0 R] >> >>");
+    const r = try render(with_oc);
+    defer done(r);
+    // save, clip, the visible fill, restore. The hidden fill is gone.
+    const want = [_]std.meta.Tag(display.Command){ .save, .clip, .fill, .restore };
+    try testing.expectEqual(want.len, r.list.commands.len);
+    for (want, r.list.commands) |w, c| try testing.expectEqual(w, std.meta.activeTag(c));
+    try testing.expectEqual(@as(f64, 100), r.list.commands[2].fill.path[1].line.x);
+}
