@@ -132,9 +132,30 @@ pub const Meta = struct {
     color: [3]f64 = .{ 1, 0.92, 0.2 },
 };
 
+/// Largest coordinate or size accepted from a caller; real pages are far smaller.
+const max_coordinate = 1e7;
+
+fn usable(values: []const f64) bool {
+    // False for NaN too.
+    for (values) |v| if (!(@abs(v) <= max_coordinate)) return false;
+    return true;
+}
+
+/// `meta` with its colour components brought into 0 to 1.
+fn checkedMeta(meta: Meta) Error!Meta {
+    var out = meta;
+    for (&out.color) |*c| {
+        if (!std.math.isFinite(c.*)) return error.BadGeometry;
+        c.* = std.math.clamp(c.*, 0, 1);
+    }
+    return out;
+}
+
 /// Adds a text markup annotation over `rects` (displayed-page rectangles, as
 /// `text.Layout.rectsFor` returns them). Returns the new annotation.
-pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text.Rect, meta: Meta) Error!Ref {
+pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text.Rect, meta_in: Meta) Error!Ref {
+    const meta = try checkedMeta(meta_in);
+    for (rects) |r| if (!usable(&.{ r.x0, r.y0, r.x1, r.y1 })) return error.BadGeometry;
     if (page.num == 0) return error.DirectPage;
     if (rects.len == 0) return error.BadGeometry;
     switch (kind) {
@@ -219,7 +240,9 @@ pub fn addMarkup(upd: *Update, page: pages.Page, kind: Kind, rects: []const text
 }
 
 /// Adds a sticky note whose top left corner is at (`x`, `y`) on the displayed page.
-pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta: Meta) Error!Ref {
+pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta_in: Meta) Error!Ref {
+    const meta = try checkedMeta(meta_in);
+    if (!usable(&.{ x, y })) return error.BadGeometry;
     if (page.num == 0) return error.DirectPage;
     const a = upd.allocator();
     const inv = interp.baseMatrix(page).invert() orelse return error.BadGeometry;
@@ -259,7 +282,10 @@ pub fn addNote(upd: *Update, page: pages.Page, x: f64, y: f64, meta: Meta) Error
 
 /// Adds free-hand ink: each stroke a list of points on the displayed page,
 /// drawn `width` points wide with round ends in `meta.color`.
-pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.Point, width: f64, meta: Meta) Error!Ref {
+pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.Point, width: f64, meta_in: Meta) Error!Ref {
+    const meta = try checkedMeta(meta_in);
+    if (!(width > 0) or !usable(&.{width})) return error.BadGeometry;
+    for (strokes) |st| for (st) |pt| if (!usable(&.{ pt.x, pt.y })) return error.BadGeometry;
     if (page.num == 0) return error.DirectPage;
     var points: usize = 0;
     for (strokes) |st| points += st.len;
@@ -325,7 +351,9 @@ pub fn addInk(upd: *Update, page: pages.Page, strokes: []const []const display.P
 /// from its top left) and upright however the page is rotated. Line breaks are
 /// kept; characters outside WinAnsi are drawn as `?` (the text itself keeps
 /// them).
-pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta: Meta) Error!Ref {
+pub fn addFreeText(upd: *Update, page: pages.Page, x: f64, y: f64, w: f64, h: f64, size: f64, meta_in: Meta) Error!Ref {
+    const meta = try checkedMeta(meta_in);
+    if (!usable(&.{ x, y, w, h, size })) return error.BadGeometry;
     if (page.num == 0) return error.DirectPage;
     if (w <= 0 or h <= 0 or size <= 0) return error.BadGeometry;
     const a = upd.allocator();
@@ -879,4 +907,43 @@ test "setContents redraws a text box and drops rich text" {
             try testing.expectEqual(@as(f32, 0), c.text.fill.color.g);
         };
     }
+}
+
+test "numbers that are not usable geometry are refused" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var doc = try Document.open(a, try tests.page(arena.allocator(), "", "", &.{}, ""), .{});
+    defer doc.deinit();
+    const pl = try pages.PageList.build(&doc);
+    const page = pages.page(&doc, pl, 0).?;
+    var upd = try Update.init(a, &doc);
+    defer upd.deinit();
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    const rect = [_]text.Rect{.{ .x0 = 1, .y0 = 1, .x1 = 20, .y1 = 10 }};
+    const stroke = [_]display.Point{.{ .x = 1, .y = 1 }};
+    for ([_]f64{ nan, inf, -inf, 1e300 }) |bad| {
+        const bad_rect = [_]text.Rect{.{ .x0 = bad, .y0 = 1, .x1 = 20, .y1 = 10 }};
+        const bad_stroke = [_]display.Point{.{ .x = 1, .y = bad }};
+        try testing.expectError(error.BadGeometry, addMarkup(&upd, page, .highlight, &bad_rect, .{}));
+        try testing.expectError(error.BadGeometry, addNote(&upd, page, bad, 1, .{}));
+        try testing.expectError(error.BadGeometry, addInk(&upd, page, &.{&bad_stroke}, 1, .{}));
+        try testing.expectError(error.BadGeometry, addInk(&upd, page, &.{&stroke}, bad, .{}));
+        try testing.expectError(error.BadGeometry, addFreeText(&upd, page, bad, 1, 50, 20, 10, .{}));
+        try testing.expectError(error.BadGeometry, addFreeText(&upd, page, 1, 1, 50, bad, 10, .{}));
+        try testing.expectError(error.BadGeometry, addFreeText(&upd, page, 1, 1, 50, 20, bad, .{}));
+    }
+    try testing.expectError(error.BadGeometry, addInk(&upd, page, &.{&stroke}, 0, .{}));
+    try testing.expectError(error.BadGeometry, addInk(&upd, page, &.{&stroke}, -100, .{}));
+    try testing.expectError(error.BadGeometry, addNote(&upd, page, 1, 1, .{ .color = .{ nan, 0, 0 } }));
+    try testing.expectError(error.BadGeometry, addMarkup(&upd, page, .underline, &rect, .{ .color = .{ 0, inf, 0 } }));
+    try testing.expectEqual(@as(usize, 0), upd.changed.count());
+    // Colour components outside 0..1 are clamped.
+    const ref = try addNote(&upd, page, 1, 1, .{ .color = .{ 255, -1, 0.5 } });
+    const c = upd.get(ref.num).asDict().?.get("C").?.array;
+    try testing.expectEqual(@as(f64, 1), c[0].real);
+    try testing.expectEqual(@as(f64, 0), c[1].real);
+    // A bookmark position must be a number.
+    try testing.expectError(error.BadDestination, @import("outline.zig").add(&upd, page.num, "x", nan));
 }

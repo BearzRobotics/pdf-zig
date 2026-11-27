@@ -193,7 +193,7 @@ fn lookupTree(doc: *Document, node: Dict, key: []const u8, depth: usize, budget:
 
 // ---- editing -------------------------------------------------------------------------------------
 
-pub const EditError = write.Error || error{ NoCatalog, NoSuchItem, DirectPage };
+pub const EditError = write.Error || error{ NoCatalog, NoSuchItem, DirectPage, BadDestination };
 
 fn refOf(o: ?Object) ?object.Ref {
     const v = o orelse return null;
@@ -205,6 +205,7 @@ fn refOf(o: ?Object) ?object.Ref {
 /// Creates the outline when the document has none.
 pub fn add(upd: *write.Update, page_num: u32, title: []const u8, top: ?f64) EditError!object.Ref {
     if (page_num == 0) return error.DirectPage;
+    if (top) |t| if (!(@abs(t) <= 1e7)) return error.BadDestination;
     const a = upd.allocator();
     const root_ref = refOf(upd.doc.trailer.get("Root")) orelse return error.NoCatalog;
     var cat = upd.get(root_ref.num).asDict() orelse return error.NoCatalog;
