@@ -218,7 +218,15 @@ fn compileCalculator(a: Allocator, src: []const u8) Allocator.Error![]const Inst
     var open: std.ArrayList(usize) = .empty;
     // The outermost braces enclose the whole program and emit nothing.
     var wrapper_seen = false;
-    var it = std.mem.tokenizeAny(u8, src, " \t\r\n\x00\x0c");
+    // Comments run from `%` to the end of their line and are not program text.
+    var text: std.ArrayList(u8) = .empty;
+    var comment = false;
+    for (src) |c| {
+        if (c == '%') comment = true;
+        if (c == '\r' or c == '\n') comment = false;
+        if (!comment) try text.append(a, c);
+    }
+    var it = std.mem.tokenizeAny(u8, text.items, " \t\r\n\x00\x0c");
     while (it.next()) |tok0| {
         var tok = tok0;
         // Braces may touch their neighbours: split them off.
@@ -266,6 +274,8 @@ fn compileCalculator(a: Allocator, src: []const u8) Allocator.Error![]const Inst
 
 fn runCalculator(code: []const Instr, in: []const f64, out: []f64) void {
     var st: [100]f64 = undefined;
+    // Which stack values are booleans: `not` treats them apart from integers.
+    var is_bool: std.StaticBitSet(100) = .empty;
     var sp: usize = 0;
     for (in) |v| {
         if (sp < st.len) {
@@ -273,15 +283,16 @@ fn runCalculator(code: []const Instr, in: []const f64, out: []f64) void {
             sp += 1;
         }
     }
+    // Jumps only go forward, so the program ends after at most one pass.
     var pc: usize = 0;
-    var steps: usize = 0;
-    while (pc < code.len and steps < 10_000) : (steps += 1) {
+    while (pc < code.len) {
         const ins = code[pc];
         pc += 1;
         switch (ins) {
             .num => |v| {
                 if (sp < st.len) {
                     st[sp] = v;
+                    is_bool.unset(sp);
                     sp += 1;
                 }
             },
@@ -292,7 +303,7 @@ fn runCalculator(code: []const Instr, in: []const f64, out: []f64) void {
                 sp -= 1;
                 if (st[sp] == 0) pc += n;
             },
-            .op => |op| calc(op, &st, &sp),
+            .op => |op| calc(op, &st, &sp, &is_bool),
         }
     }
     finish(st[0..sp], out);
@@ -307,7 +318,7 @@ fn finish(stack: []const f64, out: []f64) void {
     }
 }
 
-fn calc(op: Op, st: *[100]f64, sp: *usize) void {
+fn calc(op: Op, st: *[100]f64, sp: *usize, is_bool: *std.StaticBitSet(100)) void {
     const n = sp.*;
     const need: usize = switch (op) {
         .abs, .ceiling, .cos, .cvi, .cvr, .dup, .floor, .ln, .log, .neg, .not, .pop, .round, .sin, .sqrt, .truncate, .copy, .index => 1,
@@ -315,6 +326,19 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
         else => 2,
     };
     if (n < need) return;
+    // The type of the result, taken from the operands before they are replaced.
+    const operand_bool = n > 0 and is_bool.isSet(n - 1);
+    const result_bool = switch (op) {
+        .eq, .ne, .ge, .gt, .le, .lt, .true, .false => true,
+        .not => operand_bool,
+        .@"and", .@"or", .xor => operand_bool and is_bool.isSet(n - 2),
+        else => false,
+    };
+    defer switch (op) {
+        // These move values; their types move with them, below.
+        .dup, .exch, .copy, .index, .roll, .pop => {},
+        else => if (sp.* > 0) is_bool.setValue(sp.* - 1, result_bool),
+    };
     switch (op) {
         .abs => st[n - 1] = @abs(st[n - 1]),
         .add => binary(st, sp, st[n - 2] + st[n - 1]),
@@ -340,14 +364,16 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
         .log => st[n - 1] = if (st[n - 1] > 0) std.math.log10(st[n - 1]) else 0,
         .sqrt => st[n - 1] = if (st[n - 1] >= 0) @sqrt(st[n - 1]) else 0,
         .neg => st[n - 1] = -st[n - 1],
-        .not => st[n - 1] = if (st[n - 1] == 0) 1 else if (st[n - 1] == 1) 0 else @floatFromInt(~int(st[n - 1])),
+        .not => st[n - 1] = if (operand_bool) b(st[n - 1] == 0) else @floatFromInt(~int(st[n - 1])),
         .@"and" => binary(st, sp, @floatFromInt(int(st[n - 2]) & int(st[n - 1]))),
         .@"or" => binary(st, sp, @floatFromInt(int(st[n - 2]) | int(st[n - 1]))),
         .xor => binary(st, sp, @floatFromInt(int(st[n - 2]) ^ int(st[n - 1]))),
         .bitshift => {
             const v = int(st[n - 2]);
             const sh = int(st[n - 1]);
-            const r: i64 = if (sh >= 0) (if (sh < 62) v << @intCast(sh) else 0) else (if (sh > -62) v >> @intCast(-sh) else 0);
+            // Bits shifted in are zeros in both directions.
+            const bits: u64 = @bitCast(v);
+            const r: i64 = @bitCast(if (sh >= 0) (if (sh < 64) bits << @intCast(sh) else 0) else (if (sh > -64) bits >> @intCast(-sh) else 0));
             binary(st, sp, @floatFromInt(r));
         },
         .eq => binary(st, sp, b(st[n - 2] == st[n - 1])),
@@ -359,8 +385,14 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
         .true => push(st, sp, 1),
         .false => push(st, sp, 0),
         .pop => sp.* -= 1,
-        .dup => push(st, sp, st[n - 1]),
+        .dup => {
+            if (n < st.len) is_bool.setValue(n, operand_bool);
+            push(st, sp, st[n - 1]);
+        },
         .exch => {
+            const below = is_bool.isSet(n - 2);
+            is_bool.setValue(n - 2, operand_bool);
+            is_bool.setValue(n - 1, below);
             const t = st[n - 1];
             st[n - 1] = st[n - 2];
             st[n - 2] = t;
@@ -370,7 +402,10 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             sp.* -= 1;
             if (k > sp.* or sp.* + k > st.len) return;
             const base = sp.* - k;
-            for (0..k) |i| st[sp.* + i] = st[base + i];
+            for (0..k) |i| {
+                st[sp.* + i] = st[base + i];
+                is_bool.setValue(sp.* + i, is_bool.isSet(base + i));
+            }
             sp.* += k;
         },
         .index => {
@@ -378,6 +413,7 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             sp.* -= 1;
             if (k >= sp.*) return;
             st[sp.*] = st[sp.* - 1 - k];
+            is_bool.setValue(sp.*, is_bool.isSet(sp.* - 1 - k));
             sp.* += 1;
         },
         .roll => {
@@ -391,7 +427,12 @@ fn calc(op: Op, st: *[100]f64, sp: *usize) void {
             const shift: usize = @intCast(@mod(j, @as(i64, @intCast(cnt))));
             const base = sp.* - cnt;
             var tmp: [100]f64 = undefined;
-            for (0..cnt) |i| tmp[(i + shift) % cnt] = st[base + i];
+            var types = is_bool.*;
+            for (0..cnt) |i| {
+                tmp[(i + shift) % cnt] = st[base + i];
+                types.setValue(base + (i + shift) % cnt, is_bool.isSet(base + i));
+            }
+            is_bool.* = types;
             for (0..cnt) |i| st[base + i] = tmp[i];
         },
     }
@@ -642,4 +683,33 @@ test "evaluating without an input uses zero" {
     var out: [1]f64 = undefined;
     f.eval(&.{}, &out);
     try std.testing.expectEqual(@as(f64, 2), out[0]);
+}
+
+test "calculator: comments, booleans, integer not and logical shift" {
+    var out: [1]f64 = undefined;
+    const cases = [_]struct { []const u8, f64 }{
+        .{ "{ pop 6 % times 2 mul\n }", 6 },
+        .{ "{ pop 1 % { if } ifelse }\r }", 1 },
+        .{ "{ pop 0 not }", -1 },
+        .{ "{ pop 1 not }", -2 },
+        .{ "{ pop false not }", 1 },
+        .{ "{ pop 3 3 eq not }", 0 },
+        .{ "{ pop 2 3 gt dup pop not }", 1 },
+        .{ "{ pop true false and not }", 1 },
+        .{ "{ pop true 1 exch pop not }", -2 },
+        .{ "{ pop 1 true exch pop not }", 0 },
+        .{ "{ pop -1 -60 bitshift }", 15 },
+    };
+    for (cases) |c| {
+        try calcTest(c[0], &.{0.5}, &out);
+        try std.testing.expectEqual(c[1], out[0]);
+    }
+    // A long straight program is run to its end.
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(std.testing.allocator);
+    try long.append(std.testing.allocator, '{');
+    for (0..20_000) |_| try long.appendSlice(std.testing.allocator, " 1 add");
+    try long.append(std.testing.allocator, '}');
+    try calcTest(long.items, &.{0}, &out);
+    try std.testing.expectEqual(@as(f64, 20_000), out[0]);
 }
