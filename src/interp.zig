@@ -102,7 +102,7 @@ pub const Renderer = struct {
         }
         const scratch = self.scratch.?.allocator();
         const oom_before = self.doc.oom_events;
-        var run: Run = .{ .r = self, .a = list.arena.allocator(), .scratch = scratch };
+        var run: Run = .{ .r = self, .a = list.arena.allocator(), .list_gpa = gpa, .scratch = scratch };
         const data = try pages.contents(self.doc, scratch, p);
         run.gs = .{};
         try run.interpret(data, p.resources, .identity);
@@ -313,6 +313,8 @@ const Run = struct {
     r: *Renderer,
     /// Allocator for the results (the display list's arena).
     a: Allocator,
+    /// What the list's arena was made from, which outlives the list.
+    list_gpa: Allocator,
     /// Allocator for data needed only while the page is interpreted.
     scratch: Allocator,
     commands: std.ArrayList(display.Command) = .empty,
@@ -755,8 +757,12 @@ const Run = struct {
             return .{ .tiling = .{ .cell = cell, .bbox = bbox, .xstep = xstep, .ystep = ystep, .matrix = m, .color = rgb } };
         };
         const cell = try self.a.create(display.DisplayList);
-        cell.* = .{ .arena = std.heap.ArenaAllocator.init(self.a) };
-        var sub: Run = .{ .r = self.r, .a = cell.arena.allocator(), .scratch = self.scratch, .depth = self.depth + 1 };
+        // The cell's commands live in the page's list, which frees them with
+        // everything else. Its own arena stays empty; it is based on the
+        // allocator the caller keeps, not on the list, whose arena moves when
+        // `render` returns it.
+        cell.* = .{ .arena = std.heap.ArenaAllocator.init(self.list_gpa) };
+        var sub: Run = .{ .r = self.r, .a = self.a, .list_gpa = self.list_gpa, .scratch = self.scratch, .depth = self.depth + 1 };
         sub.ops = self.ops;
         sub.content_bytes = self.content_bytes;
         sub.gs = .{};

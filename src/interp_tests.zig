@@ -1151,3 +1151,14 @@ test "shadings without a usable function and tiling without steps paint nothing"
         for (r.list.commands) |c| if (c == .fill) try testing.expect(c.fill.paint == .none);
     }
 }
+
+test "a tiling cell holds no pointer into render's stack frame" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try render(try page(arena.allocator(), "/Pattern cs /P scn 0 0 9 9 re f", "/Pattern << /P 5 0 R >>", &.{"<< /PatternType 1 /PaintType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Length 12 >>\nstream\n0 0 1 1 re f\nendstream"}, ""));
+    defer done(r);
+    const cell = r.list.commands[0].fill.paint.tiling.cell;
+    try testing.expectEqual(testing.allocator.ptr, cell.arena.child_allocator.ptr);
+    try testing.expectEqual(testing.allocator.vtable, cell.arena.child_allocator.vtable);
+    try testing.expectEqual(@as(usize, 1), cell.commands.len);
+}
