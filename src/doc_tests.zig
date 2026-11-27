@@ -399,3 +399,20 @@ test "a chain of object streams inside object streams does not overflow the stac
     try file.appendSlice(a, "\nendstream\nendobj\nstartxref\n9\n%%EOF\n");
     try testing.expectError(error.NotPdf, pdf.Document.open(testing.allocator, file.items, .{}));
 }
+
+test "page tree: a shared /Kids array is expanded once" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Each level names the next array twice through direct dictionaries: 2^40
+    // nodes if every mention were expanded.
+    const levels = 40;
+    var bodies: std.ArrayList([]const u8) = .empty;
+    try bodies.appendSlice(a, &.{ "<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids 3 0 R >>" });
+    for (0..levels) |i| try bodies.append(a, try std.fmt.allocPrint(a, "[ << /Kids {d} 0 R >> << /Kids {d} 0 R >> ]", .{ i + 4, i + 4 }));
+    try bodies.append(a, "[ << /Type /Page >> ]");
+    var doc = try pdf.Document.open(testing.allocator, try build(a, bodies.items), .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    try testing.expectEqual(@as(usize, 1), list.entries.len);
+}

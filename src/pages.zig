@@ -61,7 +61,8 @@ const Entry = struct {
 };
 
 /// Every page of the document in order, found by walking the whole tree once.
-/// The walk is bounded: a node is visited once (cycles end), and at most
+/// The walk is bounded: a node or `/Kids` array that is an object of its own is
+/// visited once (cycles end), and at most
 /// `max_pages` pages are collected.
 pub const PageList = struct {
     entries: []const Entry,
@@ -88,6 +89,15 @@ pub const PageList = struct {
                 try out.append(a, .{ .num = top.num, .dict = top.node, .inh = top.inh });
                 _ = stack.pop();
                 continue;
+            };
+            // An array that is an object of its own is expanded once. Without
+            // this, direct kid dictionaries naming the same arrays make the
+            // walk exponential.
+            if (top.next_kid == 0) if (top.node.get("Kids").? == .ref) {
+                if ((try visited.getOrPut(a, top.node.get("Kids").?.ref.num)).found_existing) {
+                    _ = stack.pop();
+                    continue;
+                }
             };
             if (top.next_kid >= kids.len) {
                 _ = stack.pop();
