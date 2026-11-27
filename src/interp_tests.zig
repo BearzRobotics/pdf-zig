@@ -515,3 +515,27 @@ test "a form or Type 3 glyph used many times is decoded once and counted every t
         try testing.expectError(error.LimitExceeded, renderCost(bytes, .{ .max_content_bytes = 1 << 20 }));
     }
 }
+
+test "font dictionary numbers outside their ranges never crash" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cid = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [<< /Subtype /CIDFontType2 /W ";
+    for ([_][]const u8{
+        "<< /Type /Font /Subtype /Type1 /BaseFont /X /FontDescriptor << /Flags 4294967296 >> >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /X /FontDescriptor << /Flags -9223372036854775807 >> >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /X /FirstChar 4294967296 /Widths [500] >>",
+        cid ++ "[4294967296 [500]] >>] >>",
+        cid ++ "[4294967296 4294967297 500] >>] >>",
+        cid ++ "[0 4294967296 500] >>] >>",
+        cid ++ "[9223372036854775807 [500 500]] >>] >>",
+        cid ++ "[4294967295 [500 500]] >>] >>",
+    }) |font| {
+        const r = try render(try page(a, "BT /F1 10 Tf (AB) Tj ET", helv, &.{font}, ""));
+        done(r);
+    }
+    // /Flags written as a signed 32-bit number keeps its bits (4: symbolic).
+    const r = try render(try page(a, "BT /F1 10 Tf (A) Tj ET", helv, &.{"<< /Type /Font /Subtype /Type1 /BaseFont /X /FontDescriptor << /Flags -2147483644 >> >>"}, ""));
+    defer done(r);
+    try testing.expect(r.list.commands[0].text.font.isSymbolic());
+}

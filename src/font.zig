@@ -119,7 +119,8 @@ pub const Font = struct {
 
     fn loadDescriptor(self: *Font, doc: *Document, desc_obj: ?Object) void {
         const desc = (desc_obj orelse return).asDict() orelse return;
-        self.flags = @intCast(@max(0, doc.getInt(desc, "Flags") orelse 0));
+        // 32 flag bits; some writers give them as a signed number.
+        self.flags = @truncate(@as(u64, @bitCast(doc.getInt(desc, "Flags") orelse 0)));
         if (doc.getNum(desc, "MissingWidth")) |mw| self.missing_width = mw;
         const files = [_]struct { []const u8, ProgramKind }{ .{ "FontFile", .type1 }, .{ "FontFile2", .truetype }, .{ "FontFile3", .cff } };
         for (files) |ff| {
@@ -142,7 +143,7 @@ pub const Font = struct {
         if (dict.get("FontDescriptor")) |fd| self.loadDescriptor(doc, doc.resolve(fd));
 
         // Widths (9.6.2.1).
-        self.first_char = @intCast(@max(0, doc.getInt(dict, "FirstChar") orelse 0));
+        self.first_char = std.math.lossyCast(u32, doc.getInt(dict, "FirstChar") orelse 0);
         if (doc.getArray(dict, "Widths")) |arr| {
             const w = try a.alloc(f64, @min(arr.len, 1024));
             for (w, 0..) |*slot, i| slot.* = doc.resolve(arr[i]).asNum() orelse 0;
@@ -278,7 +279,8 @@ pub const Font = struct {
             if (next.asArray()) |list| {
                 for (list, 0..) |item, k| {
                     const wv = doc.resolve(item).asNum() orelse continue;
-                    const c: u32 = @intCast(@max(0, first) + @as(i64, @intCast(k)));
+                    // A CID past the 32-bit range names no glyph.
+                    const c = std.math.cast(u32, @max(0, first) +| @as(i64, @intCast(k))) orelse break;
                     try out.append(a, .{ .first = c, .last = c, .w = wv });
                     if (out.items.len > 200_000) break;
                 }
@@ -286,7 +288,7 @@ pub const Font = struct {
             } else if (next.asInt()) |last| {
                 if (i + 2 >= w.len) break;
                 const wv = doc.resolve(w[i + 2]).asNum() orelse 0;
-                try out.append(a, .{ .first = @intCast(@max(0, first)), .last = @intCast(@max(0, last)), .w = wv });
+                try out.append(a, .{ .first = std.math.lossyCast(u32, first), .last = std.math.lossyCast(u32, last), .w = wv });
                 i += 3;
             } else i += 1;
         }
