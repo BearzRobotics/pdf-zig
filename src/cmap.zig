@@ -91,15 +91,25 @@ pub const CMap = struct {
     /// Returns false if the map has no entry.
     pub fn unicode(self: CMap, a: Allocator, code: u32, bytes: u8, out: *std.ArrayList(u8)) Allocator.Error!bool {
         const r = self.findAnyLength(code, bytes) orelse return false;
-        var units: [16]u16 = undefined;
-        const n = @min(r.dst.len, units.len);
-        @memcpy(units[0..n], r.dst[0..n]);
-        // The offset is added to the last UTF-16 unit, which wraps.
-        if (n > 0) units[n - 1] +%= @truncate(code - r.first);
-        var it = std.unicode.Utf16LeIterator.init(units[0..n]);
-        while (it.nextCodepoint() catch return false) |cp| {
+        // The units are numbers as parsed, so this works on either byte order.
+        var i: usize = 0;
+        while (i < r.dst.len) : (i += 1) {
+            var unit = r.dst[i];
+            // In a range, the offset is added to the last unit, which wraps.
+            if (i + 1 == r.dst.len) unit +%= @truncate(code - r.first);
+            var cp: u21 = unit;
+            if (unit >= 0xD800 and unit < 0xDC00 and i + 1 < r.dst.len) {
+                var low = r.dst[i + 1];
+                if (i + 2 == r.dst.len) low +%= @truncate(code - r.first);
+                if (low >= 0xDC00 and low < 0xE000) {
+                    cp = 0x10000 + (@as(u21, unit - 0xD800) << 10) + (low - 0xDC00);
+                    i += 1;
+                }
+            }
+            // Half a surrogate pair is no character.
+            if (cp >= 0xD800 and cp < 0xE000) cp = 0xFFFD;
             var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cp, &buf) catch continue;
+            const len = std.unicode.utf8Encode(cp, &buf) catch unreachable;
             try out.appendSlice(a, buf[0..len]);
         }
         return true;
@@ -114,11 +124,11 @@ fn hexValue(s: []const u8) u32 {
 
 fn utf16Of(a: Allocator, s: []const u8) Allocator.Error![]const u16 {
     const n = s.len / 2;
-    const out = try a.alloc(u16, @max(n, 1));
-    out[0] = 0;
+    // A single byte is one unit; an empty string is no text.
+    if (s.len == 1) return a.dupe(u16, &.{s[0]});
+    const out = try a.alloc(u16, n);
     for (0..n) |i| out[i] = (@as(u16, s[2 * i]) << 8) | s[2 * i + 1];
-    if (n == 0 and s.len == 1) out[0] = s[0];
-    return out[0..@max(n, 1)];
+    return out;
 }
 
 /// Parses CMap program text. Allocations come from `a` (use an arena).
@@ -395,4 +405,26 @@ test "a range is found behind any number of ranges inside it, and later ones ove
     const cids = try parse(a, "1 begincidrange <0000> <FFFF> 100 endcidrange 3 begincidchar <0001> 7 <0002> 8 <0003> 9 endcidchar");
     try std.testing.expectEqual(@as(?u32, 7), cids.cid(1, 2));
     try std.testing.expectEqual(@as(?u32, 150), cids.cid(50, 2));
+}
+
+test "ToUnicode destinations: long, unpaired surrogate, empty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var long: std.ArrayList(u8) = .empty;
+    for (0..24) |i| try long.print(a, "{x:0>4}", .{'a' + i});
+    const m = try parse(a, try std.fmt.allocPrint(a, "4 beginbfchar <01> <{s}> <02> <0041D800> <03> <> <04> <D83DDE00> endbfchar 1 beginbfrange <10> <11> <D800> endbfrange", .{long.items}));
+    const want = [_]struct { u32, []const u8 }{
+        .{ 1, "abcdefghijklmnopqrstuvwx" },
+        // The half pair is replaced; what came before it stays.
+        .{ 2, "A\u{FFFD}" },
+        .{ 3, "" },
+        .{ 4, "\u{1F600}" },
+        .{ 0x10, "\u{FFFD}" },
+    };
+    for (want) |w| {
+        var out: std.ArrayList(u8) = .empty;
+        try std.testing.expect(try m.unicode(a, w[0], 1, &out));
+        try std.testing.expectEqualStrings(w[1], out.items);
+    }
 }
