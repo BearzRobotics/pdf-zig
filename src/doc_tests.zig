@@ -841,3 +841,26 @@ test "page tree: one over-deep branch does not hide the pages after it" {
     try testing.expectEqual(@as(?i64, 2), list.entries[0].dict.get("Marker").?.asInt());
     try testing.expect(list.truncated);
 }
+
+test "page boxes that cannot be a page are replaced" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nines: [400]u8 = @splat('9');
+    for ([_][]const u8{
+        try std.fmt.allocPrint(a, "[{s} 0 {s} 10]", .{ &nines, &nines }),
+        try std.fmt.allocPrint(a, "[-{s} 0 {s} 10]", .{ &nines, &nines }),
+        "[0 0 0 100]",
+        "[10 10 10 10]",
+    }) |box| {
+        var doc = try pdf.Document.open(testing.allocator, try build(a, &.{
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] >>",
+            try std.fmt.allocPrint(a, "<< /Type /Page /MediaBox {s} >>", .{box}),
+        }), .{});
+        defer doc.deinit();
+        const p = pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?;
+        try testing.expectEqual(pdf.pages.Rect.letter, p.media_box);
+        try testing.expectEqual(pdf.pages.Rect.letter, p.crop_box);
+    }
+}

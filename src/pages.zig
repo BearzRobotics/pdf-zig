@@ -167,7 +167,9 @@ fn rectOf(doc: *Document, o: ?Object) ?Rect {
 pub fn page(doc: *Document, list: PageList, index: usize) ?Page {
     if (index >= list.entries.len) return null;
     const e = list.entries[index];
-    const media = rectOf(doc, e.inh.media_box) orelse Rect.letter;
+    // A box without area, or without a finite size, cannot be a page.
+    var media = rectOf(doc, e.inh.media_box) orelse Rect.letter;
+    if (!(media.width() > 0 and media.height() > 0 and std.math.isFinite(media.width()) and std.math.isFinite(media.height()))) media = Rect.letter;
     const crop_raw = rectOf(doc, e.inh.crop_box);
     // The crop box is clipped to the media box (14.11.2).
     const crop = if (crop_raw) |c| Rect{
