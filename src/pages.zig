@@ -66,6 +66,11 @@ const Entry = struct {
 /// `max_pages` pages are collected.
 pub const PageList = struct {
     entries: []const Entry,
+    /// Some pages are missing: the tree has a branch nested deeper than
+    /// `max_depth`, or more than `max_pages` pages.
+    truncated: bool = false,
+
+    pub const max_depth = 256;
 
     pub const max_pages = 1 << 20;
 
@@ -90,7 +95,12 @@ pub const PageList = struct {
         if (root_num != 0) try visited.put(a, root_num, {});
         try stack.append(a, .{ .node = root_dict, .num = root_num, .inh = inheritFrom(.{}, root_dict), .next_kid = 0 });
 
-        while (stack.items.len > 0 and out.items.len < max_pages and stack.items.len < 256) {
+        var truncated = false;
+        while (stack.items.len > 0) {
+            if (out.items.len >= max_pages) {
+                truncated = true;
+                break;
+            }
             var top = &stack.items[stack.items.len - 1];
             const kids = doc.getArray(top.node, "Kids") orelse {
                 // A node with no /Kids that we reached as a node: it is a page.
@@ -121,13 +131,18 @@ pub const PageList = struct {
             const kd = doc.resolve(kid).asDict() orelse continue;
             const is_node = doc.getName(kd, "Type") != null and std.mem.eql(u8, doc.getName(kd, "Type").?, "Pages") or kd.has("Kids");
             if (is_node and kd.has("Kids")) {
+                // Only this branch is left out; the walk goes on with the rest.
+                if (stack.items.len >= max_depth - 1) {
+                    truncated = true;
+                    continue;
+                }
                 const inh = inheritFrom(top.inh, kd);
                 try stack.append(a, .{ .node = kd, .num = kid_num, .inh = inh, .next_kid = 0 });
             } else {
                 try out.append(a, .{ .num = kid_num, .dict = kd, .inh = inheritFrom(top.inh, kd) });
             }
         }
-        return .{ .entries = out.items };
+        return .{ .entries = out.items, .truncated = truncated };
     }
 
     fn inheritFrom(parent: Inherited, d: Dict) Inherited {

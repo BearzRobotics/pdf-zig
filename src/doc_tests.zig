@@ -822,3 +822,22 @@ test "decoding into the caller's allocator does not grow the document" {
     }
     try testing.expectEqual(before, doc.arena.queryCapacity());
 }
+
+test "page tree: one over-deep branch does not hide the pages after it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const deep = 300;
+    var bodies: std.ArrayList([]const u8) = .empty;
+    try bodies.append(a, "<< /Type /Catalog /Pages 2 0 R >>");
+    try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Pages /Kids [3 0 R {d} 0 R] >>", .{deep + 3}));
+    for (0..deep - 1) |i| try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Pages /Kids [{d} 0 R] >>", .{i + 4}));
+    try bodies.append(a, "<< /Type /Page /Marker 1 >>");
+    try bodies.append(a, "<< /Type /Page /Marker 2 >>");
+    var doc = try pdf.Document.open(testing.allocator, try build(a, bodies.items), .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    try testing.expectEqual(@as(usize, 1), list.entries.len);
+    try testing.expectEqual(@as(?i64, 2), list.entries[0].dict.get("Marker").?.asInt());
+    try testing.expect(list.truncated);
+}
