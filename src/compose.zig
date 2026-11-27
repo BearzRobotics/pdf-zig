@@ -198,64 +198,19 @@ pub const Builder = struct {
         defer scratch.deinit();
         const a = scratch.allocator();
 
-        var resources: std.ArrayList(Entry) = .empty;
-        var fonts: std.ArrayList(Entry) = .empty;
-        var it = canvas.fonts.iterator();
-        while (it.next()) |font| {
-            if (self.drawn_fonts.get(font) == 0) {
-                const num = try self.newNumber();
-                try self.emit(num, .{ .dict = try serial.makeDict(a, &.{
-                    .{ "Type", .{ .name = "Font" } },
-                    .{ "Subtype", .{ .name = "Type1" } },
-                    .{ "BaseFont", .{ .name = font.baseFont() } },
-                    .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
-                }) });
-                self.drawn_fonts.set(font, num);
-            }
-            try fonts.append(a, .{ .key = try std.fmt.allocPrint(a, "F{d}", .{@backingInt(font)}), .value = .{ .ref = .{ .num = self.drawn_fonts.get(font) } } });
-        }
-        if (fonts.items.len > 0) try resources.append(a, .{ .key = "Font", .value = .{ .dict = .{ .entries = fonts.items } } });
-
-        const images = try a.alloc(Entry, canvas.images.items.len);
-        for (canvas.images.items, images, 0..) |*picture, *entry, i| {
-            const num = self.drawn_images.get(picture.digest) orelse try self.addImage(a, picture);
-            entry.* = .{ .key = try std.fmt.allocPrint(a, "Im{d}", .{i}), .value = .{ .ref = .{ .num = num } } };
-        }
-        if (images.len > 0) try resources.append(a, .{ .key = "XObject", .value = .{ .dict = .{ .entries = images } } });
-
-        const states = try a.alloc(Entry, canvas.states.items.len);
-        for (states, 0..) |*entry, i| entry.* = .{ .key = try std.fmt.allocPrint(a, "Gs{d}", .{i}), .value = .{ .dict = try canvas.stateDictionary(a, i) } };
-        if (states.len > 0) try resources.append(a, .{ .key = "ExtGState", .value = .{ .dict = .{ .entries = states } } });
-
-        var content: std.ArrayList(u8) = .empty;
-        try content.appendSlice(a, canvas.content.items);
-        for (canvas.saved.items) |_| try content.appendSlice(a, "Q\n");
+        var objects: Drawn = .{ .builder = self };
+        const resources = try draw.resourcesOf(a, canvas, &objects);
         const contents = try self.newNumber();
-        const squeezed = try pack.compress(a, content.items);
+        const squeezed = try draw.compressedContent(a, canvas);
         try self.emit(contents, .{ .stream = .{ .dict = try serial.makeDict(a, &.{.{ "Filter", .{ .name = "FlateDecode" } }}), .data = squeezed } });
         try self.flush();
 
         try self.addPageRecord(try self.newNumber(), try serial.makeDict(a, &.{
             .{ "Type", .{ .name = "Page" } },
             .{ "MediaBox", try serial.numbers(a, &.{ 0, 0, canvas.width, canvas.height }) },
-            .{ "Resources", .{ .dict = .{ .entries = resources.items } } },
+            .{ "Resources", .{ .dict = resources } },
             .{ "Contents", .{ .ref = .{ .num = contents } } },
         }), 0);
-    }
-
-    /// Writes `picture` as an image XObject, with its alpha as a soft mask.
-    fn addImage(self: *Builder, a: Allocator, picture: *const draw.Image) Error!u32 {
-        var entries: std.ArrayList(Entry) = .empty;
-        try entries.appendSlice(a, (try imageDictionary(a, picture, picture.components, picture.jpeg)).entries);
-        if (picture.alpha) |alpha| {
-            const mask = try self.newNumber();
-            try self.emit(mask, .{ .stream = .{ .dict = try imageDictionary(a, picture, 1, false), .data = alpha } });
-            try entries.append(a, .{ .key = "SMask", .value = .{ .ref = .{ .num = mask } } });
-        }
-        const num = try self.newNumber();
-        try self.emit(num, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = picture.data } });
-        try self.drawn_images.put(self.gpa, picture.digest, num);
-        return num;
     }
 
     pub const Info = struct {
@@ -611,18 +566,37 @@ pub const Builder = struct {
     }
 };
 
-/// The dictionary of an image XObject of `picture`'s size.
-fn imageDictionary(a: Allocator, picture: *const draw.Image, components: u8, jpeg: bool) Allocator.Error!Dict {
-    return serial.makeDict(a, &.{
-        .{ "Type", .{ .name = "XObject" } },
-        .{ "Subtype", .{ .name = "Image" } },
-        .{ "Width", .{ .integer = picture.width } },
-        .{ "Height", .{ .integer = picture.height } },
-        .{ "ColorSpace", .{ .name = if (components == 1) "DeviceGray" else "DeviceRGB" } },
-        .{ "BitsPerComponent", .{ .integer = 8 } },
-        .{ "Filter", .{ .name = if (jpeg) "DCTDecode" else "FlateDecode" } },
-    });
-}
+/// The builder's objects for what a canvas draws with.
+const Drawn = struct {
+    builder: *Builder,
+
+    pub fn fontObject(self: *Drawn, a: Allocator, font: draw.Builtin) Error!object.Ref {
+        const builder = self.builder;
+        if (builder.drawn_fonts.get(font) == 0) {
+            const num = try builder.newNumber();
+            try builder.emit(num, .{ .dict = try draw.fontDictionary(a, font) });
+            builder.drawn_fonts.set(font, num);
+        }
+        return .{ .num = builder.drawn_fonts.get(font) };
+    }
+
+    /// An image XObject, with its alpha as a soft mask.
+    pub fn imageObject(self: *Drawn, a: Allocator, picture: *const draw.Image) Error!object.Ref {
+        const builder = self.builder;
+        if (builder.drawn_images.get(picture.digest)) |num| return .{ .num = num };
+        var entries: std.ArrayList(Entry) = .empty;
+        try entries.appendSlice(a, (try draw.imageDictionary(a, picture, picture.components, picture.jpeg)).entries);
+        if (picture.alpha) |alpha| {
+            const mask = try builder.newNumber();
+            try builder.emit(mask, .{ .stream = .{ .dict = try draw.imageDictionary(a, picture, 1, false), .data = alpha } });
+            try entries.append(a, .{ .key = "SMask", .value = .{ .ref = .{ .num = mask } } });
+        }
+        const num = try builder.newNumber();
+        try builder.emit(num, .{ .stream = .{ .dict = .{ .entries = entries.items }, .data = picture.data } });
+        try builder.drawn_images.put(builder.gpa, picture.digest, num);
+        return .{ .num = num };
+    }
+};
 
 /// Whether `s` is a date as 7.9.4 writes them: `D:` and a year, then pairs of
 /// digits as far as they go, and perhaps a time zone.

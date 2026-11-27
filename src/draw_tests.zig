@@ -509,3 +509,306 @@ fn drawUnderAllocationFailure(gpa: Allocator) !void {
 test "every failed allocation while drawing is reported" {
     try testing.checkAllAllocationFailures(testing.allocator, drawUnderAllocationFailure, .{});
 }
+
+// ---- stamping existing pages ---------------------------------------------------------------
+
+const buildFile = @import("interp_tests.zig").buildFile;
+
+/// `n` pages with the entries `extra`, each showing the content `body` with
+/// font /F1 and a form already named /PzF0.
+fn existing(a: Allocator, n: usize, extra: []const u8, body: []const u8) ![]const u8 {
+    var bodies: std.ArrayList([]const u8) = .empty;
+    var kids: std.ArrayList(u8) = .empty;
+    for (0..n) |i| try kids.print(a, "{d} 0 R ", .{i + 6});
+    try bodies.append(a, "<< /Type /Catalog /Pages 2 0 R >>");
+    try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Pages /Kids [{s}] /Count {d} /MediaBox [0 0 300 400] /Resources << /Font << /F1 4 0 R >> /XObject << /PzF0 5 0 R >> >> >>", .{ kids.items, n }));
+    try bodies.append(a, try std.fmt.allocPrint(a, "<< /Length {d} >>\nstream\n{s}\nendstream", .{ body.len, body }));
+    try bodies.append(a, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    try bodies.append(a, "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream");
+    for (0..n) |_| try bodies.append(a, try std.fmt.allocPrint(a, "<< /Type /Page /Parent 2 0 R /Contents 3 0 R {s} >>", .{extra}));
+    return buildFile(a, bodies.items);
+}
+
+const body_text = "BT /F1 12 Tf 60 100 Td (underneath) Tj ET";
+
+fn mark(canvas: *Canvas) !void {
+    try canvas.setFill(.{ .rgb = .{ 1, 0, 0 } });
+    try canvas.rect(20, 30, 40, 10);
+    try canvas.fill(.nonzero);
+    try canvas.text(.helvetica, 10, 25, 60, "STAMP");
+}
+
+/// Applies `canvas` to every page of `bytes` and returns the saved file.
+fn stamped(a: Allocator, bytes: []const u8, canvas: *const Canvas, layer: draw.Layer) ![]const u8 {
+    var doc = try pdf.Document.open(a, bytes, .{});
+    const list = try pdf.pages.PageList.build(&doc);
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    for (0..list.entries.len) |i| try stamp.place(pdf.pages.page(&doc, list, i).?, canvas, layer);
+    try stamp.finish();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+    try testing.expect(std.mem.startsWith(u8, out.written(), bytes));
+    return out.written();
+}
+
+/// The stamp's fill and its text as they are seen.
+fn expectStamp(page: *const Page) !void {
+    var found_box = false;
+    var found_text = false;
+    for (page.list.commands) |c| switch (c) {
+        .fill => |f| if (f.paint == .color and f.paint.color.r == 1 and f.paint.color.g == 0) {
+            var min: display.Point = .{ .x = 1e9, .y = 1e9 };
+            var max: display.Point = .{ .x = -1e9, .y = -1e9 };
+            for (f.path) |segment| if (segment == .move or segment == .line) {
+                const raw = if (segment == .move) segment.move else segment.line;
+                const p = page.seen(f.ctm, raw.x, raw.y);
+                min = .{ .x = @min(min.x, p.x), .y = @min(min.y, p.y) };
+                max = .{ .x = @max(max.x, p.x), .y = @max(max.y, p.y) };
+            };
+            try expectAt(20, 30, min);
+            try expectAt(60, 40, max);
+            found_box = true;
+        },
+        .text => |t| if (t.glyphs.len == 5) {
+            const m = t.tm.mul(t.ctm);
+            try expectAt(25, 60, page.seen(m, 0, 0));
+            // Upright and reading to the right, one point to the point.
+            const right = page.seen(m, 1, 0);
+            const up = page.seen(m, 0, 1);
+            try expectAt(26, 60, right);
+            try expectAt(25, 59, up);
+            found_text = true;
+        },
+        else => {},
+    };
+    try testing.expect(found_box and found_text);
+}
+
+test "a stamp lies on the page as seen, whatever its rotation, crop box and unit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var canvas = try Canvas.init(testing.allocator, 200, 100);
+    defer canvas.deinit();
+    try mark(&canvas);
+    for ([_][]const u8{
+        "",                         "/Rotate 90",                          "/Rotate 180", "/Rotate 270",
+        "/CropBox [15 25 275 365]", "/Rotate 90 /CropBox [15 25 275 365]", "/UserUnit 2", "/Rotate 270 /UserUnit 2.5 /CropBox [15 25 275 365]",
+    }) |extra| {
+        const bytes = try existing(a, 1, extra, body_text);
+        const before = try open(a, bytes, 0);
+        const after = try open(a, try stamped(a, bytes, &canvas, .over), 0);
+        try expectStamp(&after);
+        // What was there is where it was.
+        const was = try before.nth(.text, 0);
+        const is = try after.nth(.text, 0);
+        try testing.expectEqual(before.seen(was.tm.mul(was.ctm), 0, 0), after.seen(is.tm.mul(is.ctm), 0, 0));
+        try testing.expectEqualStrings("underneath", blk: {
+            var shown: std.ArrayList(u8) = .empty;
+            for (is.glyphs) |g| try shown.appendSlice(a, g.text);
+            break :blk shown.items;
+        });
+    }
+}
+
+test "over comes after the page's content and under before it, whatever that content leaves open" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var canvas = try Canvas.init(testing.allocator, 200, 100);
+    defer canvas.deinit();
+    try mark(&canvas);
+    for ([_][]const u8{
+        body_text,
+        body_text ++ " q 3 0 0 3 5 5 cm 0 1 0 rg",
+        "Q " ++ body_text ++ " 2 0 0 2 9 9 cm",
+        "q 9 0 0 9 0 0 cm Q Q Q " ++ body_text ++ " q 4 0 0 4 0 0 cm 50 Tz 3 Tr",
+    }) |left| {
+        const bytes = try existing(a, 1, "", left);
+        for ([_]draw.Layer{ .over, .under }) |layer| {
+            const page = try open(a, try stamped(a, bytes, &canvas, layer), 0);
+            try expectStamp(&page);
+            var order: std.ArrayList(usize) = .empty;
+            for (page.list.commands) |c| if (c == .text) try order.append(a, c.text.glyphs.len);
+            try testing.expectEqualSlices(usize, if (layer == .over) &.{ 10, 5 } else &.{ 5, 10 }, order.items);
+        }
+    }
+}
+
+test "one canvas on many pages is stored once, with names the pages do not use" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var image = try draw.Image.fromJpeg(testing.allocator, @embedFile("jpeg_rgb.jpg"));
+    defer image.deinit();
+    var doc = try pdf.Document.open(a, try existing(a, 4, "", body_text), .{});
+    const list = try pdf.pages.PageList.build(&doc);
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    {
+        var shared = try Canvas.init(testing.allocator, 300, 400);
+        defer shared.deinit();
+        try shared.image(&image, 0, 0, 16, 8);
+        try shared.setAlpha(0.5, 0.5);
+        try shared.text(.helvetica, 10, 25, 60, "STAMP");
+        for (0..4) |i| try stamp.place(pdf.pages.page(&doc, list, i).?, &shared, .over);
+        // The canvas changed: another form, which shares the font and image.
+        try shared.text(.helvetica, 10, 25, 80, "MORE");
+        try stamp.place(pdf.pages.page(&doc, list, 0).?, &shared, .under);
+    }
+    // The canvas is gone before the update is written.
+    try stamp.finish();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+    var forms: usize = 0;
+    var images: usize = 0;
+    var fonts: usize = 0;
+    var first = try open(a, out.written(), 0);
+    var it = first.doc.xref.iterator();
+    while (it.next()) |entry| {
+        const d = first.doc.getObject(entry.key_ptr.*).asDict() orelse continue;
+        const subtype = first.doc.getName(d, "Subtype") orelse continue;
+        if (std.mem.eql(u8, subtype, "Form")) forms += 1;
+        if (std.mem.eql(u8, subtype, "Image")) images += 1;
+        if (std.mem.eql(u8, subtype, "Type1")) fonts += 1;
+    }
+    // Two stamps and the form that was there; one image; the page's font and ours.
+    try testing.expectEqual(@as(usize, 3), forms);
+    try testing.expectEqual(@as(usize, 1), images);
+    try testing.expectEqual(@as(usize, 2), fonts);
+    for (0..4) |i| {
+        const page = try open(a, out.written(), i);
+        // In drawing order: the first page has one stamp behind the other.
+        const text = try pdf.text.extract(a, &page.list, .content);
+        try testing.expect(std.mem.indexOf(u8, text, "STAMP") != null and std.mem.indexOf(u8, text, "underneath") != null);
+        try testing.expectEqual(i == 0, std.mem.indexOf(u8, text, "MORE") != null);
+        try testing.expectEqual(@as(f64, 0.5), (try page.nth(.text, if (i == 0) 3 else 1)).alpha);
+        // The page's own /PzF0 still means what it did.
+        try testing.expectEqual(@as(u32, 5), page.page.resources.get("XObject").?.dict.get("PzF0").?.ref.num);
+    }
+}
+
+test "stamps work with other edits of the same update" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try existing(a, 1, "/Annots [<< /Type /Annot /Subtype /Widget /FT /Tx /V (filled in) /Rect [10 300 90 320] >>]", body_text), .{});
+    const page = pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?;
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var canvas = try Canvas.init(testing.allocator, 300, 400);
+    defer canvas.deinit();
+    try mark(&canvas);
+    _ = try pdf.flatten.widgets(&upd, page);
+    var stamp: draw.Stamp = .init(&upd);
+    try stamp.place(page, &canvas, .over);
+    _ = try pdf.annot.addNote(&upd, page, 5, 5, .{ .contents = "n" });
+    try stamp.finish();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try upd.write(testing.allocator, &out.writer);
+    const after = try open(a, out.written(), 0);
+    try expectStamp(&after);
+    const text = try after.text(a);
+    for ([_][]const u8{ "filled in", "underneath", "STAMP" }) |want| try testing.expect(std.mem.indexOf(u8, text, want) != null);
+    try testing.expectEqual(@as(usize, 1), (try pdf.annot.list(a, after.doc, after.page)).len);
+}
+
+test "what cannot be stamped is refused and the page is left alone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try buildFile(a, &.{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R << /Type /Page /Parent 2 0 R >>] /Count 2 /MediaBox [0 0 99 99] >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+        "<< /Filter /NoSuchDecode /Length 1 >>\nstream\nx\nendstream",
+    }), .{});
+    const list = try pdf.pages.PageList.build(&doc);
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    var canvas = try Canvas.init(testing.allocator, 99, 99);
+    defer canvas.deinit();
+    try canvas.moveTo(1, 1);
+    try testing.expectError(error.PathOpen, stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .over));
+    try canvas.stroke();
+    // Content that cannot be read: nothing can safely go over it.
+    try testing.expectError(error.UnreadableContent, stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .over));
+    try testing.expect(!upd.changed.contains(3));
+    try testing.expectError(error.DirectPage, stamp.place(pdf.pages.page(&doc, list, 1).?, &canvas, .over));
+    // Under it needs no reading.
+    try stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .under);
+    try testing.expect(upd.changed.contains(3));
+}
+
+test "stamping a damaged file fails or succeeds, and never crashes (seeded mutation)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const base = try existing(arena.allocator(), 2, "/Rotate 90 /CropBox [5 5 200 300] /UserUnit 2", "q " ++ body_text);
+    var prng = std.Random.DefaultPrng.init(0x57a9);
+    const random = prng.random();
+    const copy = try testing.allocator.dupe(u8, base);
+    defer testing.allocator.free(copy);
+    var canvas = try Canvas.init(testing.allocator, 100, 100);
+    defer canvas.deinit();
+    try mark(&canvas);
+    for (0..1500) |_| {
+        @memcpy(copy, base);
+        for (0..random.intRangeAtMost(usize, 1, 4)) |_| {
+            copy[random.uintLessThan(usize, copy.len)] = "0123456789()<>[]/ .-RqQ"[random.uintLessThan(usize, 22)];
+        }
+        var each = std.heap.ArenaAllocator.init(testing.allocator);
+        defer each.deinit();
+        const a = each.allocator();
+        var doc = pdf.Document.open(a, copy, .{}) catch continue;
+        const list = pdf.pages.PageList.build(&doc) catch continue;
+        var upd = pdf.write.Update.init(testing.allocator, &doc) catch continue;
+        defer upd.deinit();
+        var stamp: draw.Stamp = .init(&upd);
+        for (0..list.entries.len) |i| {
+            const page = pdf.pages.page(&doc, list, i) orelse continue;
+            stamp.place(page, &canvas, if (random.boolean()) .over else .under) catch continue;
+        }
+        var out: std.Io.Writer.Allocating = .init(a);
+        upd.write(testing.allocator, &out.writer) catch continue;
+        var again = pdf.Document.open(a, out.written(), .{}) catch continue;
+        const pages_again = pdf.pages.PageList.build(&again) catch continue;
+        var renderer = pdf.Renderer.init(&again, .{});
+        _ = renderer.render(a, pdf.pages.page(&again, pages_again, 0) orelse continue) catch continue;
+    }
+}
+
+fn stampUnderAllocationFailure(gpa: Allocator, bytes: []const u8) !void {
+    var doc = try pdf.Document.open(gpa, bytes, .{});
+    defer doc.deinit();
+    const list = try pdf.pages.PageList.build(&doc);
+    var upd = try pdf.write.Update.init(gpa, &doc);
+    defer upd.deinit();
+    var image = try draw.Image.fromPixels(gpa, .{ .width = 1, .height = 1, .format = .gray, .samples = "a", .alpha = "b" });
+    defer image.deinit();
+    var canvas = try Canvas.init(gpa, 100, 100);
+    defer canvas.deinit();
+    try mark(&canvas);
+    try canvas.image(&image, 0, 0, 5, 5);
+    var stamp: draw.Stamp = .init(&upd);
+    try stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .over);
+    try stamp.finish();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try upd.write(gpa, &out.writer);
+    // A failed allocation must not have dropped the old content or the new.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const after = try open(arena.allocator(), out.written(), 0);
+    const text = try after.text(arena.allocator());
+    try testing.expect(std.mem.indexOf(u8, text, "underneath") != null and std.mem.indexOf(u8, text, "STAMP") != null);
+}
+
+test "every failed allocation while stamping is reported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, stampUnderAllocationFailure, .{try existing(arena.allocator(), 1, "", body_text)});
+}

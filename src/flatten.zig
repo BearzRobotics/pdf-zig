@@ -18,24 +18,20 @@ const pages = @import("pages.zig");
 const interp = @import("interp.zig");
 const display = @import("display.zig");
 const appearance = @import("appearance.zig");
-const content = @import("content.zig");
+const page_edit = @import("page_edit.zig");
 const form = @import("form.zig");
 const annot = @import("annot.zig");
 const write = @import("write.zig");
+
+const resolve = page_edit.resolve;
 
 const Object = object.Object;
 const Dict = object.Dict;
 const Ref = object.Ref;
 const Update = write.Update;
 
-pub const Error = write.Error || error{
-    DirectPage,
-    /// More annotations, content or unmatched `q` than flattening handles.
-    TooLarge,
-    /// A content stream of the page cannot be decoded, so what it leaves behind
-    /// is not known and nothing can safely be drawn after it.
-    UnreadableContent,
-};
+/// `error.TooLarge` also covers more annotations than flattening handles.
+pub const Error = page_edit.Error || error{DirectPage};
 
 pub const Result = struct {
     /// Widgets that are now page content (or, with nothing to show, are gone).
@@ -46,8 +42,6 @@ pub const Result = struct {
 
 /// Most annotations of one page that are looked at.
 const max_annotations = 1 << 16;
-/// Most unmatched `q` or `Q` of a page's content that are made up for.
-const max_unmatched = 1000;
 
 /// Flattens the widgets of `page` in `upd`. Call it for each page wanted, in
 /// one update or several. Fill fields first: what is flattened is what `upd`
@@ -64,10 +58,7 @@ pub fn widgets(upd: *Update, page: pages.Page) Error!Result {
     var kept: std.ArrayList(Object) = .empty;
     var removed: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
     var drawing: std.ArrayList(u8) = .empty;
-    var named: std.ArrayList(object.Entry) = .empty;
-    const resources = if (page_dict.get("Resources")) |v| (resolve(upd, v).asDict() orelse page.resources) else page.resources;
-    const xobjects: Dict = if (resources.get("XObject")) |v| (resolve(upd, v).asDict() orelse .{}) else .{};
-    var next_name: usize = 0;
+    var resources: page_edit.Resources = .of(upd, page, page_dict);
 
     for (items) |item| {
         const d = resolve(upd, item).asDict() orelse {
@@ -97,13 +88,7 @@ pub fn widgets(upd: *Update, page: pages.Page) Error!Result {
                 },
                 .empty => {},
                 .form => |found| {
-                    var name: []const u8 = undefined;
-                    while (true) : (next_name += 1) {
-                        name = try std.fmt.allocPrint(a, "PzF{d}", .{next_name});
-                        if (!xobjects.has(name)) break;
-                    }
-                    next_name += 1;
-                    try named.append(a, .{ .key = name, .value = .{ .ref = found.ref } });
+                    const name = try resources.add(upd, found.ref);
                     const m = found.matrix;
                     try drawing.print(a, "q {d} {d} {d} {d} {d} {d} cm /{s} Do Q\n", .{ m.a, m.b, m.c, m.d, m.e, m.f, name });
                 },
@@ -116,26 +101,12 @@ pub fn widgets(upd: *Update, page: pages.Page) Error!Result {
 
     page_dict = try write.dictWith(a, page_dict, "Annots", .{ .array = kept.items });
     if (drawing.items.len > 0) {
-        // The page gets resources of its own: the old ones may be shared.
-        var entries: std.ArrayList(object.Entry) = .empty;
-        try entries.appendSlice(a, xobjects.entries);
-        try entries.appendSlice(a, named.items);
-        const own = try write.dictWith(a, resources, "XObject", .{ .dict = .{ .entries = entries.items } });
-        page_dict = try write.dictWith(a, page_dict, "Resources", .{ .dict = own });
-        page_dict = try write.dictWith(a, page_dict, "Contents", try contentsWith(upd, page_dict.get("Contents"), drawing.items));
+        page_dict = try resources.applyTo(upd, page_dict);
+        page_dict = try write.dictWith(a, page_dict, "Contents", try page_edit.drawOver(upd, page_dict.get("Contents"), drawing.items));
     }
     try upd.set(page.num, .{ .dict = page_dict });
     try removeFields(upd, removed.keys());
     return result;
-}
-
-fn resolve(upd: *Update, v: Object) Object {
-    var cur = v;
-    for (0..32) |_| {
-        if (cur != .ref) return cur;
-        cur = upd.get(cur.ref.num);
-    }
-    return .null;
 }
 
 fn nameOf(upd: *Update, d: Dict, key: []const u8) []const u8 {
@@ -212,71 +183,6 @@ fn appearanceOf(upd: *Update, page: pages.Page, item: Object, d: Dict, rect: pag
         .ref = stored.?,
         .matrix = interp.appearanceMatrix(.{ bbox.x0, bbox.y0, bbox.x1, bbox.y1 }, m, .{ rect.x0, rect.y0, rect.x1, rect.y1 }),
     } };
-}
-
-/// How many `q` of their own the saved states of `parts` need around them: one,
-/// and one for each `Q` that has no `q`; and how many `Q` then close them all.
-/// A single pair is not enough: content with an unmatched `q` or `Q` would
-/// leave its transformation in force for what follows.
-fn balance(upd: *Update, parts: []const Object) Error!struct { open: usize, close: usize } {
-    var memory = std.heap.ArenaAllocator.init(upd.arena.child_allocator);
-    defer memory.deinit();
-    const a = memory.allocator();
-    var all: std.ArrayList(u8) = .empty;
-    for (parts) |part| {
-        const o = resolve(upd, part);
-        if (o != .stream) continue;
-        const data = upd.doc.streamDataIn(a, o.stream) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.UnreadableContent,
-        };
-        if (data.len > upd.doc.options.max_stream_bytes -| all.items.len) return error.TooLarge;
-        try all.appendSlice(a, data);
-        try all.append(a, '\n');
-    }
-    var depth: usize = 0;
-    var unmatched: usize = 0;
-    var operands = std.heap.ArenaAllocator.init(upd.arena.child_allocator);
-    defer operands.deinit();
-    var scanner = content.Scanner.init(operands.allocator(), all.items);
-    while (try scanner.next()) |op| {
-        if (std.mem.eql(u8, op.name, "q")) {
-            depth += 1;
-        } else if (std.mem.eql(u8, op.name, "Q")) {
-            if (depth > 0) depth -= 1 else unmatched += 1;
-        }
-        if (depth > max_unmatched or unmatched > max_unmatched) return error.TooLarge;
-    }
-    return .{ .open = 1 + unmatched, .close = 1 + depth };
-}
-
-/// `/Contents` with `drawing` after what was there, the old content inside
-/// saved states of its own.
-fn contentsWith(upd: *Update, contents: ?Object, drawing: []const u8) Error!Object {
-    const a = upd.allocator();
-    var old: []const Object = &.{};
-    if (contents) |c| {
-        const target = resolve(upd, c);
-        if (target == .array) {
-            old = target.array;
-        } else if (target == .stream) old = try a.dupe(Object, &.{c});
-    }
-    var parts: std.ArrayList(Object) = .empty;
-    var tail: []const u8 = drawing;
-    if (old.len > 0) {
-        const needed = try balance(upd, old);
-        var head: std.ArrayList(u8) = .empty;
-        for (0..needed.open) |_| try head.appendSlice(a, "q\n");
-        var end: std.ArrayList(u8) = .empty;
-        try end.appendSlice(a, "\n");
-        for (0..needed.close) |_| try end.appendSlice(a, "Q\n");
-        try end.appendSlice(a, drawing);
-        try parts.append(a, .{ .ref = try upd.add(.{ .stream = .{ .dict = .{}, .data = head.items } }) });
-        try parts.appendSlice(a, old);
-        tail = end.items;
-    }
-    try parts.append(a, .{ .ref = try upd.add(.{ .stream = .{ .dict = .{}, .data = tail } }) });
-    return .{ .array = parts.items };
 }
 
 /// Takes the widgets `removed` out of the form: each from its field's kids, and

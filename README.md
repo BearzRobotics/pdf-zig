@@ -101,8 +101,21 @@ try out.write(&writer.interface);
 ```
 
 Text is one line at a time (`Font.textWidth` measures it) in the twelve built-in text
-fonts, which cover WinAnsi (Western European) and are not embedded. There is no wrapping
-or layout, and drawing on existing pages and embedding fonts are not there yet.
+fonts, which cover WinAnsi (Western European) and are not embedded, so a reader's
+substitute font decides how they look. There is no wrapping or layout, and embedding
+fonts is not there yet.
+
+A canvas also goes onto pages of an existing file, over or under what they show, for
+watermarks, page numbers or an invisible text layer over a scan (`textWith` with
+`.mode = .invisible` and `.fit_width`):
+
+```zig
+var upd = try pdf.write.Update.init(gpa, &doc);
+var stamp: pdf.draw.Stamp = .init(&upd);
+try stamp.place(page, &canvas, .over);   // upright on the page as seen
+try stamp.finish();
+try upd.write(gpa, &writer.interface);
+```
 
 ## New documents: extract, reorder, merge
 
@@ -166,7 +179,8 @@ compare with `pdftotext` and `pdfinfo`.
 `pdfsvg` (a page as SVG, to look at), `pdfimg` (decode the images of a page), `pdfmark`
 (highlight a word and add a note), `pdffill` (list or fill form fields) and `pdfpages` (a new
 PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`). `pdfdraw`
-makes a sample document with the drawing functions. `pdfsurvey` names the features a
+makes a sample document with the drawing functions, and `pdfstamp` puts a watermark and
+page numbers on an existing one. `pdfsurvey` names the features a
 file uses.
 
 ## Tests

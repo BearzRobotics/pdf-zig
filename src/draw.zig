@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.0-or-later
 //! Drawing page content (docs/decisions/0005-drawing-content.md). A `Canvas`
 //! records paths, text and images; `compose.Builder.addPage` makes a page of
-//! it.
+//! it, and a `Stamp` puts it on a page of an existing file.
 //!
 //! **Coordinates are those of the page as seen:** points, the origin at the top
 //! left, y downward, as in `text.Layout` and the annotation functions.
@@ -17,6 +17,9 @@ const encoding = @import("encoding.zig");
 const std14 = @import("std14.zig");
 const serial = @import("write.zig");
 const pack = @import("compose_pack.zig");
+const pages = @import("pages.zig");
+const interp = @import("interp.zig");
+const page_edit = @import("page_edit.zig");
 
 const Matrix = display.Matrix;
 const Dict = object.Dict;
@@ -656,6 +659,189 @@ pub const Canvas = struct {
             .{ "CA", .{ .real = s.stroke_alpha } },
             .{ "BM", .{ .name = @tagName(s.blend) } },
         });
+    }
+};
+
+/// The dictionary of an image XObject of `picture`'s size, with `components`
+/// samples to a pixel: the picture's own, or one for its alpha.
+pub fn imageDictionary(a: Allocator, picture: *const Image, components: u8, jpeg: bool) Allocator.Error!Dict {
+    return serial.makeDict(a, &.{
+        .{ "Type", .{ .name = "XObject" } },
+        .{ "Subtype", .{ .name = "Image" } },
+        .{ "Width", .{ .integer = picture.width } },
+        .{ "Height", .{ .integer = picture.height } },
+        .{ "ColorSpace", .{ .name = if (components == 1) "DeviceGray" else "DeviceRGB" } },
+        .{ "BitsPerComponent", .{ .integer = 8 } },
+        .{ "Filter", .{ .name = if (jpeg) "DCTDecode" else "FlateDecode" } },
+    });
+}
+
+/// The `/Resources` of what `canvas` draws, allocated from `a`. `objects` gives
+/// the object of each built-in font (`fontObject`) and image (`imageObject`).
+pub fn resourcesOf(a: Allocator, canvas: *const Canvas, objects: anytype) !Dict {
+    var out: std.ArrayList(object.Entry) = .empty;
+    var fonts: std.ArrayList(object.Entry) = .empty;
+    var it = canvas.fonts.iterator();
+    while (it.next()) |font| {
+        try fonts.append(a, .{ .key = try std.fmt.allocPrint(a, "F{d}", .{@backingInt(font)}), .value = .{ .ref = try objects.fontObject(a, font) } });
+    }
+    if (fonts.items.len > 0) try out.append(a, .{ .key = "Font", .value = .{ .dict = .{ .entries = fonts.items } } });
+
+    const images = try a.alloc(object.Entry, canvas.images.items.len);
+    for (canvas.images.items, images, 0..) |*picture, *entry, i| {
+        entry.* = .{ .key = try std.fmt.allocPrint(a, "Im{d}", .{i}), .value = .{ .ref = try objects.imageObject(a, picture) } };
+    }
+    if (images.len > 0) try out.append(a, .{ .key = "XObject", .value = .{ .dict = .{ .entries = images } } });
+
+    const states = try a.alloc(object.Entry, canvas.states.items.len);
+    for (states, 0..) |*entry, i| entry.* = .{ .key = try std.fmt.allocPrint(a, "Gs{d}", .{i}), .value = .{ .dict = try canvas.stateDictionary(a, i) } };
+    if (states.len > 0) try out.append(a, .{ .key = "ExtGState", .value = .{ .dict = .{ .entries = states } } });
+    return .{ .entries = out.items };
+}
+
+/// The font dictionary of a built-in font.
+pub fn fontDictionary(a: Allocator, font: Builtin) Allocator.Error!Dict {
+    return serial.makeDict(a, &.{
+        .{ "Type", .{ .name = "Font" } },
+        .{ "Subtype", .{ .name = "Type1" } },
+        .{ "BaseFont", .{ .name = font.baseFont() } },
+        .{ "Encoding", .{ .name = "WinAnsiEncoding" } },
+    });
+}
+
+/// The canvas's content, with the saved states still open closed, compressed
+/// for `/FlateDecode`.
+pub fn compressedContent(a: Allocator, canvas: *const Canvas) Allocator.Error![]const u8 {
+    var all: std.ArrayList(u8) = .empty;
+    try all.appendSlice(a, canvas.content.items);
+    for (canvas.saved.items) |_| try all.appendSlice(a, "Q\n");
+    return pack.compress(a, all.items);
+}
+
+// ---- onto existing pages -------------------------------------------------------------------
+
+pub const StampError = page_edit.Error || error{
+    /// The page is written directly in the page tree and cannot be changed.
+    DirectPage,
+    /// A canvas whose path was neither painted nor used to clip.
+    PathOpen,
+};
+
+pub const Layer = enum {
+    /// On top of what the page shows.
+    over,
+    /// Behind it. A page that paints its whole area, as a scan does, hides it.
+    under,
+};
+
+/// Puts canvases on pages of an existing file, in one `write.Update`. A canvas
+/// placed on many pages is stored once, and so are its fonts and images. Call
+/// `finish` before the update is written. Encrypted and repaired files are
+/// refused when the update is made.
+///
+/// The canvas lies on the page as it is seen, its top left on the page's top
+/// left, upright whatever the page's rotation and `/UserUnit`. Make it the
+/// size of `page.displaySize()` to cover the page; drawing outside the canvas
+/// is cut off.
+pub const Stamp = struct {
+    upd: *serial.Update,
+    /// What has been added to the update, so that it is added once. They live
+    /// in the update's memory.
+    fonts: std.EnumArray(Builtin, u32) = .initFill(0),
+    images: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
+    forms: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
+
+    pub fn init(upd: *serial.Update) Stamp {
+        return .{ .upd = upd };
+    }
+
+    /// Writes what is written once for all pages. With only built-in fonts
+    /// there is nothing left to write; embedded fonts will be written here.
+    pub fn finish(self: *Stamp) StampError!void {
+        _ = self;
+    }
+
+    /// Draws `canvas` on `page`. The canvas can be changed or freed afterwards.
+    /// A call that fails leaves the page as it was.
+    pub fn place(self: *Stamp, page: pages.Page, canvas: *const Canvas, layer: Layer) StampError!void {
+        if (canvas.path != .none) return error.PathOpen;
+        if (page.num == 0) return error.DirectPage;
+        const upd = self.upd;
+        const a = upd.allocator();
+        var page_dict = upd.get(page.num).asDict() orelse return error.DirectPage;
+
+        // From the canvas's space, y up, to the page as seen, and from there
+        // into the page's user space.
+        const turn: Matrix = .{ .a = 1, .b = 0, .c = 0, .d = -1, .e = 0, .f = canvas.height };
+        const m = turn.mul(interp.baseMatrix(page).invert() orelse return error.UnreadableContent);
+
+        const form = try self.formOf(canvas);
+        var resources: page_edit.Resources = .of(upd, page, page_dict);
+        const name = try resources.add(upd, .{ .num = form });
+        const drawing = try std.fmt.allocPrint(a, "q {d} {d} {d} {d} {d} {d} cm /{s} Do Q\n", .{ m.a, m.b, m.c, m.d, m.e, m.f, name });
+        page_dict = try resources.applyTo(upd, page_dict);
+        const old = page_dict.get("Contents");
+        const contents = switch (layer) {
+            .over => try page_edit.drawOver(upd, old, drawing),
+            .under => try page_edit.drawUnder(upd, old, drawing),
+        };
+        page_dict = try serial.dictWith(a, page_dict, "Contents", contents);
+        try upd.set(page.num, .{ .dict = page_dict });
+    }
+
+    /// The form XObject with what `canvas` draws, made once.
+    fn formOf(self: *Stamp, canvas: *const Canvas) StampError!u32 {
+        const a = self.upd.allocator();
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        for ([_]f64{ canvas.width, canvas.height }) |v| hash.update(std.mem.asBytes(&v));
+        var counts: [8]u8 = undefined;
+        std.mem.writeInt(u64, &counts, canvas.saved.items.len, .little);
+        hash.update(&counts);
+        std.mem.writeInt(u64, &counts, canvas.content.items.len, .little);
+        hash.update(&counts);
+        hash.update(canvas.content.items);
+        for (canvas.images.items) |picture| hash.update(&picture.digest);
+        for (canvas.states.items) |s| {
+            hash.update(std.mem.asBytes(&s.fill_alpha));
+            hash.update(std.mem.asBytes(&s.stroke_alpha));
+            hash.update(@tagName(s.blend));
+        }
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        if (self.forms.get(digest)) |num| return num;
+
+        const dict = try serial.makeDict(a, &.{
+            .{ "Type", .{ .name = "XObject" } },
+            .{ "Subtype", .{ .name = "Form" } },
+            .{ "BBox", try serial.numbers(a, &.{ 0, 0, canvas.width, canvas.height }) },
+            .{ "Resources", .{ .dict = try resourcesOf(a, canvas, self) } },
+            .{ "Filter", .{ .name = "FlateDecode" } },
+        });
+        const ref = try self.upd.add(.{ .stream = .{ .dict = dict, .data = try compressedContent(a, canvas) } });
+        try self.forms.put(a, digest, ref.num);
+        return ref.num;
+    }
+
+    pub fn fontObject(self: *Stamp, a: Allocator, font: Builtin) !object.Ref {
+        if (self.fonts.get(font) == 0) {
+            const ref = try self.upd.add(.{ .dict = try fontDictionary(a, font) });
+            self.fonts.set(font, ref.num);
+        }
+        return .{ .num = self.fonts.get(font) };
+    }
+
+    pub fn imageObject(self: *Stamp, a: Allocator, picture: *const Image) !object.Ref {
+        if (self.images.get(picture.digest)) |num| return .{ .num = num };
+        // The update outlives the canvas, so it keeps copies of the data.
+        var entries: std.ArrayList(object.Entry) = .empty;
+        try entries.appendSlice(a, (try imageDictionary(a, picture, picture.components, picture.jpeg)).entries);
+        if (picture.alpha) |alpha| {
+            const mask = try self.upd.add(.{ .stream = .{ .dict = try imageDictionary(a, picture, 1, false), .data = try a.dupe(u8, alpha) } });
+            try entries.append(a, .{ .key = "SMask", .value = .{ .ref = mask } });
+        }
+        const ref = try self.upd.add(.{ .stream = .{ .dict = .{ .entries = entries.items }, .data = try a.dupe(u8, picture.data) } });
+        try self.images.put(a, picture.digest, ref.num);
+        return ref;
     }
 };
 

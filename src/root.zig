@@ -70,6 +70,7 @@ test {
     _ = @import("appearance_tests.zig");
     _ = @import("compose.zig");
     _ = @import("draw.zig");
+    _ = @import("page_edit.zig");
     _ = @import("draw_tests.zig");
     _ = @import("compose_form.zig");
     _ = @import("compose_outline.zig");

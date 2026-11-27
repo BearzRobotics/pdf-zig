@@ -4,6 +4,8 @@
 
 - New `draw.Canvas` and `compose.Builder.addPage`: draw new pages with paths, colours,
   transparency, clipping, text in the twelve built-in text fonts, and JPEG or raw images.
+- New `draw.Stamp`: puts a canvas over or under pages of an existing file, upright at any
+  rotation and `/UserUnit`. New example `pdfstamp`.
 - New `compose.Builder.setInfo` (title, author and other document information).
   `compose.Error` has `BadValue` and `PathOpen`. New example `pdfdraw`.
 - Annotations and form fields without a stored appearance are now drawn: text, combo and

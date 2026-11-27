@@ -24,7 +24,8 @@
 | `interp.zig` | `Renderer`: graphics state, operators, forms, patterns, shadings, layers, annotations |
 | `text.zig` | Text from a display list |
 | `appearance.zig` | Appearances made while rendering, for annotations and fields that need one (decision 0004) |
-| `draw.zig` | The canvas: paths, text in the built-in fonts and images, for new pages (decision 0005) |
+| `draw.zig` | The canvas (paths, text in the built-in fonts, images) and stamps on existing pages (decision 0005) |
+| `page_edit.zig` | Adding drawing to a page being edited, shared by flattening and stamps |
 | `flatten.zig` | Form widgets made part of their page's content |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
 | `write.zig`, `annot.zig`, `outline.zig`, `form.zig` | Changes to a file, appended to it |
@@ -142,8 +143,17 @@ a code there is `error.MissingGlyph`. These fonts are **not embedded**, so each 
 substitutes its own, which may lack a character (Poppler's Courier substitute on one
 system had no euro sign). Images are JPEG files stored as they are (gray or three
 components, 8 bit) or raw gray or RGB pixels, Flate compressed, with alpha as a soft mask.
-`compose.Builder.addPage` makes the page; fonts and equal images are stored once. Not yet:
-drawing on existing pages, embedded fonts.
+`compose.Builder.addPage` makes the page; fonts and equal images are stored once.
+
+**Stamps** (`draw.Stamp`) put a canvas on a page of an existing file, in a `write.Update`.
+The canvas becomes a form XObject with its own resources, placed by a matrix from the page
+as seen into user space, so it is upright at any rotation, crop box and `/UserUnit`; its
+top left is the page's, and drawing outside it is cut off. The same canvas on many pages is
+one object. `.over` wraps the old content in enough `q` and `Q` to make up for any it
+leaves unmatched, and fails with `error.UnreadableContent` if it cannot be decoded;
+`.under` goes in front and needs no reading, but a page that paints all of itself hides it.
+The page gets resources of its own, under names not in use. As any update, it refuses
+encrypted and repaired files. Not yet: embedded fonts.
 
 ## Resource limits
 
@@ -188,8 +198,7 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- In new documents: encryption, and embedded fonts for drawn text. Drawing on existing
-  pages.
+- In new documents: encryption. Embedded fonts for drawn text.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with
