@@ -210,7 +210,9 @@ pub fn decode(a: Allocator, data: []const u8, p: Params, max: usize) Error![]u8 
             if (bits.left() == 0) break;
         }
         const ok = if (two_d) try codeLine2d(a, &bits, ref.items, &cur, cols) else try codeLine1d(a, &bits, &cur, cols);
-        if (!ok and cur.items.len == 0 and bits.left() == 0) break;
+        // A line that failed before its first change is no line: the data's end,
+        // or its end-of-block code.
+        if (!ok and cur.items.len == 0) break;
         if (out.items.len + stride > max) return error.TooLarge;
         try appendRow(a, &out, cur.items, cols, stride);
         std.mem.swap(std.ArrayList(u32), &ref, &cur);
@@ -428,4 +430,15 @@ test "Group 3 with end-of-line codes and byte-aligned rows" {
     const data = "\x00\x01\x7a\x00\x01\x83";
     const out = try decode(arena.allocator(), data, .{ .k = 0, .columns = 8, .rows = 2, .byte_align = true }, 1 << 10);
     try std.testing.expectEqualSlices(u8, &.{ 0xC7, 0xE0 }, out);
+}
+
+test "without a row count no blank row is added after the end of the data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Two rows of ..###... in Group 4, then the end-of-block code (two EOLs).
+    const rows = "001" ++ "0111" ++ "10" ++ "1" ++ "1" ++ "1" ++ "1";
+    const data = try packBits(a, rows ++ "000000000001" ++ "000000000001");
+    const out = try decode(a, data, .{ .k = -1, .columns = 8 }, 1 << 10);
+    try std.testing.expectEqualSlices(u8, &.{ 0xC7, 0xC7 }, out);
 }
