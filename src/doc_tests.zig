@@ -472,3 +472,78 @@ test "repair: a stream length stored in an object stream is not remembered as mi
     try testing.expectEqual(@as(?i64, 5), doc.getObject(5).asInt());
     try testing.expectEqualStrings("hello", doc.getObject(3).stream.data);
 }
+
+test "repair: the trailer latest in the file wins, whatever the object numbers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (0..20) |k| {
+        // Two cross-reference streams, the second newer.
+        const bytes = try std.fmt.allocPrint(a, "%PDF-1.5\n" ++
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] >>\nendobj\n" ++
+            "{d} 0 obj\n<< /Type /XRef /Root 1 0 R /Info 3 0 R /W [1 1 1] /Length 0 >>\nstream\n\nendstream\nendobj\n" ++
+            "{d} 0 obj\n<< /Type /XRef /Root 1 0 R /Info 4 0 R /W [1 1 1] /Length 0 >>\nstream\n\nendstream\nendobj\n", .{ 10 + k, 40 + k });
+        var doc = try pdf.Document.open(testing.allocator, bytes, .{});
+        defer doc.deinit();
+        try testing.expectEqual(@as(u32, 4), doc.trailer.get("Info").?.ref.num);
+        try testing.expect(doc.trailer.get("W") == null);
+    }
+    // A classic trailer newer than a cross-reference stream wins over it.
+    var doc = try pdf.Document.open(testing.allocator, "%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] >>\nendobj\n" ++
+        "9 0 obj\n<< /Type /XRef /Root 1 0 R /Info 3 0 R /W [1 1 1] /Length 0 >>\nstream\n\nendstream\nendobj\ntrailer\n<< /Root 1 0 R /Info 4 0 R >>\n", .{});
+    defer doc.deinit();
+    try testing.expectEqual(@as(u32, 4), doc.trailer.get("Info").?.ref.num);
+}
+
+test "repair: the definition latest in the file wins, direct or in an object stream" {
+    const head = "%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] >>\nendobj\n";
+    const old_stm = "{s} 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 9 >>\nstream\n5 0 (old)\nendstream\nendobj\n";
+    const new_stm = "{s} 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 9 >>\nstream\n5 0 (new)\nendstream\nendobj\n";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first_old = try std.fmt.allocPrint(a, old_stm, .{"7"});
+    const then_new = try std.fmt.allocPrint(a, new_stm, .{"6"});
+    for ([_][2][]const u8{
+        .{ try std.mem.concat(a, u8, &.{ head, first_old, then_new }), "new" },
+        .{ try std.mem.concat(a, u8, &.{ head, "5 0 obj\n(old)\nendobj\n", then_new }), "new" },
+        // And a direct definition after the object stream stays the newest.
+        .{ try std.mem.concat(a, u8, &.{ head, first_old, "5 0 obj\n(new)\nendobj\n" }), "new" },
+    }) |c| {
+        var doc = try pdf.Document.open(testing.allocator, c[0], .{});
+        defer doc.deinit();
+        try testing.expectEqualStrings(c[1], doc.getObject(5).string);
+    }
+}
+
+test "repair: a guessed catalog keeps the rest of the trailer" {
+    // The trailer has /Info but its /Root points nowhere.
+    var doc = try pdf.Document.open(testing.allocator, "%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] >>\nendobj\ntrailer\n<< /Root 99 0 R /Info 4 0 R >>\n", .{});
+    defer doc.deinit();
+    try testing.expectEqual(@as(u32, 1), doc.trailer.get("Root").?.ref.num);
+    try testing.expectEqual(@as(u32, 4), doc.trailer.get("Info").?.ref.num);
+}
+
+test "repair: an encrypted file that lost its trailer is not read as plain text" {
+    const bytes = @embedFile("enc_aes_256.pdf");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Remove every way of finding the trailer.
+    const no_start = try std.mem.replaceOwned(u8, a, bytes, "startxref", "startxrex");
+    const lost = try std.mem.replaceOwned(u8, a, no_start, "trailer", "trailex");
+    try testing.expect(std.mem.indexOf(u8, bytes, "trailer") != null);
+    var doc = try pdf.Document.open(testing.allocator, lost, .{});
+    defer doc.deinit();
+    const text = try pageText(a, &doc);
+    try testing.expect(std.mem.indexOf(u8, text, "Hello encrypted world") != null);
+}
+
+fn pageText(a: Allocator, doc: *pdf.Document) ![]const u8 {
+    const list = try pdf.pages.PageList.build(doc);
+    var rend = pdf.Renderer.init(doc, .{ .graphics = false });
+    defer rend.deinit();
+    var dl = try rend.render(testing.allocator, pdf.pages.page(doc, list, 0).?);
+    defer dl.deinit();
+    return pdf.text.extract(a, &dl, .reading);
+}

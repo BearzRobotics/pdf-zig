@@ -670,7 +670,6 @@ pub const Document = struct {
         self.cache = .empty;
         self.objstms = .empty;
         self.reading = .empty;
-        var trailers: std.ArrayList(Dict) = .empty;
 
         var i: usize = 0;
         const d = self.data;
@@ -697,84 +696,137 @@ pub const Document = struct {
             self.xref.put(self.a(), num, .{ .in_use = .{ .offset = j, .gen = @intCast(@min(gen, 65535)) } }) catch return error.OutOfMemory;
         }
 
-        // Trailer dictionaries: `trailer << ... >>` and the dictionaries of xref streams.
+        // Everything below that can occur more than once is ordered by where it
+        // is in the file: what comes later is newer.
+        var trailers: std.ArrayList(Found(Dict)) = .empty;
+        var catalogs: std.ArrayList(Found(Ref)) = .empty;
+        var objstm_nums: std.ArrayList(Found(u32)) = .empty;
+        var encrypt_guess: ?Ref = null;
+
+        // `trailer << ... >>`
         i = 0;
         while (std.mem.indexOfPos(u8, d, i, "trailer")) |at| {
             i = at + 7;
             var p = object.Parser.init(self.a(), d, at + 7);
             const o = p.parseObject() catch continue;
-            if (o.asDict()) |t| try trailers.append(self.a(), t);
+            if (o.asDict()) |t| try trailers.append(self.a(), .{ .at = at, .value = t });
         }
         var it = self.xref.iterator();
-        var objstm_nums: std.ArrayList(u32) = .empty;
         while (it.next()) |kv| {
             const e = kv.value_ptr.*;
             if (e != .in_use) continue;
-            const ind = self.readIndirectAt(self.base + @as(usize, @intCast(e.in_use.offset)), kv.key_ptr.*) orelse continue;
+            const at: usize = @intCast(e.in_use.offset);
+            const ind = self.readIndirectAt(at, kv.key_ptr.*) orelse continue;
             const dict = ind.value.asDict() orelse continue;
+            const ref: Ref = .{ .num = kv.key_ptr.*, .gen = e.in_use.gen };
+            if (isEncryptDict(dict)) encrypt_guess = ref;
             const ty = dict.get("Type") orelse continue;
             const tname = ty.asName() orelse continue;
-            if (std.mem.eql(u8, tname, "XRef") and dict.has("Root")) try trailers.append(self.a(), dict);
-            if (std.mem.eql(u8, tname, "ObjStm")) try objstm_nums.append(self.a(), kv.key_ptr.*);
-            if (std.mem.eql(u8, tname, "Catalog") and !hasRoot(trailers.items)) {
-                const entries = try self.a().alloc(object.Entry, 1);
-                entries[0] = .{ .key = "Root", .value = .{ .ref = .{ .num = kv.key_ptr.*, .gen = e.in_use.gen } } };
-                try trailers.append(self.a(), .{ .entries = entries });
-            }
+            if (std.mem.eql(u8, tname, "XRef") and dict.has("Root")) try trailers.append(self.a(), .{ .at = at, .value = try self.trailerKeys(dict) });
+            if (std.mem.eql(u8, tname, "ObjStm")) try objstm_nums.append(self.a(), .{ .at = at, .value = ref.num });
+            if (std.mem.eql(u8, tname, "Catalog")) try catalogs.append(self.a(), .{ .at = at, .value = ref });
         }
-        // The trailer is known: derive the key before reading object streams.
-        {
-            var ordered0: std.ArrayList(Dict) = .empty;
-            var k0 = trailers.items.len;
-            while (k0 > 0) {
-                k0 -= 1;
-                try ordered0.append(self.a(), trailers.items[k0]);
-            }
-            self.trailer = try self.mergeTrailers(ordered0.items);
-            try self.setupEncryption();
-        }
-        // Objects inside object streams, where no direct definition exists.
-        std.mem.sort(u32, objstm_nums.items, {}, std.sort.asc(u32));
-        for (objstm_nums.items) |sn| {
-            const stm = self.objStm(sn) orelse continue;
-            for (stm.nums, 0..) |on, idx| {
-                if (self.xref.contains(on) or on >= self.options.max_objects) continue;
-                self.xref.put(self.a(), on, .{ .compressed = .{ .stream_num = sn, .index = @intCast(idx) } }) catch return error.OutOfMemory;
-            }
-        }
+        Found(Dict).sort(trailers.items);
+        Found(Ref).sort(catalogs.items);
+        Found(u32).sort(objstm_nums.items);
 
+        // The newest value of each trailer key.
+        var newest_first: std.ArrayList(Dict) = .empty;
+        var k = trailers.items.len;
+        while (k > 0) {
+            k -= 1;
+            try newest_first.append(self.a(), trailers.items[k].value);
+        }
+        self.trailer = try self.mergeTrailers(newest_first.items);
+        if (!self.trailer.has("Root") and catalogs.items.len > 0) {
+            try self.setTrailerKey("Root", catalogs.items[catalogs.items.len - 1].value);
+        }
+        // An encrypted file whose trailer is lost must not be read as plain text.
+        if (!self.trailer.has("Encrypt")) if (encrypt_guess) |ref| try self.setTrailerKey("Encrypt", ref);
+        // The trailer is known: derive the key before reading object streams.
+        try self.setupEncryption();
+
+        // Objects inside object streams. A stream later in the file than a
+        // direct definition, or than another stream, replaces it.
+        var stored_at: std.AutoHashMapUnmanaged(u32, usize) = .empty;
+        for (objstm_nums.items) |found| {
+            const stm = self.objStm(found.value) orelse continue;
+            for (stm.nums, 0..) |on, idx| {
+                if (on == found.value or on >= self.options.max_objects) continue;
+                if (self.xref.get(on)) |old| switch (old) {
+                    .in_use => |e| if (e.offset > found.at) continue,
+                    .compressed => if ((stored_at.get(on) orelse 0) > found.at) continue,
+                    .free => {},
+                };
+                self.xref.put(self.a(), on, .{ .compressed = .{ .stream_num = found.value, .index = @intCast(idx) } }) catch return error.OutOfMemory;
+                try stored_at.put(self.a(), on, found.at);
+            }
+        }
         // Anything read while the table was incomplete (an indirect /Length held
         // in an object stream) may have been cached as missing.
         try self.forgetCached();
 
-        // Prefer the last trailer that names a Root, then merge the rest under it.
-        var ordered: std.ArrayList(Dict) = .empty;
-        var k = trailers.items.len;
-        while (k > 0) {
-            k -= 1;
-            try ordered.append(self.a(), trailers.items[k]);
-        }
-        self.trailer = try self.mergeTrailers(ordered.items);
         if (!self.catalogReachable()) {
-            // The catalog may live in an object stream, found only now.
-            var it2 = self.xref.iterator();
-            while (it2.next()) |kv| {
-                const o = self.getObject(kv.key_ptr.*);
-                const dd = o.asDict() orelse continue;
-                const tn = (dd.get("Type") orelse continue).asName() orelse continue;
-                if (std.mem.eql(u8, tn, "Catalog") and dd.has("Pages")) {
-                    const entries = try self.a().alloc(object.Entry, 1);
-                    entries[0] = .{ .key = "Root", .value = .{ .ref = .{ .num = kv.key_ptr.* } } };
-                    self.trailer = .{ .entries = entries };
-                    break;
+            // The trailer's /Root leads nowhere: take the newest catalog found,
+            // else look inside object streams. The other trailer keys stay.
+            var guess: ?Ref = if (catalogs.items.len > 0) catalogs.items[catalogs.items.len - 1].value else null;
+            if (guess == null) {
+                var best: u32 = 0;
+                var keys = self.xref.iterator();
+                var nums: std.ArrayList(u32) = .empty;
+                while (keys.next()) |kv| if (kv.value_ptr.* == .compressed) try nums.append(self.a(), kv.key_ptr.*);
+                for (nums.items) |n| {
+                    const dd = self.getObject(n).asDict() orelse continue;
+                    const tn = (dd.get("Type") orelse continue).asName() orelse continue;
+                    if (std.mem.eql(u8, tn, "Catalog") and dd.has("Pages") and n >= best) {
+                        best = n;
+                        guess = .{ .num = n };
+                    }
                 }
             }
+            if (guess) |ref| try self.setTrailerKey("Root", ref);
         }
         if (self.xref.count() == 0) return error.NotPdf;
     }
 
-    fn hasRoot(ts: []const Dict) bool {
-        for (ts) |t| if (t.has("Root")) return true;
-        return false;
+    /// Something found by the repair scan, and its position in the file.
+    fn Found(comptime T: type) type {
+        return struct {
+            at: usize,
+            value: T,
+
+            const Self = @This();
+
+            fn before(_: void, x: Self, y: Self) bool {
+                return x.at < y.at;
+            }
+
+            fn sort(items: []Self) void {
+                std.mem.sort(Self, items, {}, before);
+            }
+        };
+    }
+
+    /// The trailer entries of a cross-reference stream's dictionary.
+    fn trailerKeys(self: *Document, d: Dict) Allocator.Error!Dict {
+        var out: std.ArrayList(object.Entry) = .empty;
+        for (d.entries) |e| for ([_][]const u8{ "Root", "Info", "ID", "Encrypt" }) |key| {
+            if (std.mem.eql(u8, e.key, key)) try out.append(self.a(), e);
+        };
+        return .{ .entries = out.items };
+    }
+
+    /// Adds or replaces a trailer entry with a reference.
+    fn setTrailerKey(self: *Document, key: []const u8, ref: Ref) Allocator.Error!void {
+        var out: std.ArrayList(object.Entry) = .empty;
+        for (self.trailer.entries) |e| if (!std.mem.eql(u8, e.key, key)) try out.append(self.a(), e);
+        try out.append(self.a(), .{ .key = key, .value = .{ .ref = ref } });
+        self.trailer = .{ .entries = out.items };
+    }
+
+    /// Whether `d` looks like the standard handler's encryption dictionary.
+    fn isEncryptDict(d: Dict) bool {
+        const filter = (d.get("Filter") orelse return false).asName() orelse return false;
+        return std.mem.eql(u8, filter, "Standard") and d.has("O") and d.has("U") and d.has("V");
     }
 };
