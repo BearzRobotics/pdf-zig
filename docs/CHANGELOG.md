@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Drawn text can use an embedded TrueType font: new `truetype.Font` and
+  `draw.Font.embedded`, with `canvas.glyphs` for shaped text. Fonts are subset, honour
+  their `fsType` embedding permissions, and keep their text searchable. `.otf` fonts with
+  CFF outlines and `.ttc` collections are not read yet; there is no shaping.
+- `write.Error` has `UnfinishedStamp` and `compose.Error` and `draw.StampError` have
+  `BadFont`: switches over them need the cases. `draw.Font` has the new case `embedded`.
+
 ## 0.5.0 (2026-11-27)
 
 Fields and marks that used to be blank are now drawn, forms can do more, and pdf-zig can

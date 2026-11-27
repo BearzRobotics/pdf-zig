@@ -25,6 +25,7 @@
 | `text.zig` | Text from a display list |
 | `appearance.zig` | Appearances made while rendering, for annotations and fields that need one (decision 0004) |
 | `draw.zig` | The canvas (paths, text in the built-in fonts, images) and stamps on existing pages (decision 0005) |
+| `truetype.zig`, `font_embed.zig` | Reading and subsetting TrueType fonts, and the PDF objects of an embedded font |
 | `page_edit.zig` | Adding drawing to a page being edited, shared by flattening and stamps |
 | `flatten.zig` | Form widgets made part of their page's content |
 | `link.zig` | The links of a page: destinations, URIs and named actions. It follows none of them |
@@ -138,12 +139,25 @@ it fails, so the content is always valid: numbers are finite and bounded, path o
 come in the order of 8.2, and `restore` has its `save`. Saved states left open are closed
 when the page is made.
 
-Text is one line in one of the twelve built-in text fonts, in WinAnsi; a character without
-a code there is `error.MissingGlyph`. These fonts are **not embedded**, so each reader
-substitutes its own, which may lack a character (Poppler's Courier substitute on one
-system had no euro sign). Images are JPEG files stored as they are (gray or three
+Text is one line, in one of the twelve built-in text fonts or an embedded TrueType font. A
+character the font lacks is `error.MissingGlyph`. The built-in fonts take WinAnsi and are
+**not embedded**, so each reader substitutes its own, which may lack a character
+(Poppler's Courier substitute on one system had no euro sign). Images are JPEG files stored as they are (gray or three
 components, 8 bit) or raw gray or RGB pixels, Flate compressed, with alpha as a soft mask.
 `compose.Builder.addPage` makes the page; fonts and equal images are stored once.
+
+**Embedded fonts** (`truetype.zig`, `font_embed.zig`). `truetype.Font.init` copies a
+`.ttf` file and reads `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, a Unicode `cmap`
+(format 4 or 12), `OS/2`, `post` and `name`, checking every read; CFF fonts and
+collections are `error.UnsupportedFont`. `fsType` is honoured as decision 0005 says. It is
+written as a Type 0 font (`Identity-H`) over a `CIDFontType2` with a `ToUnicode` map, once
+per document or update, with the glyphs of every page: the subset keeps glyph numbers,
+empties the unused glyphs, ends after the last used one and keeps the hinting tables. A
+font that forbids subsetting is embedded whole. When two characters share a glyph, the
+lower numbered one is what reads back. There is **no shaping**: `canvas.text` places each
+character's glyph left to right; `canvas.glyphs` takes glyphs and positions from a
+caller's shaper. Over 220 installed fonts, Poppler and MuPDF drew each subset exactly as
+they drew the whole font.
 
 **Stamps** (`draw.Stamp`) put a canvas on a page of an existing file, in a `write.Update`.
 The canvas becomes a form XObject with its own resources, placed by a matrix from the page
@@ -153,7 +167,8 @@ one object. `.over` wraps the old content in enough `q` and `Q` to make up for a
 leaves unmatched, and fails with `error.UnreadableContent` if it cannot be decoded;
 `.under` goes in front and needs no reading, but a page that paints all of itself hides it.
 The page gets resources of its own, under names not in use. As any update, it refuses
-encrypted and repaired files. Not yet: embedded fonts.
+encrypted and repaired files. Embedded fonts are written by `Stamp.finish`; until then the
+update is `error.UnfinishedStamp`.
 
 ## Resource limits
 
@@ -198,7 +213,9 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- In new documents: encryption. Embedded fonts for drawn text.
+- In new documents: encryption.
+- Embedding fonts with CFF outlines (`.otf`) or from collections (`.ttc`), and text
+  shaping. Forms and text boxes are still written in WinAnsi.
 - Public-key security handlers: `error.UnsupportedEncryption`. (The standard handler is read: see `crypt.zig`.)
 - SASLprep's normalization (NFKC) is not applied to R5 and R6 passwords. A password
   typed in composed form, as keyboards usually give it, is unaffected; one with

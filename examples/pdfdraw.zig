@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.0-or-later
 //! Makes a sample document with the drawing functions:
-//!     zig build && zig-out/bin/pdfdraw OUT.pdf [PICTURE.jpg]
+//!     zig build && zig-out/bin/pdfdraw OUT.pdf [PICTURE.jpg] [FONT.ttf]
 //! Used to check the output against other PDF readers.
 
 const std = @import("std");
@@ -72,27 +72,57 @@ fn sample(c: *draw.Canvas, picture: ?*const draw.Image) !void {
     try c.image(&gradient, 300, 500, 200, 120);
 }
 
+/// Lines in other scripts, in an embedded font: those it has the letters of.
+fn embedded(c: *draw.Canvas, font: *const pdf.truetype.Font) !void {
+    const face: draw.Font = .{ .embedded = font };
+    var y: f64 = 670;
+    for ([_][]const u8{
+        "An embedded font:",
+        "Za\u{17c}\u{f3}\u{142}\u{107} g\u{119}\u{15b}l\u{105} ja\u{17a}\u{144}, \u{20ac}9",
+        "\u{39e}\u{3b5}\u{3c3}\u{3ba}\u{3b5}\u{3c0}\u{3ac}\u{3b6}\u{3c9} \u{3c4}\u{3b7}\u{3bd} \u{3c8}\u{3c5}\u{3c7}\u{3ae}",
+        "\u{421}\u{44a}\u{435}\u{448}\u{44c} \u{44d}\u{442}\u{438}\u{445} \u{43c}\u{44f}\u{433}\u{43a}\u{438}\u{445} \u{431}\u{443}\u{43b}\u{43e}\u{43a}",
+    }) |line| {
+        if (!face.covers(line)) continue;
+        try c.text(face, 14, 48, y, line);
+        y += 22;
+    }
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 3) {
-        std.debug.print("usage: pdfdraw OUT.pdf [PICTURE.jpg]\n", .{});
+    if (args.len < 2 or args.len > 4) {
+        std.debug.print("usage: pdfdraw OUT.pdf [PICTURE.jpg] [FONT.ttf]\n", .{});
         return 2;
     }
     var picture: ?draw.Image = null;
     defer if (picture) |*p| p.deinit();
-    if (args.len == 3) {
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[2], gpa, .limited(64 << 20));
+    var font: ?pdf.truetype.Font = null;
+    defer if (font) |*f| f.deinit();
+    for (args[2..]) |path| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20));
         defer gpa.free(bytes);
-        picture = draw.Image.fromJpeg(gpa, bytes) catch |err| {
-            std.debug.print("pdfdraw: {s}: {t}\n", .{ args[2], err });
-            return 1;
-        };
+        if (std.ascii.endsWithIgnoreCase(path, ".ttf")) {
+            if (font) |*f| f.deinit();
+            font = null;
+            font = pdf.truetype.Font.init(gpa, bytes, .{}) catch |err| {
+                std.debug.print("pdfdraw: {s}: {t}\n", .{ path, err });
+                return 1;
+            };
+        } else {
+            if (picture) |*p| p.deinit();
+            picture = null;
+            picture = draw.Image.fromJpeg(gpa, bytes) catch |err| {
+                std.debug.print("pdfdraw: {s}: {t}\n", .{ path, err });
+                return 1;
+            };
+        }
     }
     var canvas = try draw.Canvas.init(gpa, 595, 842);
     defer canvas.deinit();
     try sample(&canvas, if (picture) |*p| p else null);
+    if (font) |*f| try embedded(&canvas, f);
 
     var builder = pdf.compose.Builder.init(gpa, .{});
     defer builder.deinit();

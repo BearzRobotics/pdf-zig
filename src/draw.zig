@@ -20,6 +20,8 @@ const pack = @import("compose_pack.zig");
 const pages = @import("pages.zig");
 const interp = @import("interp.zig");
 const page_edit = @import("page_edit.zig");
+const truetype = @import("truetype.zig");
+const font_embed = @import("font_embed.zig");
 
 const Matrix = display.Matrix;
 const Dict = object.Dict;
@@ -114,8 +116,12 @@ pub const Builtin = enum {
     }
 };
 
+/// A font to write with: one every reader has, or a TrueType font to embed. An
+/// embedded font is borrowed by a canvas that uses it, and must live until the
+/// canvas has been placed (`addPage` or `Stamp.place`).
 pub const Font = union(enum) {
     builtin: Builtin,
+    embedded: *const truetype.Font,
 
     pub const courier: Font = .{ .builtin = .courier };
     pub const courier_bold: Font = .{ .builtin = .courier_bold };
@@ -131,10 +137,13 @@ pub const Font = union(enum) {
     pub const times_bold_italic: Font = .{ .builtin = .times_bold_italic };
 
     /// Whether every character of `text` can be drawn.
-    pub fn covers(_: Font, text: []const u8) bool {
+    pub fn covers(self: Font, text: []const u8) bool {
         var view = std.unicode.Utf8View.init(text) catch return false;
         var it = view.iterator();
-        while (it.nextCodepoint()) |c| if (winAnsiCode(c) == null) return false;
+        while (it.nextCodepoint()) |c| switch (self) {
+            .builtin => if (winAnsiCode(c) == null) return false,
+            .embedded => |font| if (font.glyphFor(c) == null) return false,
+        };
         return true;
     }
 
@@ -145,7 +154,10 @@ pub const Font = union(enum) {
         var units: f64 = 0;
         while (it.nextCodepoint()) |c| {
             if (c < 0x20) return error.BadValue;
-            units += @floatFromInt(self.builtin.width(winAnsiCode(c) orelse return error.MissingGlyph));
+            units += switch (self) {
+                .builtin => |b| @floatFromInt(b.width(winAnsiCode(c) orelse return error.MissingGlyph)),
+                .embedded => |font| font.width(font.glyphFor(c) orelse return error.MissingGlyph),
+            };
         }
         return units * size / 1000;
     }
@@ -310,6 +322,25 @@ fn jpegHeader(bytes: []const u8) error{ BadImage, UnsupportedImage }!struct { wi
 
 // ---- the canvas ----------------------------------------------------------------------------
 
+/// What a canvas draws of one embedded font.
+pub const EmbeddedUse = struct {
+    /// Borrowed.
+    font: *const truetype.Font,
+    used: font_embed.Usage = .empty,
+};
+
+/// A glyph placed by the caller, as a text shaper gives it.
+pub const PlacedGlyph = struct {
+    /// The glyph's number in the font.
+    id: u16,
+    /// Where its origin goes, on the baseline.
+    x: f64,
+    y: f64,
+    /// The text it stands for (UTF-8), for selecting and searching; empty for
+    /// a part of a character that another glyph stands for.
+    text: []const u8,
+};
+
 const GraphicsState = struct { fill_alpha: f64, stroke_alpha: f64, blend: BlendMode };
 
 pub const TextMode = enum(u8) {
@@ -334,6 +365,9 @@ pub const Canvas = struct {
     content: std.ArrayList(u8) = .empty,
     /// The built-in fonts the content names.
     fonts: std.EnumSet(Builtin) = .empty,
+    /// The embedded fonts; font `i` is `/E{i}`. Their texts are in `texts`.
+    embedded: std.ArrayList(EmbeddedUse) = .empty,
+    texts: std.heap.ArenaAllocator.State = .{},
     /// The images drawn, owned copies; image `i` is `/Im{i}`.
     images: std.ArrayList(Image) = .empty,
     /// Graphics states; number `i` is `/Gs{i}`.
@@ -353,6 +387,10 @@ pub const Canvas = struct {
         self.content.deinit(self.gpa);
         for (self.images.items) |*held| held.deinit();
         self.images.deinit(self.gpa);
+        for (self.embedded.items) |*use| use.used.deinit(self.gpa);
+        self.embedded.deinit(self.gpa);
+        var texts = self.texts.promote(self.gpa);
+        texts.deinit();
         self.states.deinit(self.gpa);
         self.saved.deinit(self.gpa);
         self.* = undefined;
@@ -594,33 +632,131 @@ pub const Canvas = struct {
             if (!(w > 0 and w <= max_value) or !(natural > 0)) return error.BadValue;
             stretch = w / natural * 100;
         }
+        // The glyphs of an embedded font, with the text each stands for.
+        var shaped: std.ArrayList(PlacedGlyph) = .empty;
+        defer shaped.deinit(self.gpa);
+        var use: ?Room = null;
+        if (font == .embedded) {
+            var i: usize = 0;
+            while (i < line.len) {
+                const length = std.unicode.utf8ByteSequenceLength(line[i]) catch unreachable;
+                const c = std.unicode.utf8Decode(line[i..][0..length]) catch unreachable;
+                try shaped.append(self.gpa, .{ .id = font.embedded.glyphFor(c).?, .x = 0, .y = 0, .text = line[i..][0..length] });
+                i += length;
+            }
+            use = try self.useOf(font.embedded, shaped.items);
+        }
+
         const at = self.content.items.len;
         errdefer self.content.shrinkRetainingCapacity(at);
         // The rendering mode and the scaling outlast a text object, so both are
         // always given.
         var head: [64]u8 = undefined;
-        try self.append(std.fmt.bufPrint(&head, "BT /F{d} ", .{@backingInt(font.builtin)}) catch unreachable);
+        try self.append("BT ");
+        try self.append(switch (font) {
+            .builtin => |b| std.fmt.bufPrint(&head, "/F{d} ", .{@backingInt(b)}) catch unreachable,
+            .embedded => std.fmt.bufPrint(&head, "/E{d} ", .{use.?.font}) catch unreachable,
+        });
         try self.number(size);
         try self.append("Tf ");
         try self.number(stretch);
         try self.append(std.fmt.bufPrint(&head, "Tz {d} Tr 1 0 0 1 ", .{@backingInt(options.mode)}) catch unreachable);
         try self.number(x);
         try self.number(self.flip(y));
-        try self.append("Tm (");
-        var view = std.unicode.Utf8View.initUnchecked(line);
-        var it = view.iterator();
-        while (it.nextCodepoint()) |c| {
-            const code = winAnsiCode(c).?;
-            var escaped: [4]u8 = undefined;
-            try self.append(if (code == '(' or code == ')' or code == '\\')
-                std.fmt.bufPrint(&escaped, "\\{c}", .{code}) catch unreachable
-            else if (code >= 0x20 and code < 0x7F)
-                std.fmt.bufPrint(&escaped, "{c}", .{code}) catch unreachable
-            else
-                std.fmt.bufPrint(&escaped, "\\{o:0>3}", .{code}) catch unreachable);
+        try self.append("Tm ");
+        switch (font) {
+            .builtin => |b| {
+                try self.append("(");
+                var view = std.unicode.Utf8View.initUnchecked(line);
+                var it = view.iterator();
+                while (it.nextCodepoint()) |c| {
+                    const code = winAnsiCode(c).?;
+                    var escaped: [4]u8 = undefined;
+                    try self.append(if (code == '(' or code == ')' or code == '\\')
+                        std.fmt.bufPrint(&escaped, "\\{c}", .{code}) catch unreachable
+                    else if (code >= 0x20 and code < 0x7F)
+                        std.fmt.bufPrint(&escaped, "{c}", .{code}) catch unreachable
+                    else
+                        std.fmt.bufPrint(&escaped, "\\{o:0>3}", .{code}) catch unreachable);
+                }
+                try self.append(") Tj ET\n");
+                self.fonts.insert(b);
+            },
+            .embedded => {
+                // Two bytes for each glyph (`Identity-H`).
+                try self.append("<");
+                for (shaped.items) |g| try self.append(std.fmt.bufPrint(&head, "{X:0>4}", .{g.id}) catch unreachable);
+                try self.append("> Tj ET\n");
+                self.keep(use.?, shaped.items);
+            },
         }
-        try self.append(") Tj ET\n");
-        self.fonts.insert(font.builtin);
+    }
+
+    /// Draws glyphs of an embedded font where the caller puts them, in the fill
+    /// colour: for text that another library has shaped, in any script or
+    /// direction. Each glyph number must be one the font has.
+    pub fn glyphs(self: *Canvas, font: *const truetype.Font, size: f64, items: []const PlacedGlyph) Error!void {
+        try self.requireNoPath();
+        if (!(size > 0 and size <= max_value)) return error.BadValue;
+        for (items) |g| {
+            if (g.id == 0 or g.id >= font.num_glyphs) return error.MissingGlyph;
+            try check(&.{ g.x, g.y });
+            if (g.text.len > 256 or !std.unicode.utf8ValidateSlice(g.text)) return error.BadValue;
+        }
+        if (items.len == 0) return;
+        const use = try self.useOf(font, items);
+        const at = self.content.items.len;
+        errdefer self.content.shrinkRetainingCapacity(at);
+        var head: [64]u8 = undefined;
+        try self.append(std.fmt.bufPrint(&head, "BT /E{d} ", .{use.font}) catch unreachable);
+        try self.number(size);
+        try self.append("Tf 100 Tz 0 Tr\n");
+        for (items) |g| {
+            try self.append("1 0 0 1 ");
+            try self.number(g.x);
+            try self.number(self.flip(g.y));
+            try self.append(std.fmt.bufPrint(&head, "Tm <{X:0>4}> Tj\n", .{g.id}) catch unreachable);
+        }
+        try self.append("ET\n");
+        self.keep(use, items);
+    }
+
+    /// Room made to record the glyphs of one call, so that recording them
+    /// after the content is written cannot fail.
+    const Room = struct {
+        /// The font's number among the canvas's fonts.
+        font: usize,
+        /// For copies of the texts, one after another.
+        texts: []u8,
+    };
+
+    fn useOf(self: *Canvas, font: *const truetype.Font, items: []const PlacedGlyph) Error!Room {
+        var index: ?usize = null;
+        for (self.embedded.items, 0..) |use, i| if (use.font == font) {
+            index = i;
+        };
+        if (index == null) {
+            if (self.embedded.items.len >= 256) return error.TooLarge;
+            try self.embedded.append(self.gpa, .{ .font = font });
+            index = self.embedded.items.len - 1;
+        }
+        try self.embedded.items[index.?].used.ensureUnusedCapacity(self.gpa, items.len);
+        var length: usize = 0;
+        for (items) |g| length += g.text.len;
+        var texts = self.texts.promote(self.gpa);
+        defer self.texts = texts.state;
+        return .{ .font = index.?, .texts = try texts.allocator().alloc(u8, length) };
+    }
+
+    /// Records that `items` were drawn: only what was drawn is in a subset.
+    fn keep(self: *Canvas, room: Room, items: []const PlacedGlyph) void {
+        var at: usize = 0;
+        for (items) |g| {
+            @memcpy(room.texts[at..][0..g.text.len], g.text);
+            const entry = self.embedded.items[room.font].used.getOrPutAssumeCapacity(g.id);
+            if (!entry.found_existing or font_embed.preferred(g.text, entry.value_ptr.*)) entry.value_ptr.* = room.texts[at..][0..g.text.len];
+            at += g.text.len;
+        }
     }
 
     /// Draws `image` into the rectangle with its top left corner at (`x`, `y`).
@@ -685,6 +821,11 @@ pub fn resourcesOf(a: Allocator, canvas: *const Canvas, objects: anytype) !Dict 
     while (it.next()) |font| {
         try fonts.append(a, .{ .key = try std.fmt.allocPrint(a, "F{d}", .{@backingInt(font)}), .value = .{ .ref = try objects.fontObject(a, font) } });
     }
+    for (canvas.embedded.items, 0..) |*use, i| {
+        // A font whose only call failed draws nothing.
+        if (use.used.count() == 0) continue;
+        try fonts.append(a, .{ .key = try std.fmt.allocPrint(a, "E{d}", .{i}), .value = .{ .ref = try objects.embeddedObject(a, use) } });
+    }
     if (fonts.items.len > 0) try out.append(a, .{ .key = "Font", .value = .{ .dict = .{ .entries = fonts.items } } });
 
     const images = try a.alloc(object.Entry, canvas.images.items.len);
@@ -721,6 +862,8 @@ pub fn compressedContent(a: Allocator, canvas: *const Canvas) Allocator.Error![]
 // ---- onto existing pages -------------------------------------------------------------------
 
 pub const StampError = page_edit.Error || error{
+    /// An embedded font turned out to be damaged when it was cut down.
+    BadFont,
     /// The page is written directly in the page tree and cannot be changed.
     DirectPage,
     /// A canvas whose path was neither painted nor used to clip.
@@ -750,15 +893,82 @@ pub const Stamp = struct {
     fonts: std.EnumArray(Builtin, u32) = .initFill(0),
     images: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
     forms: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
+    embedded: std.AutoArrayHashMapUnmanaged([32]u8, *StampFont) = .empty,
+
+    const StampFont = struct {
+        /// A copy, in the update's memory.
+        font: truetype.Font,
+        used: font_embed.Usage = .empty,
+        ref: object.Ref,
+        /// The font's other objects, once `finish` has made them.
+        parts: [4]u32 = @splat(0),
+        /// Glyphs have been added since the font was last written.
+        dirty: bool = false,
+    };
 
     pub fn init(upd: *serial.Update) Stamp {
         return .{ .upd = upd };
     }
 
-    /// Writes what is written once for all pages. With only built-in fonts
-    /// there is nothing left to write; embedded fonts will be written here.
+    /// Writes the embedded fonts, each once, with the glyphs of every page
+    /// placed so far. Until it has run after the last `place`, the update
+    /// refuses to be written (`error.UnfinishedStamp`). With only built-in
+    /// fonts there is nothing to write.
     pub fn finish(self: *Stamp) StampError!void {
-        _ = self;
+        const a = self.upd.allocator();
+        for (self.embedded.values()) |entry| {
+            if (!entry.dirty) continue;
+            var sink: StampSink = .{ .upd = self.upd, .parts = &entry.parts };
+            font_embed.write(a, &entry.font, &entry.used, entry.ref, &sink) catch |err| switch (err) {
+                error.BadFont => return error.BadFont,
+                error.TooLarge => return error.TooLarge,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.TooManyObjects => return error.TooManyObjects,
+                error.InvalidObject => return error.InvalidObject,
+                else => unreachable,
+            };
+            entry.dirty = false;
+            self.upd.unfinished -= 1;
+        }
+    }
+
+    /// Where `font_embed` puts a font's objects: the same numbers each time.
+    const StampSink = struct {
+        upd: *serial.Update,
+        parts: *[4]u32,
+        next: usize = 0,
+
+        pub fn add(self: *StampSink, o: object.Object) !object.Ref {
+            const slot = &self.parts[self.next];
+            self.next += 1;
+            if (slot.* == 0) slot.* = (try self.upd.add(.null)).num;
+            try self.upd.set(slot.*, o);
+            return .{ .num = slot.* };
+        }
+
+        pub fn set(self: *StampSink, ref: object.Ref, o: object.Object) !void {
+            try self.upd.set(ref.num, o);
+        }
+    };
+
+    pub fn embeddedObject(self: *Stamp, a: Allocator, use: *const EmbeddedUse) !object.Ref {
+        const gop = try self.embedded.getOrPut(a, use.font.digest);
+        if (!gop.found_existing) {
+            errdefer _ = self.embedded.swapRemove(use.font.digest);
+            const entry = try a.create(StampFont);
+            entry.* = .{ .font = try use.font.clone(a), .ref = try self.upd.add(.null) };
+            gop.value_ptr.* = entry;
+        }
+        const entry = gop.value_ptr.*;
+        for (use.used.keys(), use.used.values()) |glyph, text| {
+            if (entry.used.get(glyph)) |old| if (!font_embed.preferred(text, old)) continue;
+            try entry.used.put(a, glyph, try a.dupe(u8, text));
+            if (!entry.dirty) {
+                entry.dirty = true;
+                self.upd.unfinished += 1;
+            }
+        }
+        return entry.ref;
     }
 
     /// Draws `canvas` on `page`. The canvas can be changed or freed afterwards.
@@ -801,6 +1011,10 @@ pub const Stamp = struct {
         hash.update(&counts);
         hash.update(canvas.content.items);
         for (canvas.images.items) |picture| hash.update(&picture.digest);
+        for (canvas.embedded.items) |use| {
+            hash.update(&use.font.digest);
+            for (use.used.keys()) |glyph| hash.update(std.mem.asBytes(&glyph));
+        }
         for (canvas.states.items) |s| {
             hash.update(std.mem.asBytes(&s.fill_alpha));
             hash.update(std.mem.asBytes(&s.stroke_alpha));
@@ -808,6 +1022,7 @@ pub const Stamp = struct {
         }
         var digest: [32]u8 = undefined;
         hash.final(&digest);
+        // The same content and fonts: its glyphs were counted when it was made.
         if (self.forms.get(digest)) |num| return num;
 
         const dict = try serial.makeDict(a, &.{

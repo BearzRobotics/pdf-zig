@@ -100,10 +100,20 @@ try out.setInfo(.{ .title = "Report" });
 try out.write(&writer.interface);
 ```
 
-Text is one line at a time (`Font.textWidth` measures it) in the twelve built-in text
-fonts, which cover WinAnsi (Western European) and are not embedded, so a reader's
-substitute font decides how they look. There is no wrapping or layout, and embedding
-fonts is not there yet.
+Text is one line at a time (`Font.textWidth` measures it). The twelve built-in text fonts
+cover WinAnsi (Western European) and are not embedded, so a reader's substitute font
+decides how they look. For other characters, and for text that looks the same everywhere,
+embed a TrueType font; only the glyphs used are stored:
+
+```zig
+var font = try pdf.truetype.Font.init(gpa, ttf_bytes, .{});   // refuses fonts that forbid it
+defer font.deinit();
+const face: pdf.draw.Font = .{ .embedded = &font };            // face.covers(text) checks first
+try canvas.text(face, 14, 48, 120, "Zażółć gęślą jaźń");
+```
+
+There is no wrapping, layout or text shaping, so Arabic and Indic scripts and
+right-to-left text need glyphs positioned by a shaping library (`canvas.glyphs`).
 
 A canvas also goes onto pages of an existing file, over or under what they show, for
 watermarks, page numbers or an invisible text layer over a scan (`textWith` with

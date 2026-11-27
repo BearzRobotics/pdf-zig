@@ -812,3 +812,324 @@ test "every failed allocation while stamping is reported" {
     defer arena.deinit();
     try testing.checkAllAllocationFailures(testing.allocator, stampUnderAllocationFailure, .{try existing(arena.allocator(), 1, "", body_text)});
 }
+
+// ---- embedded fonts ------------------------------------------------------------------------
+
+const test_font = @import("test_font.zig");
+const TrueType = pdf.truetype.Font;
+
+/// The embedded program of the font of `run`, decoded.
+fn programOf(a: Allocator, page: *const Page, run: display.Text) ![]const u8 {
+    try testing.expectEqual(.truetype, run.font.program.kind);
+    return page.doc.streamDataIn(a, run.font.program.stream.?);
+}
+
+fn glyphCount(program: []const u8) u16 {
+    for (0..std.mem.readInt(u16, program[4..6], .big)) |i| {
+        const record = program[12 + i * 16 ..][0..16];
+        if (std.mem.eql(u8, record[0..4], "maxp")) return std.mem.readInt(u16, program[std.mem.readInt(u32, record[8..12], .big) + 4 ..][0..2], .big);
+    }
+    return 0;
+}
+
+fn countObjects(page: *Page, key: []const u8, value: []const u8) usize {
+    var n: usize = 0;
+    var it = page.doc.xref.keyIterator();
+    while (it.next()) |num| {
+        const d = page.doc.getObject(num.*).asDict() orelse continue;
+        if (std.mem.eql(u8, page.doc.getName(d, key) orelse "", value)) n += 1;
+    }
+    return n;
+}
+
+test "text in an embedded font is read back with its characters and widths" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var font = try TrueType.init(testing.allocator, try test_font.make(a, .{ .format12 = true }), .{});
+    defer font.deinit();
+    const face: draw.Font = .{ .embedded = &font };
+    const line = "ABBA \u{e9}\u{1f600}";
+    // The test font has no space.
+    try testing.expect(!face.covers(line));
+    const shown = "ABBA\u{e9}\u{1f600}";
+    try testing.expect(face.covers(shown));
+    var canvas = try Canvas.init(testing.allocator, 300, 200);
+    defer canvas.deinit();
+    try testing.expectError(error.MissingGlyph, canvas.text(face, 10, 1, 1, line));
+    try testing.expectEqual(@as(usize, 0), canvas.content.items.len);
+    try canvas.text(face, 20, 30, 50, shown);
+    try canvas.textWith(face, 20, 30, 90, "AB", .{ .fit_width = 100 });
+    const page = try onePage(a, &canvas);
+    try testing.expectEqualStrings(shown ++ "\nAB\n", try page.text(a));
+
+    const run = try page.nth(.text, 0);
+    try testing.expectEqual(.type0, run.font.subtype);
+    // Six capitals, then the font's name.
+    try testing.expectEqualStrings("TestFont1-Bold", run.font.base_font);
+    for ([_]u32{ 1, 2, 2, 1, 6, 7 }, run.glyphs) |glyph, got| {
+        try testing.expectEqual(glyph, got.cid);
+        try testing.expectApproxEqAbs(font.width(@intCast(glyph)) / 1000.0, got.advance, 1e-9);
+    }
+    const last = run.glyphs[run.glyphs.len - 1];
+    try testing.expectApproxEqAbs(try face.textWidth(20, shown), last.x + last.advance * 20, 1e-6);
+    try expectAt(30, 50, page.seen(run.tm.mul(run.ctm), 0, 0));
+    const fitted = try page.nth(.text, 1);
+    const end = fitted.glyphs[1];
+    try expectAt(130, 90, page.seen(fitted.tm.mul(fitted.ctm), end.x + end.advance * 20 * fitted.h_scale, 0));
+
+    // A subset: it ends at the last glyph used.
+    const program = try programOf(a, &page, run);
+    try testing.expectEqual(@as(u16, 8), glyphCount(program));
+    try testing.expect(program.len < font.data.len);
+    var it = page.doc.xref.keyIterator();
+    var checked = false;
+    while (it.next()) |num| {
+        const d = page.doc.getObject(num.*).asDict() orelse continue;
+        if (!std.mem.eql(u8, page.doc.getName(d, "Type") orelse "", "FontDescriptor")) continue;
+        const name = page.doc.getName(d, "FontName").?;
+        try testing.expect(name.len == 7 + "TestFont1-Bold".len and name[6] == '+');
+        for (name[0..6]) |c| try testing.expect(c >= 'A' and c <= 'Z');
+        // Symbolic and italic.
+        try testing.expectEqual(@as(i64, 4 | 64), page.doc.getInt(d, "Flags").?);
+        try testing.expectEqual(@as(f64, 750), page.doc.getNum(d, "Ascent").?);
+        try testing.expectEqual(@as(f64, -250), page.doc.getNum(d, "Descent").?);
+        try testing.expectEqual(@as(f64, 700), page.doc.getNum(d, "CapHeight").?);
+        try testing.expectEqual(@as(f64, -12), page.doc.getNum(d, "ItalicAngle").?);
+        const box = page.doc.getArray(d, "FontBBox").?;
+        try testing.expectEqual(@as(f64, -200), page.doc.resolve(box[1]).asNum().?);
+        checked = true;
+    }
+    try testing.expect(checked);
+}
+
+test "one embedded font serves every page, with the glyphs of all, and may be freed once placed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var builder = Builder.init(testing.allocator, .{});
+    defer builder.deinit();
+    {
+        var font = try TrueType.init(testing.allocator, try test_font.make(a, .{}), .{});
+        defer font.deinit();
+        for ([_][]const u8{ "A", "AB", "D" }) |line| {
+            var canvas = try Canvas.init(testing.allocator, 100, 100);
+            defer canvas.deinit();
+            try canvas.text(.{ .embedded = &font }, 10, 10, 50, line);
+            try canvas.text(.helvetica, 10, 10, 70, "built in");
+            try builder.addPage(&canvas);
+        }
+    }
+    const bytes = try written(a, &builder);
+    try testing.expectEqualSlices(u8, bytes, try written(a, &builder));
+    for ([_][]const u8{ "A", "AB", "D" }, 0..) |line, i| {
+        const page = try open(a, bytes, i);
+        try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}\nbuilt in\n", .{line}), try page.text(a));
+    }
+    var first = try open(a, bytes, 0);
+    try testing.expectEqual(@as(usize, 1), countObjects(&first, "Subtype", "Type0"));
+    try testing.expectEqual(@as(usize, 1), countObjects(&first, "Subtype", "CIDFontType2"));
+    // Up to "D", the last glyph any page uses.
+    try testing.expectEqual(@as(u16, 5), glyphCount(try programOf(a, &first, try first.nth(.text, 0))));
+}
+
+test "a font that forbids subsetting is embedded whole" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const file = try test_font.make(a, .{ .fs_type = 0x0100 });
+    var font = try TrueType.init(testing.allocator, file, .{});
+    defer font.deinit();
+    var canvas = try Canvas.init(testing.allocator, 100, 100);
+    defer canvas.deinit();
+    try canvas.text(.{ .embedded = &font }, 10, 10, 50, "A");
+    const page = try onePage(a, &canvas);
+    const run = try page.nth(.text, 0);
+    try testing.expectEqualSlices(u8, file, try programOf(a, &page, run));
+    // And not called a subset.
+    try testing.expectEqualStrings("TestFont1-Bold", run.font.base_font);
+    try testing.expect(std.mem.indexOf(u8, page.bytes, "+TestFont") == null);
+}
+
+test "shaped glyphs go where they are put and stand for the text given" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var font = try TrueType.init(testing.allocator, try test_font.make(a, .{}), .{});
+    defer font.deinit();
+    var canvas = try Canvas.init(testing.allocator, 200, 100);
+    defer canvas.deinit();
+    try testing.expectError(error.MissingGlyph, canvas.glyphs(&font, 10, &.{.{ .id = 0, .x = 1, .y = 1, .text = "" }}));
+    try testing.expectError(error.MissingGlyph, canvas.glyphs(&font, 10, &.{.{ .id = 8, .x = 1, .y = 1, .text = "" }}));
+    try testing.expectError(error.BadValue, canvas.glyphs(&font, 10, &.{.{ .id = 1, .x = std.math.nan(f64), .y = 1, .text = "" }}));
+    try testing.expectError(error.BadValue, canvas.glyphs(&font, 10, &.{.{ .id = 1, .x = 1, .y = 1, .text = "\xff" }}));
+    try canvas.glyphs(&font, 10, &.{});
+    try testing.expectEqual(@as(usize, 0), canvas.content.items.len);
+    // A ligature without a character of its own, put to the left of the last
+    // glyph given, as right-to-left text would be.
+    try canvas.glyphs(&font, 10, &.{
+        .{ .id = 4, .x = 120, .y = 40, .text = "D" },
+        .{ .id = 5, .x = 60, .y = 45, .text = "ffi" },
+    });
+    const page = try onePage(a, &canvas);
+    var shown: std.ArrayList(u8) = .empty;
+    var n: usize = 0;
+    for (page.list.commands) |c| if (c == .text) {
+        for (c.text.glyphs) |g| try shown.appendSlice(a, g.text);
+        try expectAt(([_]f64{ 120, 60 })[n], ([_]f64{ 40, 45 })[n], page.seen(c.text.tm.mul(c.text.ctm), 0, 0));
+        n += 1;
+    };
+    try testing.expectEqualStrings("Dffi", shown.items);
+}
+
+test "of two characters that share a glyph, the ordinary one is recorded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var font = try TrueType.init(testing.allocator, try test_font.make(a, .{}), .{});
+    defer font.deinit();
+    var builder = Builder.init(testing.allocator, .{});
+    defer builder.deinit();
+    // As a no-break space and a space would share a glyph: whichever comes
+    // first, in one canvas or across pages, the space is what is read.
+    for ([_][2][]const u8{ .{ "\u{a0}", " " }, .{ " ", "\u{a0}" } }) |pair| {
+        for (pair) |text| {
+            var canvas = try Canvas.init(testing.allocator, 100, 100);
+            defer canvas.deinit();
+            try canvas.glyphs(&font, 10, &.{
+                .{ .id = 1, .x = 10, .y = 50, .text = "x" },
+                .{ .id = 2, .x = 30, .y = 50, .text = text },
+                .{ .id = 4, .x = 50, .y = 50, .text = "y" },
+            });
+            try builder.addPage(&canvas);
+        }
+    }
+    const bytes = try written(a, &builder);
+    for (0..4) |i| {
+        const page = try open(a, bytes, i);
+        var n: usize = 0;
+        for (page.list.commands) |c| if (c == .text) {
+            if (n == 1) try testing.expectEqualStrings(" ", c.text.glyphs[0].text);
+            n += 1;
+        };
+        try testing.expectEqual(@as(usize, 3), n);
+    }
+    const preferred = @import("font_embed.zig").preferred;
+    try testing.expect(preferred("\u{394}", "\u{2206}") and !preferred("\u{2206}", "\u{394}"));
+    // A glyph for several characters keeps what it was first given.
+    try testing.expect(!preferred("f", "ffi") and !preferred("ffi", "f"));
+    try testing.expect(preferred("a", "") and !preferred("", "a"));
+}
+
+test "a stamp's embedded fonts are written by finish, which cannot be forgotten" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try pdf.Document.open(a, try existing(a, 3, "", body_text), .{});
+    const list = try pdf.pages.PageList.build(&doc);
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    var out: std.Io.Writer.Allocating = .init(a);
+    {
+        var font = try TrueType.init(testing.allocator, try test_font.make(a, .{}), .{});
+        defer font.deinit();
+        for ([_][]const u8{ "A", "B" }, 0..) |line, i| {
+            var canvas = try Canvas.init(testing.allocator, 100, 100);
+            defer canvas.deinit();
+            try canvas.text(.{ .embedded = &font }, 10, 10, 50, line);
+            try stamp.place(pdf.pages.page(&doc, list, i).?, &canvas, .over);
+        }
+        try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+        try testing.expectEqual(@as(usize, 0), out.written().len);
+        try stamp.finish();
+        // More text after finishing needs finishing again.
+        var canvas = try Canvas.init(testing.allocator, 100, 100);
+        defer canvas.deinit();
+        try canvas.text(.{ .embedded = &font }, 10, 10, 50, "D");
+        try stamp.place(pdf.pages.page(&doc, list, 2).?, &canvas, .over);
+        try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+        // A page with only glyphs that are in does not.
+        try stamp.finish();
+        try stamp.place(pdf.pages.page(&doc, list, 0).?, &canvas, .under);
+    }
+    try stamp.finish();
+    try upd.write(testing.allocator, &out.writer);
+    for ([_][]const u8{ "A", "B", "D" }, 0..) |line, i| {
+        const page = try open(a, out.written(), i);
+        try testing.expect(std.mem.indexOf(u8, try page.text(a), line) != null);
+    }
+    var first = try open(a, out.written(), 0);
+    try testing.expectEqual(@as(usize, 1), countObjects(&first, "Subtype", "Type0"));
+    // Finishing twice wrote the same objects again, not more of them.
+    try testing.expectEqual(@as(usize, 1), countObjects(&first, "Type", "FontDescriptor"));
+}
+
+test "a font too damaged to cut down stops the writing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try test_font.make(a, .{ .long_loca = true });
+    // The composite glyph 3 names a glyph that is not there.
+    const at = std.mem.indexOf(u8, bytes, "\xff\xff\x00\x00\x00\x00\x06\x40\x05\x78\x00\x23\x00\x01").?;
+    std.mem.writeInt(u16, bytes[at + 12 ..][0..2], 900, .big);
+    var font = try TrueType.init(testing.allocator, bytes, .{});
+    defer font.deinit();
+    var canvas = try Canvas.init(testing.allocator, 100, 100);
+    defer canvas.deinit();
+    try canvas.text(.{ .embedded = &font }, 10, 10, 50, "C");
+    var builder = Builder.init(testing.allocator, .{});
+    defer builder.deinit();
+    try builder.addPage(&canvas);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try testing.expectError(error.BadFont, builder.write(&out.writer));
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+
+    var doc = try pdf.Document.open(a, try existing(a, 1, "", body_text), .{});
+    var upd = try pdf.write.Update.init(testing.allocator, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    try stamp.place(pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?, &canvas, .over);
+    try testing.expectError(error.BadFont, stamp.finish());
+    try testing.expectError(error.UnfinishedStamp, upd.write(testing.allocator, &out.writer));
+}
+
+fn embedUnderAllocationFailure(gpa: Allocator, font_file: []const u8, existing_file: []const u8) !void {
+    var font = try TrueType.init(gpa, font_file, .{});
+    defer font.deinit();
+    var canvas = try Canvas.init(gpa, 100, 100);
+    defer canvas.deinit();
+    try canvas.text(.{ .embedded = &font }, 10, 10, 50, "AC");
+    try canvas.glyphs(&font, 10, &.{.{ .id = 5, .x = 1, .y = 1, .text = "ffi" }});
+    var builder = Builder.init(gpa, .{});
+    defer builder.deinit();
+    try builder.addPage(&canvas);
+    var made: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer made.deinit();
+    try builder.write(&made.writer);
+
+    var doc = try pdf.Document.open(gpa, existing_file, .{});
+    defer doc.deinit();
+    var upd = try pdf.write.Update.init(gpa, &doc);
+    defer upd.deinit();
+    var stamp: draw.Stamp = .init(&upd);
+    try stamp.place(pdf.pages.page(&doc, try pdf.pages.PageList.build(&doc), 0).?, &canvas, .over);
+    try stamp.finish();
+    var stamped_out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer stamped_out.deinit();
+    try upd.write(gpa, &stamped_out.writer);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ made.written(), stamped_out.written() }) |bytes| {
+        const page = try open(arena.allocator(), bytes, 0);
+        const text = try page.text(arena.allocator());
+        try testing.expect(std.mem.indexOf(u8, text, "AC") != null and std.mem.indexOf(u8, text, "ffi") != null);
+    }
+}
+
+test "every failed allocation while embedding is reported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.checkAllAllocationFailures(testing.allocator, embedUnderAllocationFailure, .{ try test_font.make(a, .{}), try existing(a, 1, "", body_text) });
+}

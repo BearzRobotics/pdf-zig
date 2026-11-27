@@ -28,6 +28,8 @@ const compose_form = @import("compose_form.zig");
 const compose_outline = @import("compose_outline.zig");
 const pack = @import("compose_pack.zig");
 const draw = @import("draw.zig");
+const truetype = @import("truetype.zig");
+const font_embed = @import("font_embed.zig");
 
 const Object = object.Object;
 const Dict = object.Dict;
@@ -70,6 +72,8 @@ pub const Error = error{
     BadValue,
     /// A canvas whose path was neither painted nor used to clip.
     PathOpen,
+    /// An embedded font turned out to be damaged when it was cut down.
+    BadFont,
     OutOfMemory,
     WriteFailed,
 };
@@ -119,6 +123,9 @@ pub const Builder = struct {
     /// their order, and images by their digest.
     drawn_fonts: std.EnumArray(draw.Builtin, u32) = .initFill(0),
     drawn_images: std.AutoArrayHashMapUnmanaged([32]u8, u32) = .empty,
+    /// Embedded fonts, by digest. Each is written with the file, with the
+    /// glyphs of all pages.
+    drawn_embedded: std.AutoArrayHashMapUnmanaged([32]u8, *Embedded) = .empty,
     /// The document information dictionary, when `setInfo` gave one.
     info: ?Dict = null,
     bookmarks: std.ArrayList(compose_outline.Item) = .empty,
@@ -129,7 +136,26 @@ pub const Builder = struct {
         return .{ .gpa = gpa, .options = options, .arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
+    const Embedded = struct {
+        /// The builder's own copy.
+        font: truetype.Font,
+        used: font_embed.Usage = .empty,
+        /// The number of the Type 0 dictionary, which pages name.
+        num: u32,
+    };
+
+    fn freeEmbedded(self: *Builder, from: usize) void {
+        for (self.drawn_embedded.values()[from..]) |entry| {
+            entry.used.deinit(self.gpa);
+            entry.font.deinit();
+            self.gpa.destroy(entry);
+        }
+        self.drawn_embedded.shrinkRetainingCapacity(from);
+    }
+
     pub fn deinit(self: *Builder) void {
+        self.freeEmbedded(0);
+        self.drawn_embedded.deinit(self.gpa);
         self.body.deinit(self.gpa);
         self.offsets.deinit(self.gpa);
         self.pending.deinit(self.gpa);
@@ -277,10 +303,10 @@ pub const Builder = struct {
         }
     }
 
-    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize, unpacked_bytes: usize, drawn_fonts: std.EnumArray(draw.Builtin, u32), drawn_images: usize, info: ?Dict };
+    const Snapshot = struct { body: usize, page_bytes: usize, offsets: usize, pages: usize, layers: usize, version2: bool, field_roots: usize, field_names: usize, form_fonts: usize, need_appearances: bool, bookmarks: usize, extra_bytes: usize, unpacked_bytes: usize, drawn_fonts: std.EnumArray(draw.Builtin, u32), drawn_images: usize, drawn_embedded: usize, info: ?Dict };
 
     fn snapshot(self: *const Builder) Snapshot {
-        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes, .unpacked_bytes = self.unpacked_bytes, .drawn_fonts = self.drawn_fonts, .drawn_images = self.drawn_images.count(), .info = self.info };
+        return .{ .body = self.body.items.len, .page_bytes = self.page_bytes.items.len, .offsets = self.offsets.items.len, .pages = self.page_list.items.len, .layers = self.layers.items.len, .version2 = self.version2, .field_roots = self.field_roots.items.len, .field_names = self.field_names.count(), .form_fonts = self.form_fonts.count(), .need_appearances = self.need_appearances, .bookmarks = self.bookmarks.items.len, .extra_bytes = self.extra_bytes, .unpacked_bytes = self.unpacked_bytes, .drawn_fonts = self.drawn_fonts, .drawn_images = self.drawn_images.count(), .drawn_embedded = self.drawn_embedded.count(), .info = self.info };
     }
 
     fn restore(self: *Builder, s: Snapshot) void {
@@ -299,6 +325,7 @@ pub const Builder = struct {
         self.unpacked_bytes = s.unpacked_bytes;
         self.drawn_fonts = s.drawn_fonts;
         self.drawn_images.shrinkRetainingCapacity(s.drawn_images);
+        self.freeEmbedded(s.drawn_embedded);
         self.info = s.info;
         self.pending.clear();
     }
@@ -491,6 +518,17 @@ pub const Builder = struct {
         defer scratch.deinit();
         const a = scratch.allocator();
 
+        for (self.drawn_embedded.values()) |entry| {
+            var sink: TailSink = .{ .tail = &tail };
+            font_embed.write(a, &entry.font, &entry.used, .{ .num = entry.num }, &sink) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.TooManyObjects => return error.TooManyObjects,
+                error.TooLarge => return error.TooLarge,
+                error.BadFont => return error.BadFont,
+                else => unreachable,
+            };
+        }
+
         const kids = try a.alloc(Object, self.page_list.items.len);
         var page_value: std.ArrayList(u8) = .empty;
         defer page_value.deinit(self.gpa);
@@ -566,6 +604,21 @@ pub const Builder = struct {
     }
 };
 
+/// Where `font_embed` puts a font's objects while a file is written.
+const TailSink = struct {
+    tail: *Tail,
+
+    pub fn add(self: *TailSink, o: Object) Error!object.Ref {
+        const num = try self.tail.newNumber();
+        try self.set(.{ .num = num }, o);
+        return .{ .num = num };
+    }
+
+    pub fn set(self: *TailSink, ref: object.Ref, o: Object) Error!void {
+        if (o == .stream) try self.tail.addStream(ref.num, o) else try self.tail.add(ref.num, o);
+    }
+};
+
 /// The builder's objects for what a canvas draws with.
 const Drawn = struct {
     builder: *Builder,
@@ -578,6 +631,30 @@ const Drawn = struct {
             builder.drawn_fonts.set(font, num);
         }
         return .{ .num = builder.drawn_fonts.get(font) };
+    }
+
+    pub fn embeddedObject(self: *Drawn, _: Allocator, use: *const draw.EmbeddedUse) Error!object.Ref {
+        const builder = self.builder;
+        const gpa = builder.gpa;
+        const entry = builder.drawn_embedded.get(use.font.digest) orelse added: {
+            try builder.drawn_embedded.ensureUnusedCapacity(gpa, 1);
+            try builder.charge(use.font.data.len);
+            const num = try builder.newNumber();
+            const made = try gpa.create(Builder.Embedded);
+            errdefer gpa.destroy(made);
+            made.* = .{ .font = try use.font.clone(gpa), .num = num };
+            builder.drawn_embedded.putAssumeCapacity(use.font.digest, made);
+            break :added made;
+        };
+        // A page that fails afterwards leaves its glyphs counted: the font
+        // would then hold a little more than it needs.
+        const arena = builder.arena.allocator();
+        for (use.used.keys(), use.used.values()) |glyph, text| {
+            if (entry.used.get(glyph)) |old| if (!font_embed.preferred(text, old)) continue;
+            try builder.charge(text.len);
+            try entry.used.put(gpa, glyph, try arena.dupe(u8, text));
+        }
+        return .{ .num = entry.num };
     }
 
     /// An image XObject, with its alpha as a soft mask.
@@ -656,6 +733,12 @@ pub const Tail = struct {
         defer value.deinit();
         serial.writeObject(&value.writer, o) catch return error.OutOfMemory;
         try self.addValue(num, value.written());
+    }
+
+    /// Adds stream `o` as object `num`, as it is.
+    pub fn addStream(self: *Tail, num: u32, o: Object) Error!void {
+        self.locations.items[num] = .{ .at = self.base + self.out.written().len };
+        try putObject(&self.out.writer, num, o);
     }
 
     fn addValue(self: *Tail, num: u32, value: []const u8) Error!void {

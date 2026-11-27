@@ -272,6 +272,9 @@ pub const Error = error{
     TooManyObjects,
     /// An object number that is neither in the file nor handed out by `add`.
     InvalidObject,
+    /// A `draw.Stamp` placed text in an embedded font and `finish` has not run
+    /// since: the font is not written yet.
+    UnfinishedStamp,
     OutOfMemory,
     WriteFailed,
 };
@@ -281,6 +284,8 @@ pub const Error = error{
 pub const Update = struct {
     doc: *Document,
     arena: std.heap.ArenaAllocator,
+    /// Fonts that a `draw.Stamp` has still to write.
+    unfinished: u32 = 0,
     /// Object number to its new value, in the order they were set.
     changed: std.AutoArrayHashMapUnmanaged(u32, Object) = .empty,
     next: u32,
@@ -351,6 +356,7 @@ pub const Update = struct {
     /// Writes the original file followed by the update.
     pub fn write(self: *Update, gpa: Allocator, w: *Io.Writer) Error!void {
         const doc = self.doc;
+        if (self.unfinished != 0) return error.UnfinishedStamp;
         // A bad entry found since `init` rebuilds the document: the file's own
         // cross-reference data cannot be pointed at any more.
         if (doc.repaired) return error.Repaired;
