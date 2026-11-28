@@ -82,6 +82,29 @@ value. `flatten.widgets` turns a page's fields into page content; it keeps hidde
 and signatures, and the old values stay inside the file. Signature fields are listed, not
 filled; XFA forms are not read; no scripts run.
 
+## Signatures
+
+```zig
+// Allocate from an arena. `password` is the one the document was opened with.
+for (try pdf.signature.list(arena, &doc, list, .{})) |s| {
+    // s.claims: name, date, reason, location, contact. Anyone can write anything there.
+    switch (s.coverage) {
+        .sound => {},                      // all of a revision but the signature's own value
+        .unsound => |defect| _ = defect,   // why the byte range cannot be relied on
+    }
+    switch (s.after) {                     // .unknown, .nothing or .changed
+        .changed => |c| _ = c.objects,     // added, replaced and removed objects
+        else => {},
+    }
+    const signed = pdf.signature.signedRevision(&doc, s); // open it to show that revision
+}
+```
+
+**pdf-zig does not verify signatures.** No digest, certificate or chain is checked, so a
+listed signature may be forged, and sound coverage alone says nothing about who signed or
+whether the signed bytes were altered. It also does not judge whether later changes are
+allowed. Do not show any of this as "valid".
+
 ## Drawing new pages
 
 ```zig
@@ -196,8 +219,8 @@ compare with `pdftotext` and `pdfinfo`.
 (highlight a word and add a note), `pdffill` (list or fill form fields) and `pdfpages` (a new
 PDF from chosen pages of others, as in `pdfpages out.pdf a.pdf:3,1,5-9 b.pdf`). `pdfdraw`
 makes a sample document with the drawing functions, and `pdfstamp` puts a watermark and
-page numbers on an existing one. `pdfsurvey` names the features a
-file uses.
+page numbers on an existing one. `pdfsigs` lists signatures without verifying them, and can
+save what one covers. `pdfsurvey` names the features a file uses.
 
 ## Tests
 
@@ -205,7 +228,7 @@ file uses.
 (with LZW data from libtiff and fax data from Ghostscript), documents (xref forms, repair,
 hostile input, token-level mutation), encrypted files made with qpdf, content streams,
 fonts, CMaps, functions, colour, the interpreter, text extraction, images, writing,
-links and new documents.
+links, new documents and signature listing.
 It also passes for `x86-linux` and in the release modes. Changes between releases are in
 `docs/CHANGELOG.md`.
 

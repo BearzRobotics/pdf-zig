@@ -1,8 +1,8 @@
 # 0006: Digital signatures
 
 Status: accepted by the maintainer in conversation, with all three recommendations under
-"Questions for the maintainer". Nothing is implemented yet. This is stage 3 of
-`docs/ROADMAP.md`.
+"Questions for the maintainer". **S1 is implemented** (see "S1 as built"); S2 and S3 are
+not. This is stage 3 of `docs/ROADMAP.md`.
 
 ## Problem
 
@@ -141,6 +141,51 @@ operation supplied by the caller.
 | S3 | chains and revocation | whether the signer is trusted by the caller's anchors |
 
 S1 can be released on its own.
+
+## S1 as built
+
+Implemented in `src/signature.zig`; how it works is in `docs/architecture.md`,
+"Signatures". Where it differs from or adds to the proposal:
+
+- The example is `pdfsigs`, not `pdfsig-info`.
+- **Limits** were added after review: a 1.2 MB file in which 1,000 fields named one
+  signature made the first version use about 700 MB (about 7 MB with the limits). Only
+  `max_examined` signatures are read, and values, claim text, lock names and listed
+  changes are bounded. New defects `value_too_large` and `not_examined`; `Lock.complete`
+  and `Changes.omitted` say when something was left out.
+- Content after the signed bytes does not make coverage unsound. It is reported as
+  changed, unlike the CCS 2019 algorithm, which refuses such a signature.
+
+**Checked (2026-11-28).**
+
+- Attack cases: the paper by Mladenov et al. (CCS 2019), its attack figures and listing 2,
+  was read, as were the attack pages of pdf-insecurity.org. The figures on those pages
+  were not readable. Tests cover the USF, ISA and SWA structures described in the paper,
+  hide-and-replace, and a signature whose `/V` leads nowhere. They are rebuilt from the
+  descriptions, not the authors' files. The other shadow and certification attacks change
+  what is shown by permitted or ordinary updates, which S1 only reports as changes.
+- Poppler: `test/tools/sigcheck.py` compared 21 signatures in fields (6 signed by the
+  script with OpenSSL, which Poppler calls valid; 15 from the maintainer's collection) and,
+  separately, the 2 in this machine's system files. No difference in the ranges. Poppler
+  lists no signature that only the permissions name, and for values it cannot read
+  (`adbe.x509.rsa_sha1` here) says "not total document signed", so that flag was not
+  compared for them. MuPDF was not compared.
+- Fuzzing: `test/tools/fuzz.py` now runs `pdfsigs` too. No crash or hang on mutated real
+  files, and a seeded mutation test is among the unit tests.
+- Survey of 2,000 books (the same sample size and seed as before): 17 signed, 15 with a
+  certification and 2 with usage rights. Coverage: 15 sound with nothing after, 1 sound
+  with later changes, 1 unsound (`gap_is_not_value`: its byte range leaves out bytes about
+  2.8 MB before the value, so the ranges are wrong for that file). Poppler lists neither
+  of the two files it was asked about that have only usage rights.
+- System PDFs (12,952): 2 signed, both sound; no crash or timeout.
+
+**For S2: 14 of the 16 signature values read from the books start with an indefinite
+length, which is BER, not DER.** The other 2 have a definite length (not checked further
+for DER). A strict DER reader would not do. This answers the open measurement under
+"What files contain" only that far.
+
+**Not done:** no one but its author (Claude) has reviewed the code. The review this record
+asks for applies to S2 and S3.
 
 ## Testing
 

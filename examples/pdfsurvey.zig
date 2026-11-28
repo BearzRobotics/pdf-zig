@@ -50,6 +50,7 @@ fn survey(gpa: std.mem.Allocator, a: std.mem.Allocator, doc: *pdf.Document, foun
     if (doc.crypt != null) try found.put(a, "encrypted", {});
     const list = try pdf.pages.PageList.build(doc);
     try forms(a, doc, list, found);
+    try signatures(a, doc, list, found);
     if (doc.catalog()) |catalog| {
         for ([_]struct { []const u8, []const u8 }{
             .{ "Outlines", "bookmarks" },
@@ -93,16 +94,27 @@ fn forms(a: std.mem.Allocator, doc: *pdf.Document, list: pdf.pages.PageList, fou
         try found.put(a, "form", {});
         const kind = try std.fmt.allocPrint(a, "field:{t}", .{field.kind});
         try found.put(a, kind, {});
-        if (field.kind != .signature or field.num == 0) continue;
-        const d = doc.getObject(field.num).asDict() orelse continue;
-        const value = doc.getDict(d, "V") orelse continue;
+    }
+}
+
+/// Signatures: their formats, and what the coverage rules make of real ones.
+fn signatures(a: std.mem.Allocator, doc: *pdf.Document, list: pdf.pages.PageList, found: *Found) !void {
+    var arena = std.heap.ArenaAllocator.init(doc.arena.child_allocator);
+    defer arena.deinit();
+    for (try pdf.signature.list(arena.allocator(), doc, list, .{})) |s| {
         try found.put(a, "signed", {});
-        // The signature's format (table 252).
-        if (doc.getName(value, "SubFilter")) |sub| {
+        try found.put(a, try std.fmt.allocPrint(a, "signature-kind:{t}", .{s.kind}), {});
+        if (s.sub_filter) |sub| {
             for ([_][]const u8{ "adbe.pkcs7.detached", "adbe.pkcs7.sha1", "adbe.x509.rsa_sha1", "ETSI.CAdES.detached", "ETSI.RFC3161" }) |known| {
                 if (std.mem.eql(u8, sub, known)) try found.put(a, try std.fmt.allocPrint(a, "signature:{s}", .{known}), {});
             }
         }
+        switch (s.coverage) {
+            .sound => try found.put(a, try std.fmt.allocPrint(a, "signature-coverage:sound-after-{t}", .{s.after}), {}),
+            .unsound => |defect| try found.put(a, try std.fmt.allocPrint(a, "signature-coverage:{t}", .{defect}), {}),
+        }
+        // How the value is encoded, which a verifier will have to read.
+        if (s.value.len >= 2) try found.put(a, if (s.value[0] == 0x30 and s.value[1] == 0x80) "signature-value:indefinite-length" else if (s.value[0] == 0x30) "signature-value:definite-length" else "signature-value:other", {});
     }
 }
 

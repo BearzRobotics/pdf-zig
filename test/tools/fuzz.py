@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # usage: fuzz.py LIST FILES MUTATIONS [SEED]
 # Damages up to FILES of the PDFs in LIST (2 KB to 400 KB) MUTATIONS times each
-# and runs `pdfinfo -r` on the results, then `pdfpages`, `pdffill --flatten` and
+# and runs `pdfinfo -r` and `pdfsigs` on the results, then `pdfpages`, `pdffill --flatten` and
 # `pdfstamp`, whose outputs must open without repair. Inputs that crash, hang or give a damaged copy are saved in
 # the output directory ($PDFZIG_FUZZ_OUT, or a new temporary one).
 # Exit status: 0 no crashes or hangs, 1 otherwise or if nothing was run.
@@ -30,6 +30,7 @@ def main():
     pages = binary("pdfpages")
     fill = binary("pdffill")
     stamp = binary("pdfstamp")
+    sigs = binary("pdfsigs")
     sources = [f for f in file_list(sys.argv[1]) if 2000 < os.path.getsize(f) < 400000][:int(sys.argv[2])]
     rnd = random.Random(int(sys.argv[4]) if len(sys.argv) > 4 else 1)
     out = os.environ.get("PDFZIG_FUZZ_OUT") or tempfile.mkdtemp(prefix="pdfzig-fuzz-")
@@ -52,6 +53,10 @@ def main():
                 if r.returncode not in (0, 1):
                     what, detail = f"status {r.returncode}", r.stderr.decode("utf8", "replace")[:300]
                 sound = b"repaired=false" in r.stdout + r.stderr
+                if not what:
+                    r = subprocess.run([sigs, current], capture_output=True, timeout=30)
+                    if r.returncode not in (0, 1):
+                        what, detail = f"pdfsigs status {r.returncode}", r.stderr.decode("utf8", "replace")[:300]
                 # Each program that writes a file: what it writes must be sound.
                 for command, made in (([pages, copy, current], copy), ([fill, current, flat, "--flatten"], flat),
                                       ([stamp, current, marked, "DRAFT"], marked)):

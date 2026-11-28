@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- New module `signature`: lists a document's signatures with what each claims (kind,
+  certification level, field locks, name, date, reason), whether its byte range covers a
+  whole revision but its own value, and which objects changed afterwards. **Nothing is
+  verified.** New example `pdfsigs`, which can also save the signed revision.
+- No existing public function or type changed.
+
 ## 0.6.0 (2026-11-27)
 
 - Drawn text can use an embedded TrueType font: new `truetype.Font` and

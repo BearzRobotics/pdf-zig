@@ -130,6 +130,41 @@ way to change a PDF: it appends to the file and keeps everything in it.
 - **Encrypted sources** need `ImportOptions.allow_decrypted_output`, as the output is not
   encrypted. Repaired sources are fine.
 
+## Signatures
+
+`signature.zig` lists signatures and what they cover (ISO 32000-1 12.8; decision 0006,
+step S1). It does no cryptography.
+
+- **What is listed:** the value of each signature field that the form lists, then any
+  signature that only the permissions dictionary names (`DocMDP`, `UR3`). A later change
+  can take a signature out of the form, so an empty list does not mean "never signed".
+- **Where the dictionary is.** The coverage rules need byte positions, so the dictionary
+  is parsed again from the file text, undecrypted. One inside an object stream has no
+  place in the file and is unsound (`not_in_file`).
+- **Sound coverage** means all of: the file did not need repair; `/ByteRange` is four
+  direct whole numbers, `[0 a b c]` with `0 < a < b` and `c > 0`, inside the file; the gap
+  is exactly this dictionary's `/Contents` in hexadecimal, found by position, and not all
+  zeros; the signed bytes end with `%%EOF` (and white space); and opened on their own,
+  without repair, they lead to the dictionary at the same offset, through a field their
+  own form lists or through their permissions dictionary.
+- **Sources of the rules:** the verification algorithm of Mladenov et al. (CCS 2019,
+  listing 2), except that content after the signed bytes is reported in `After` instead
+  of refusing the signature, so that earlier signatures of a file stay usable. The checks
+  of position and of the signed revision are pdf-zig's additions.
+- **Changes** compare where the two cross-reference tables take each object from, and
+  which objects the trailers name. This says which objects differ, not what that does to
+  a page, and **can be empty although the file changed** (content appended without a table
+  that a repairing reader would show). `After.nothing` is only reported when white space
+  alone follows. Whether changes are permitted is not judged.
+- **Limits.** Any number of fields can name one large dictionary, so: `max_examined`
+  signatures are read (the rest are `not_examined`); values are limited by
+  `max_value_bytes` and `max_all_values_bytes`; claims and lock names share
+  `max_listed_bytes`; `max_changes` objects are listed and the rest counted. Each examined
+  signature opens its signed revision again, so time grows with signatures times file size.
+- **Ownership.** Results are allocated from the caller's arena and do not borrow from the
+  document, except `signedRevision`, a slice of the document's bytes. Temporary parses and
+  the reopened revision are freed before `list` returns.
+
 ## Drawing
 
 `draw.Canvas` records content for a page of a given size. Its coordinates are the page as
@@ -225,6 +260,9 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
+- Verifying signatures: digests, certificates, chains, revocation and time stamps
+  (decision 0006, steps S2 and S3), and creating signatures. Whether changes after
+  signing are permitted is not judged.
 - In new documents: encryption.
 - Embedding fonts with CFF outlines (`.otf`) or from collections (`.ttc`), and text
   shaping.

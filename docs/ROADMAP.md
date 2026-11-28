@@ -104,7 +104,8 @@ attachments into new documents.
 
 ## Stage 3: signatures
 
-Design: `docs/decisions/0006-signatures.md` (accepted).
+Design: `docs/decisions/0006-signatures.md` (accepted). **Progress:** S1 is done, not yet
+released; 0006 records how it was checked. S2 is next.
 
 | Step | Size | Notes |
 |---|---|---|

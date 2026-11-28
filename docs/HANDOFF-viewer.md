@@ -91,6 +91,24 @@ The viewer needs to add these. None needs new drawing code.
 | Clickable links | `link.list(arena, &doc, list, page)`: rectangle in user space, and a page, a URI, a named action or `unsupported` | Hit-test with the inverse of `baseMatrix`, as annotations are. **A URI is untrusted:** open only schemes you choose (`http`, `https`, `mailto`), show the address, and ask first. Never run `file:` or anything else |
 | Extract, delete, reorder, merge, split, rotate pages | `compose.Builder` | See below |
 
+### Signatures (not yet in a release)
+
+`signature.list` (see `README.md`) tells the viewer who is *claimed* to have signed, which
+bytes are covered and what changed afterwards. **Nothing is verified**, so the viewer
+must never show a signature as valid, with a check mark, or in a colour that reads as
+approval. Wording such as "Signature present, not verified" is safe.
+
+- Show `claims` as claims. They and field names are untrusted text: strip control and
+  text-reordering characters, as `examples/pdfsigs.zig` does.
+- For unsound coverage, say that the signature cannot be relied on, with the defect.
+- For `after == .changed`, say that the file changed after signing, even when
+  `objects` is empty, and offer to open `signedRevision` as its own document. Do not say
+  whether the change was allowed. A signed revision can itself hide content that a later
+  change reveals, so do not call it "what the signer saw".
+- An empty list does not mean the file was never signed.
+- Pass the document's password in `Options`. Listing reopens the file once per signature,
+  so do not run it on the UI thread.
+
 ### Page operations
 
 `compose.Builder` writes a **new** document; it never changes the open one. Read
