@@ -104,16 +104,18 @@ attachments into new documents.
 
 ## Stage 3: signatures
 
-| Item | Size | Notes |
-|---|---|---|
-| List signatures: who is named, when, which bytes each covers, whether the file was changed after (12.8) | M | no cryptography |
-| Verify: digest, CMS signature, certificate chain | XL | what to trust is the caller's decision |
-| Create signatures | XL | after verification; appends to the file as `write.Update` does |
+Design: `docs/decisions/0006-signatures.md` (accepted).
 
-Zig's standard library has certificate and RSA verification code. Whether it covers what
-CMS needs has **not** been checked; that is the first task of this stage's design. This is
-security code: a wrong "valid" is worse than no answer. Prefer letting the caller supply
-the private key operations, and get it reviewed.
+| Step | Size | Notes |
+|---|---|---|
+| S1: list signatures: who is claimed, which bytes each covers, what changed afterwards (12.8) | M | no cryptography; releasable on its own |
+| S2: integrity, through a verifier interface and an optional OpenSSL module | L | check the license combination first |
+| S3: the signer's chain and revocation | L | what to trust is the caller's decision |
+| Create signatures | XL | needs its own design, after verification |
+
+This is security code: a wrong "valid" is worse than no answer. Zig's
+`std.crypto.Certificate` is not safe for data from a PDF (see 0006). S2 and S3 should be
+reviewed by someone else before they are called ready.
 
 ## Stage 4: scans
 
