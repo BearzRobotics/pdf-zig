@@ -165,6 +165,29 @@ step S1). It does no cryptography.
   document, except `signedRevision`, a slice of the document's bytes. Temporary parses and
   the reopened revision are freed before `list` returns.
 
+### The verifier interface
+
+`verify.zig` asks a verifier that the program supplies whether a listed signature's signed
+bytes are unaltered (decision 0006, step S2). **Experimental.** pdf-zig has no backend yet
+and does no cryptography.
+
+- **`check` does what must not differ between backends.** The verifier is not asked unless
+  the coverage is sound, the signature fits the document it is checked against (ranges in
+  bounds, and the gap decodes to this value) and `/SubFilter` names a known format. It is
+  handed slices of the document's own bytes. It refuses `intact` without a certificate or
+  key size, and the two reasons only `check` can know. It decides what is weak.
+- **A verifier's contract:** exactly one signer; `intact` only if both the digest of the
+  signed bytes and the signature were checked; `altered` only for a check that was made
+  and failed, otherwise `not_checked` with a reason; zeros may follow the structure in
+  the value, and nothing else; the value may be BER.
+- **What the types enforce:** `intact` carries the certificate, digest and key.
+- **What nothing enforces:** that the answer is true. A backend is security code.
+- `check` is not a re-check of coverage: pass it what `signature.list` returned.
+- The report has no "valid", and has no field yet for the chain, revocation or a verified
+  time (S3).
+- **Ownership:** the verifier's answer is allocated from the caller's arena. The report
+  also refers to the signature's data. The request is borrowed for the call only.
+
 ## Drawing
 
 `draw.Canvas` records content for a page of a given size. Its coordinates are the page as
@@ -260,8 +283,9 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- Verifying signatures: digests, certificates, chains, revocation and time stamps
-  (decision 0006, steps S2 and S3), and creating signatures. Whether changes after
+- Verifying signatures: there is an interface (`verify.zig`) but no backend, so nothing
+  checks digests or signatures yet (decision 0006, step S2). Chains, revocation and
+  verified time stamps (S3), and creating signatures, are not supported. Whether changes after
   signing are permitted is not judged.
 - In new documents: encryption.
 - Embedding fonts with CFF outlines (`.otf`) or from collections (`.ttc`), and text

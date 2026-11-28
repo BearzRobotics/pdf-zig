@@ -142,6 +142,51 @@ operation supplied by the caller.
 
 S1 can be released on its own.
 
+## S2: settled and found so far (2026-11-28)
+
+**OpenSSL 3.5 LTS** (the maintainer's decision: their distribution stays on it). Use
+nothing newer, and check against 3.5's headers and manual pages.
+
+From the 3.5.5 manual page `CMS_verify(3)`:
+
+- Signer chains are checked for the `smimesign` purpose by default. Which purposes count
+  for a document signature is still to be settled, in S3.
+- `CMS_NO_SIGNER_CERT_VERIFY` leaves out the chain check, which is what S2 needs. Its
+  result says nothing about trust.
+- `CMS_NO_CONTENT_VERIFY` makes altered content pass, and `CMS_NO_ATTR_VERIFY` leaves the
+  signed attributes unchecked. Neither may be set.
+- Success means that all signers verified, so "exactly one signer" has to be checked
+  separately (`CMS_get0_SignerInfos`).
+
+**Licensing: the maintainer's decision.** `pdf_openssl` stays LGPL-2.0-or-later, like the
+rest, with a note that a build including OpenSSL should be distributed under LGPL version
+3 or later. Nothing is relicensed, and builds without the module are not affected.
+
+What it rests on. Read: the FSF's license list, the ASF's page on GPL compatibility,
+OpenSSL's license page, and the texts of LGPL-2.1 and LGPL-3.0 (not LGPL-2.0 or
+Apache-2.0). The FSF says Apache-2.0 is compatible with GPL version 3 and not with
+version 2. None of what was read says either way for the LGPL. Our inference, which is not
+legal advice: "or later" lets whoever distributes such a build use LGPL-3.0, which is GPL
+version 3 with added permissions.
+
+### The interface
+
+Built in `src/verify.zig`, marked experimental while there is only one implementation to
+come; how it works is in `docs/architecture.md`. Choices beyond the proposal:
+
+- `intact` cannot be given without the signer's certificate, the digest and the key, so
+  that pdf-zig decides what is weak, the same way for every backend (SHA-1, MD5,
+  RIPEMD-160; RSA and DSA under 2048 bits, elliptic curves under 224). These thresholds
+  are this project's choice, not taken from a standard.
+- Chain, revocation and verified time have no fields until S3.
+- `adbe.x509.rsa_sha1` is reported as an unsupported format: it needs the dictionary's
+  `/Cert`, which S1 does not read. Both signed system PDFs here use it.
+
+The tests use a stand-in verifier without cryptography: they test what `check` asks and
+accepts, and each of six safeguards was removed in turn to see a test fail. **Still to
+come with `pdf_openssl`:** the shared files that every backend must answer correctly
+(signed, altered, malformed, several signers, BER).
+
 ## S1 as built
 
 Implemented in `src/signature.zig`; how it works is in `docs/architecture.md`,

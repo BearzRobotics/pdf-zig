@@ -10,26 +10,26 @@ const pdf = @import("root.zig");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const signature = pdf.signature;
-const buildFile = @import("interp_tests.zig").buildFile;
+pub const buildFile = @import("interp_tests.zig").buildFile;
 
 /// Ten digits each, so that filling them in moves nothing.
-const holder = "[0 AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC]";
+pub const holder = "[0 AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC]";
 const value_hex = "<3003020101000000000000000000000000000000>";
 
-fn dictText(comptime extra: []const u8) []const u8 {
+pub fn dictText(comptime extra: []const u8) []const u8 {
     return "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange " ++
         holder ++ " /Contents " ++ value_hex ++ extra ++ " >>";
 }
 
-const catalog = "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>";
-const tree = "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>";
-const page = "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>";
-const widget = "<< /Type /Annot /Subtype /Widget /FT /Sig /T (signed) /Rect [0 0 0 0] /V 5 0 R >>";
+pub const catalog = "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>";
+pub const tree = "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>";
+pub const page = "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>";
+pub const widget = "<< /Type /Annot /Subtype /Widget /FT /Sig /T (signed) /Rect [0 0 0 0] /V 5 0 R >>";
 
 /// Fills in the byte range of the dictionary at the first placeholder, so that
 /// it leaves out the `/Contents` value that follows it and covers the whole of
 /// `bytes`.
-fn seal(bytes: []u8) void {
+pub fn seal(bytes: []u8) void {
     const at = std.mem.indexOf(u8, bytes, holder).?;
     const open = std.mem.indexOfPos(u8, bytes, at, "/Contents <").? + "/Contents ".len;
     const close = std.mem.indexOfScalarPos(u8, bytes, open, '>').? + 1;
@@ -38,13 +38,13 @@ fn seal(bytes: []u8) void {
     @memcpy(bytes[at..][0..holder.len], &text);
 }
 
-fn simple(a: Allocator, dict: []const u8) ![]u8 {
+pub fn simple(a: Allocator, dict: []const u8) ![]u8 {
     const bytes = try buildFile(a, &.{ catalog, tree, page, widget, dict });
     seal(bytes);
     return bytes;
 }
 
-const New = struct { num: u32, body: []const u8 };
+pub const New = struct { num: u32, body: []const u8 };
 
 fn lastStartxref(bytes: []const u8) usize {
     const at = std.mem.lastIndexOf(u8, bytes, "startxref\n").? + "startxref\n".len;
@@ -53,7 +53,7 @@ fn lastStartxref(bytes: []const u8) usize {
 }
 
 /// `base` with a further revision that writes `objects`.
-fn update(a: Allocator, base: []const u8, objects: []const New, trailer: []const u8) ![]u8 {
+pub fn update(a: Allocator, base: []const u8, objects: []const New, trailer: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(a, base);
     const offsets = try a.alloc(usize, objects.len);

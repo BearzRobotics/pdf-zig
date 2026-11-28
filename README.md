@@ -105,6 +105,10 @@ listed signature may be forged, and sound coverage alone says nothing about who 
 whether the signed bytes were altered. It also does not judge whether later changes are
 allowed. Do not show any of this as "valid".
 
+`verify.check` (**experimental**) hands a signature to a verifier that your program
+supplies and reports whether the signed bytes are intact, altered or not checked. pdf-zig
+includes no verifier yet. Even `intact` says nothing about who signed.
+
 ## Drawing new pages
 
 ```zig

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New module `verify` (**experimental**): `verify.check` asks a `verify.Verifier` that the
+  program supplies whether a signature's signed bytes are unaltered. **No verifier is
+  included yet.**
+
 ## 0.7.0 (2026-11-28)
 
 - New module `signature`: lists a document's signatures with what each claims (kind,

@@ -39,6 +39,7 @@ pub const draw = @import("draw.zig");
 pub const truetype = @import("truetype.zig");
 pub const form = @import("form.zig");
 pub const signature = @import("signature.zig");
+pub const verify = @import("verify.zig");
 pub const Object = object.Object;
 pub const Dict = object.Dict;
 pub const Ref = object.Ref;
@@ -77,6 +78,8 @@ test {
     _ = @import("form_font_tests.zig");
     _ = @import("signature.zig");
     _ = @import("signature_tests.zig");
+    _ = @import("verify.zig");
+    _ = @import("verify_tests.zig");
     _ = @import("font_embed.zig");
     _ = @import("page_edit.zig");
     _ = @import("draw_tests.zig");

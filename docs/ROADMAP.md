@@ -105,7 +105,8 @@ attachments into new documents.
 ## Stage 3: signatures
 
 Design: `docs/decisions/0006-signatures.md` (accepted). **Progress:** S1 is done and released
-in 0.7.0; 0006 records how it was checked. S2 is next.
+in 0.7.0; 0006 records how it was checked. In S2, the verifier interface is built; the
+OpenSSL module is next.
 
 | Step | Size | Notes |
 |---|---|---|
@@ -138,6 +139,13 @@ JPEG, JPX and CCITT scans work today (the viewer's codec decodes the first two).
   [2000 edition](https://www.itu.int/rec/T-REC-T.88-200002-S). Access to the current text
   and a source of test files are unchecked.
 - **Leave it to the viewer**, as with JPEG and JPX today.
+
+## Stage 5: Asian text
+
+The maintainer's decision (2026-11-28): this follows stage 4, and the stages are done
+**in order**. The items are under "Text" below: predefined CJK CMaps with their data as
+an optional module, and vertical writing. What else the stage takes in is to be settled
+when it starts.
 
 ## Later, as it comes
 
@@ -219,6 +227,7 @@ keeps what 0003 lists.
 | 0.7.0 | Stage 3, step S1: listing signatures (released) |
 | 0.8.0 | Stage 3: verifying signatures (S2 and S3) |
 | 0.9.0 | Stage 4: scans |
+| after that | Stage 5: Asian text |
 | later | The rest, as it comes |
 
 Version numbers are a guess; a stage may need more than one release.
