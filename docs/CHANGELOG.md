@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-11-28)
 
 - New module `signature`: lists a document's signatures with what each claims (kind,
   certification level, field locks, name, date, reason), whether its byte range covers a

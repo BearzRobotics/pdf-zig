@@ -104,8 +104,8 @@ attachments into new documents.
 
 ## Stage 3: signatures
 
-Design: `docs/decisions/0006-signatures.md` (accepted). **Progress:** S1 is done, not yet
-released; 0006 records how it was checked. S2 is next.
+Design: `docs/decisions/0006-signatures.md` (accepted). **Progress:** S1 is done and released
+in 0.7.0; 0006 records how it was checked. S2 is next.
 
 | Step | Size | Notes |
 |---|---|---|
@@ -216,8 +216,9 @@ keeps what 0003 lists.
 |---|---|
 | 0.5.0 | Stage 0 and stage 1: survey and forms |
 | 0.6.0 | Stage 2: creating documents (released; carrying information over is still open) |
-| 0.7.0 | Stage 3: signatures (listing and verification) |
-| 0.8.0 | Stage 4: scans |
+| 0.7.0 | Stage 3, step S1: listing signatures (released) |
+| 0.8.0 | Stage 3: verifying signatures (S2 and S3) |
+| 0.9.0 | Stage 4: scans |
 | later | The rest, as it comes |
 
 Version numbers are a guess; a stage may need more than one release.

@@ -7,7 +7,7 @@ what changed in the library and **which features the viewer needs to add**.
 Work on pdf-zig does not change viewer code: it only records here what the viewer needs.
 
 **This file is kept up to date by whoever changes pdf-zig:** anything that needs work in
-the viewer is added here in the same commit. Last updated 2026-11-27, for pdf-zig 0.6.0.
+the viewer is added here in the same commit. Last updated 2026-11-28, for pdf-zig 0.7.0.
 
 Read `dkde`'s own `ai/AGENTS.md` and docs first. Its rules govern that repository. Do not
 push or release unless asked. The maintainer is "they" if a pronoun is needed. For this
@@ -91,7 +91,7 @@ The viewer needs to add these. None needs new drawing code.
 | Clickable links | `link.list(arena, &doc, list, page)`: rectangle in user space, and a page, a URI, a named action or `unsupported` | Hit-test with the inverse of `baseMatrix`, as annotations are. **A URI is untrusted:** open only schemes you choose (`http`, `https`, `mailto`), show the address, and ask first. Never run `file:` or anything else |
 | Extract, delete, reorder, merge, split, rotate pages | `compose.Builder` | See below |
 
-### Signatures (not yet in a release)
+### Signatures (0.7.0)
 
 `signature.list` (see `README.md`) tells the viewer who is *claimed* to have signed, which
 bytes are covered and what changed afterwards. **Nothing is verified**, so the viewer
@@ -146,6 +146,7 @@ catch-all at `161b555`, so a new command should stop the build. Keep it that way
 | 0.4.0 and earlier | The check build of section 1 needed no drawing change | none known |
 | 0.5.0 | No new drawing command. Generated appearances use the existing ones | none |
 | 0.6.0 | No new drawing command | none |
+| 0.7.0 | No new drawing command | none |
 
 **Planned, not built** (`docs/ROADMAP.md`; shapes will change):
 
@@ -166,8 +167,8 @@ work; the viewer will need an interface for each. Details follow here as they ar
 1. **Forms:** several list entries, reset, flatten and blank fields are in 0.5.0 (section 3).
 2. **Creating documents:** drawing on new and existing pages is in 0.5.0, embedded
    TrueType fonts for pages, forms and text boxes in 0.6.0 (section 3).
-3. **Signatures:** show who signed and whether the file changed afterwards, then the
-   result of verification. **Which certificates to trust is the application's decision.**
+3. **Signatures:** listing, with what changed afterwards, is in 0.7.0 (section 3);
+   verification is not built. **Which certificates to trust is the application's decision.**
    Never show "valid" for anything less than a full check.
 4. **Scans:** JBIG2 decoding is planned inside pdf-zig. JPEG and JPX stay with the
    viewer's codecs.
