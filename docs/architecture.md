@@ -168,8 +168,7 @@ step S1). It does no cryptography.
 ### The verifier interface
 
 `verify.zig` asks a verifier that the program supplies whether a listed signature's signed
-bytes are unaltered (decision 0006, step S2). **Experimental.** pdf-zig has no backend yet
-and does no cryptography.
+bytes are unaltered (decision 0006, step S2). **Experimental.** The core does no cryptography.
 
 - **`check` does what must not differ between backends.** The verifier is not asked unless
   the coverage is sound, the signature fits the document it is checked against (ranges in
@@ -187,6 +186,33 @@ and does no cryptography.
   time (S3).
 - **Ownership:** the verifier's answer is allocated from the caller's arena. The report
   also refers to the signature's data. The request is borrowed for the call only.
+
+### pdf_openssl
+
+`src/openssl/`, built only with `-Dopenssl=true`; the build translates the installed
+headers (`c.h`, which refuses releases before 3.5) and links `libcrypto`.
+
+- The value is read with `d2i_CMS_ContentInfo` (BER), and only zeros may follow it. It
+  must be signed data with one signer, detached exactly when the format is
+  `adbe.pkcs7.detached`.
+- `CMS_verify` runs with `CMS_BINARY` and `CMS_NO_SIGNER_CERT_VERIFY`. Detached content is
+  read from the two signed pieces through a source `BIO`, without joining them. For
+  `adbe.pkcs7.sha1` the content in the value is verified, then compared with the SHA-1 of
+  the signed bytes.
+- `altered` is answered only for OpenSSL's "verification failure", or that SHA-1
+  mismatch. A missing certificate and an unknown digest have their own reasons; every
+  other failure is `verifier_failed`.
+- CAdES and time stamps are `unsupported_format`: CAdES needs the certificate checked
+  against a signed attribute, which `CMS_verify` does only together with the chain.
+- The certificate in the evidence is the one whose key verified. Nothing binds its names
+  to the signature.
+- OpenSSL allocates for itself; its failures are `verifier_failed`, not
+  `error.OutOfMemory`. Calls clear the thread's OpenSSL error queue, and use the default
+  library context.
+- **Limits:** the value is at most `signature.max_value_bytes`. What OpenSSL's parser
+  does with it is not otherwise bounded by pdf-zig.
+
+`test/backend/` holds the signed files and answers that every backend is tested with.
 
 ## Drawing
 
@@ -283,9 +309,10 @@ smaller raised or lowered pieces join the nearest one within half a font size.
 
 ## Not supported
 
-- Verifying signatures: there is an interface (`verify.zig`) but no backend, so nothing
-  checks digests or signatures yet (decision 0006, step S2). Chains, revocation and
-  verified time stamps (S3), and creating signatures, are not supported. Whether changes after
+- Verifying signatures: only integrity, through `pdf_openssl` or a program's own backend
+  (decision 0006, step S2). CAdES, time stamps and `adbe.x509.rsa_sha1` are not checked.
+  Chains, revocation and verified time stamps (S3), and creating signatures, are not
+  supported. Whether changes after
   signing are permitted is not judged.
 - In new documents: encryption.
 - Embedding fonts with CFF outlines (`.otf`) or from collections (`.ttc`), and text

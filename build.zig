@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.0-or-later
-//! pdf-zig build script. `zig build test` runs the tests.
+//! pdf-zig build script. `zig build test` runs the tests; with `-Dopenssl=true`
+//! also those of the `pdf_openssl` module, which needs OpenSSL 3.5 or later.
+//! A change is only tested when both pass.
 
 const std = @import("std");
 
@@ -13,6 +15,24 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // The optional signature verifier. A dependent asks for it with the same
+    // option: `b.dependency("pdf", .{ .openssl = true })`.
+    const with_openssl = b.option(bool, "openssl", "Build pdf_openssl, which verifies signatures with OpenSSL 3.5 or later") orelse false;
+    const openssl_mod: ?*std.Build.Module = if (with_openssl) openssl: {
+        const headers = b.addTranslateC(.{
+            .root_source_file = b.path("src/openssl/c.h"),
+            .target = target,
+            .optimize = optimize,
+        }).createModule();
+        headers.linkSystemLibrary("crypto", .{});
+        break :openssl b.addModule("pdf_openssl", .{
+            .root_source_file = b.path("src/openssl/openssl.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "pdf", .module = mod }, .{ .name = "c", .module = headers } },
+        });
+    } else null;
 
     // A small program for trying the library out: `zig build` then `zig-out/bin/pdfinfo FILE`.
     const pdfinfo = b.addExecutable(.{
@@ -145,6 +165,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(pdfsigs);
+    // With OpenSSL, `pdfsigs` also says whether the signed bytes are unaltered.
+    const sigs_options = b.addOptions();
+    sigs_options.addOption(bool, "openssl", with_openssl);
+    pdfsigs.root_module.addOptions("build_options", sigs_options);
+    if (openssl_mod) |backend| pdfsigs.root_module.addImport("pdf_openssl", backend);
 
     // Encrypted sample files for the tests (made with qpdf; see test/fixtures/README.md).
     for ([_][]const u8{
@@ -168,4 +193,28 @@ pub fn build(b: *std.Build) void {
     }
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);
+
+    if (openssl_mod) |backend| {
+        // The files and expected answers that every verification backend shares.
+        const conformance = b.createModule(.{
+            .root_source_file = b.path("test/backend/conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pdf", .module = mod }},
+        });
+        for ([_][]const u8{
+            "rsa",           "ecdsa",               "rsa_pss",          "sha1",        "short_key",      "ber",
+            "no_attributes", "pkcs7_sha1",          "pkcs7_sha1_other", "two_signers", "no_certificate", "attached",
+            "attached_same", "pkcs7_sha1_detached",
+        }) |name| {
+            conformance.addAnonymousImport(b.fmt("{s}.pdf", .{name}), .{ .root_source_file = b.path(b.fmt("test/backend/{s}.pdf", .{name})) });
+        }
+        const backend_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/openssl/openssl_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "pdf_openssl", .module = backend }, .{ .name = "conformance", .module = conformance } },
+        }) });
+        test_step.dependOn(&b.addRunArtifact(backend_tests).step);
+    }
 }

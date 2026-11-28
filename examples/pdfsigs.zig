@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: LGPL-2.0-or-later
 //! Lists the signatures of a PDF, what each claims and covers, and what changed
-//! afterwards. **Nothing is verified.**
+//! afterwards. Built with `-Dopenssl=true`, it also says whether the signed bytes
+//! are unaltered. **It never says whether a signer can be trusted.**
 //!     pdfsigs [-p PASSWORD] IN.pdf
 //!     pdfsigs [-p PASSWORD] IN.pdf N OUT.pdf    save what signature N covers
 
 const std = @import("std");
 const pdf = @import("pdf");
+const with_openssl = @import("build_options").openssl;
+
+fn integrity(a: std.mem.Allocator, doc: *const pdf.Document, s: pdf.signature.Signature, w: *std.Io.Writer) !void {
+    if (!with_openssl) return;
+    const report = try pdf.verify.check(a, doc, s, @import("pdf_openssl").verifier());
+    switch (report.integrity) {
+        .intact => |e| {
+            try w.print("   integrity: intact ({t}, {t} {d} bits). WHO SIGNED IS NOT CHECKED\n", .{ e.digest, e.key.kind, e.key.bits });
+            if (report.weak.any()) try w.print("   WEAK ALGORITHM:{s}{s}\n", .{ if (report.weak.digest) " digest" else "", if (report.weak.key) " key" else "" });
+        },
+        .altered => try w.writeAll("   integrity: ALTERED, or the signature is not this certificate's\n"),
+        .not_checked => |why| try w.print("   integrity: not checked ({t})\n", .{why}),
+    }
+}
 
 /// Text from a file, with control characters, which could redraw a terminal,
 /// shown as `?`.
@@ -65,7 +80,8 @@ pub fn main(init: std.process.Init) !u8 {
     var out_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buf);
     const w = &stdout.interface;
-    try w.print("{d} signature(s). Nothing here is verified.\n", .{found.len});
+    const caveat = if (with_openssl) "No signer is checked: nothing here is known to be genuine." else "Nothing here is verified.";
+    try w.print("{d} signature(s). {s}\n", .{ found.len, caveat });
     for (found, 1..) |s, n| {
         try w.print("\n{d}. {t}", .{ n, s.kind });
         if (s.field_name.len > 0) try w.print(" in field \"{s}\"", .{try printable(a, s.field_name)});
@@ -85,6 +101,7 @@ pub fn main(init: std.process.Init) !u8 {
             },
             .unsound => |defect| try w.print("   COVERAGE NOT SOUND: {t}\n", .{defect}),
         }
+        try integrity(a, &doc, s, w);
         switch (s.after) {
             .unknown => {},
             .nothing => try w.writeAll("   nothing follows the signed bytes\n"),

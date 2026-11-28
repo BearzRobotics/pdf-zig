@@ -3,6 +3,8 @@
 # Compares `pdfsigs` with poppler's `pdfsig`: how many signatures each file has,
 # the bytes each one covers, and whether that is the whole file. Signatures that
 # only the permissions dictionary names are left out: poppler does not list them.
+# If `pdfsigs` was built with `-Dopenssl=true`, whether each is intact is also
+# compared with whether poppler calls it valid, where pdf-zig checked it.
 #
 # It first signs files of its own with a throwaway key (`openssl`; `qpdf` adds
 # the object-stream and encrypted forms), so that `pdfsig` also says whether the
@@ -138,7 +140,8 @@ def poppler(path, password):
     return found
 
 def pdfsigs(exe, path, password):
-    """For each signature: (covered ranges or the defect, whole file)."""
+    """For each signature: (covered ranges or the defect, whole file, "intact",
+    "altered" or None if integrity was not checked)."""
     options = ["-p", password] if password else []
     r = run(exe, *options, path)
     if r.returncode != 0:
@@ -153,9 +156,11 @@ def pdfsigs(exe, path, password):
         if sound:
             ranges = re.search(r"byte range: (\d+) (\d+) (\d+) (\d+)", block)
             a, b, c, d = (int(n) for n in ranges.groups())
-            found.append(((a, a + b, c, c + d), "nothing follows the signed bytes" in block))
+            verdict = re.search(r"integrity: (intact|ALTERED)", block)
+            found.append(((a, a + b, c, c + d), "nothing follows the signed bytes" in block,
+                          verdict.group(1).lower() if verdict else None))
         else:
-            found.append((re.search(r"COVERAGE NOT SOUND: (\w+)", block).group(1), False))
+            found.append((re.search(r"COVERAGE NOT SOUND: (\w+)", block).group(1), False, None))
     return found
 
 def main():
@@ -163,7 +168,7 @@ def main():
     for tool in ("pdfsig", "openssl"):
         if not shutil.which(tool):
             sys.exit(f"{tool} is needed")
-    compared, bad, unsound = 0, [], {}
+    compared, verdicts, bad, unsound = 0, 0, [], {}
     with tempfile.TemporaryDirectory(prefix="pdfzig-sig-") as work:
         files = own_files(work)
         own = len(files)
@@ -182,8 +187,12 @@ def main():
             if len(theirs) != len(ours):
                 bad.append((name, f"poppler lists {len(theirs)} signatures, pdf-zig {len(ours)}"))
                 continue
-            for (their_range, their_whole, _), (our_range, our_whole) in zip(theirs, ours):
+            for (their_range, their_whole, valid), (our_range, our_whole, verdict) in zip(theirs, ours):
                 compared += 1
+                if verdict:
+                    verdicts += 1
+                    if (verdict == "intact") != valid:
+                        bad.append((name, f"poppler valid: {valid}, pdf-zig: {verdict}"))
                 if isinstance(our_range, str):
                     unsound[our_range] = unsound.get(our_range, 0) + 1
                     if index < own and not (name == "object-streams" and our_range == "not_in_file"):
@@ -192,7 +201,8 @@ def main():
                     bad.append((name, f"ranges differ: {their_range} {our_range}"))
                 elif their_whole is not None and our_whole != their_whole:
                     bad.append((name, f"whole file: poppler {their_whole}, pdf-zig {our_whole}"))
-    print("files", len(files), "signatures compared", compared, "unsound", unsound, "disagreements", len(bad))
+    print("files", len(files), "signatures compared", compared, "integrity compared", verdicts,
+          "unsound", unsound, "disagreements", len(bad))
     for name, what in bad[:20]:
         print(f"  {name}: {what}")
     sys.exit(1 if bad or not compared else 0)

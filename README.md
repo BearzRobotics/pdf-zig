@@ -105,9 +105,26 @@ listed signature may be forged, and sound coverage alone says nothing about who 
 whether the signed bytes were altered. It also does not judge whether later changes are
 allowed. Do not show any of this as "valid".
 
-`verify.check` (**experimental**) hands a signature to a verifier that your program
-supplies and reports whether the signed bytes are intact, altered or not checked. pdf-zig
-includes no verifier yet. Even `intact` says nothing about who signed.
+`verify.check` (**experimental**) hands a signature to a verifier and reports whether the
+signed bytes are intact, altered or not checked. **Even `intact` says nothing about who
+signed:** no certificate is checked, so the name on it is unproven.
+
+The optional module `pdf_openssl` is such a verifier, on OpenSSL 3.5 or later. Ask for it
+with the build option, and import it beside `pdf`:
+
+```zig
+const dep = b.dependency("pdf", .{ .target = target, .optimize = optimize, .openssl = true });
+exe.root_module.addImport("pdf_openssl", dep.module("pdf_openssl"));
+```
+
+```zig
+const report = try pdf.verify.check(arena, &doc, s, @import("pdf_openssl").verifier());
+```
+
+It needs the OpenSSL development files to build (`libssl-dev` on Debian and Ubuntu). It
+checks `adbe.pkcs7.detached` and `adbe.pkcs7.sha1`; others are "not checked". A program
+that includes OpenSSL should be distributed under LGPL version 3 or later (see
+`docs/decisions/0006-signatures.md`).
 
 ## Drawing new pages
 
@@ -233,7 +250,12 @@ save what one covers. `pdfsurvey` names the features a file uses.
 hostile input, token-level mutation), encrypted files made with qpdf, content streams,
 fonts, CMaps, functions, colour, the interpreter, text extraction, images, writing,
 links, new documents and signature listing.
-It also passes for `x86-linux` and in the release modes. Changes between releases are in
+`zig build test -Dopenssl=true` adds the tests of `pdf_openssl` on the signed files in
+`test/backend/`; **a change is tested only when both commands pass.**
+
+`scripts/test-musl.sh` runs both, in all four build modes, on musl: in an Alpine container
+against Alpine's OpenSSL 3.5 (needs docker and the network). 32-bit targets are not
+tested. Changes between releases are in
 `docs/CHANGELOG.md`.
 
 ## License

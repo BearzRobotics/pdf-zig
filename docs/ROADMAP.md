@@ -21,8 +21,10 @@ in `docs/architecture.md`, "Not supported". What the viewer must do is in
 - **Order:** the maintainer's priorities. The survey may change the order within them.
 - **Each stage ends in something usable**, and can be released on its own.
 - **Each large item gets a short design in `docs/decisions/` before code**, as 0003 did.
-- **Done** means: tests taken from the standard, the existing tests in every build mode and
-  on x86-linux, comparison with Poppler and MuPDF on real files, fuzzing, and updated docs.
+- **Done** means: tests taken from the standard, the existing tests in every build mode, on
+  the development machine and on musl (`scripts/test-musl.sh`; the maintainer's decision,
+  2026-11-28, replacing x86-linux: their distribution is 64-bit and uses musl),
+  comparison with Poppler and MuPDF on real files, fuzzing, and updated docs.
   Real files matter: they found a crash in 0.4.0's form copying that no test had.
 - **Viewer work** marks items that pdf-zig cannot finish alone. It draws nothing, so a
   new kind of drawing command shows only once the DKDE viewer draws it.
@@ -105,8 +107,8 @@ attachments into new documents.
 ## Stage 3: signatures
 
 Design: `docs/decisions/0006-signatures.md` (accepted). **Progress:** S1 is done and released
-in 0.7.0; 0006 records how it was checked. In S2, the verifier interface is built; the
-OpenSSL module is next.
+in 0.7.0; 0006 records how it was checked. S2 is built (the verifier interface and
+`pdf_openssl`) but **not ready until someone else has reviewed it**.
 
 | Step | Size | Notes |
 |---|---|---|

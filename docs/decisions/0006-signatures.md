@@ -187,6 +187,39 @@ accepts, and each of six safeguards was removed in turn to see a test fail. **St
 come with `pdf_openssl`:** the shared files that every backend must answer correctly
 (signed, altered, malformed, several signers, BER).
 
+### pdf_openssl as built
+
+Built with `-Dopenssl=true` from translated headers (agreed with the maintainer). How it
+works is in `docs/architecture.md`. CAdES and RFC 3161 time stamps, which the proposal
+did not exclude, are left as "not checked".
+
+**Checked (2026-11-28), with OpenSSL 3.5.5 on x86-64:**
+
+- 14 signed files in `test/backend/`, made by `make_fixtures.py` with the `openssl`
+  command and throwaway keys: RSA, RSA-PSS, ECDSA, SHA-1, a short key, BER with
+  indefinite lengths, no signed attributes, both formats, and refusals (two signers, no
+  certificate, content inside the value). Changed signed bytes and signatures come out
+  altered. Seven safeguards were removed one at a time, and a test failed each time.
+- With the signed bytes supplied, 3.5.5 checked those and not content embedded in the
+  value. `openssl cms -stream` embeds the content, so it is not how the BER file is made:
+  the outer lengths of a detached value are rewritten.
+- Real files: of 19 signatures, the 16 `adbe.pkcs7.detached` with sound coverage are
+  intact (one with SHA-1 and a 1024-bit key), 1 has unsound coverage and 2 are
+  `adbe.x509.rsa_sha1`.
+- Poppler: `sigcheck.py` found no difference in the 21 integrity answers it could compare.
+  Poppler accepts two signers, which this module does not.
+- Valgrind: no error and no definite or indirect leak, running `pdfsigs` on the files
+  above and the backend tests with their damaged values.
+- Fuzzing: 1,250 runs damaging only the values of 5 real signatures, no crash or hang.
+  Damage outside what is signed can leave a signature intact.
+
+- musl: `scripts/test-musl.sh` passes, the core and this module in all four build modes,
+  with musl 1.2.5 and OpenSSL 3.5.9 (Alpine 3.22). The real files, Poppler comparison,
+  Valgrind and fuzzing above were on glibc only.
+
+**Not done:** review by someone other than the author, which this record requires before
+S2 is called ready. Nothing 32-bit is tested with this module. No MuPDF comparison.
+
 ## S1 as built
 
 Implemented in `src/signature.zig`; how it works is in `docs/architecture.md`,

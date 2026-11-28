@@ -3,8 +3,11 @@
 ## Unreleased
 
 - New module `verify` (**experimental**): `verify.check` asks a `verify.Verifier` that the
-  program supplies whether a signature's signed bytes are unaltered. **No verifier is
-  included yet.**
+  program supplies whether a signature's signed bytes are unaltered. **It does not say who
+  signed.**
+- New optional module `pdf_openssl`, built with `-Dopenssl=true`: such a verifier on
+  OpenSSL 3.5 or later, for `adbe.pkcs7.detached` and `adbe.pkcs7.sha1`. Built that way,
+  `pdfsigs` shows each signature's integrity. Without the option nothing changes.
 
 ## 0.7.0 (2026-11-28)
 
