@@ -212,7 +212,7 @@ keeps what 0003 lists.
 | Release | Contents |
 |---|---|
 | 0.5.0 | Stage 0 and stage 1: survey and forms |
-| 0.6.0 | Stage 2: creating documents |
+| 0.6.0 | Stage 2: creating documents (released; carrying information over is still open) |
 | 0.7.0 | Stage 3: signatures (listing and verification) |
 | 0.8.0 | Stage 4: scans |
 | later | The rest, as it comes |

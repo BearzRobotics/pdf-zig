@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-11-27)
 
 - Drawn text can use an embedded TrueType font: new `truetype.Font` and
   `draw.Font.embedded`, with `canvas.glyphs` for shaped text. Fonts are subset, honour

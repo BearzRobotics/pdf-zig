@@ -181,7 +181,9 @@ far (the total difference over them fell by about 4%). In stream order 135 moved
 9 further and 4 stayed as far, but the total rose by about 2%, mostly from two files with
 heavily overlapping text. 0.3.1 extracts the same text as 0.3.0 from all of them, and
 0.4.0 the same as 0.3.1. 0.5.0 differs from 0.4.0 on one of them, by the 59 more words it
-extracts from annotations it now draws; five draw more, for the same reason. In a separate sample, 273 copies with annotations added by the
+extracts from annotations it now draws; five draw more, for the same reason. 0.6.0 extracts
+the same text as 0.5.0 from all of them, with the same page counts, page errors and numbers
+of drawing commands. In a separate sample, 273 copies with annotations added by the
 library showed no new errors when Poppler and MuPDF drew their first page. These are
 comparisons on one set of files, not a conformance claim. The scripts in `test/tools/`
 compare with `pdftotext` and `pdfinfo`.
